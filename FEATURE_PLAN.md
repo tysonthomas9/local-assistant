@@ -1,6 +1,6 @@
 # Plan: calculator, lists, privacy mute, wake word, persona switcher, storyteller
 
-Planned 2026-09-19 by a Fable planning agent (read-only, grounded in the code), spot-checked by Claude. Status: **all six built and tested offline (2026-09-19); live robot checks pending** — details in LOCAL_CONVERSATION.md. Paths are relative to `~/codebase/robots`. "App" = `reachy_mini_conversation_app/src/reachy_mini_conversation_app/`, "S2S" = `third_party/speech-to-speech/src/speech_to_speech/`.
+Planned 2026-09-19 by a Fable planning agent (read-only, grounded in the code), spot-checked by Claude. Status: **all six built, tested offline and reviewed twice by Fable (2026-09-19); live checks of the muted pose, persona voices and sound levels pending** — details in LOCAL_CONVERSATION.md. Paths are relative to `~/codebase/robots`. "App" = `reachy_mini_conversation_app/src/reachy_mini_conversation_app/`, "S2S" = `third_party/speech-to-speech/src/speech_to_speech/`.
 
 **Verified before writing this doc:**
 - Mute drops mic frames before they're sent (App `console.py:881`: `if audio_frame is not None and not self._mic_muted`).

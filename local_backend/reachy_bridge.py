@@ -12,7 +12,8 @@ book reading and persona switching need the live conversation stream. run_app.py
 It also wraps the SDK's MediaManager.push_audio_sample to keep a playback clock:
 `audio_seconds_left()` estimates how much already-sent speech is still waiting to be played
 (pushed audio is played in real time; a barge-in flush resets it). The book reader uses it to
-send the next passage just before the current one runs out, without piling up audio.
+wait until a passage has finished playing before its pause and the next passage; the wake gate
+uses it to start the follow-up window when a reply has finished playing.
 
 This module is imported normally (not re-executed on profile reloads like tool files), so its
 state survives persona switches. Subscribers are called on the app's event loop and must be quick.

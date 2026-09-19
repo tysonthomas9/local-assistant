@@ -590,6 +590,11 @@ def test_book_parsing(monkeypatch):
     number = lambda h: rr._heading_number(rr._HEADING.match(h).group(2)) if rr._HEADING.match(h) else None
     assert [number(h) for h in ("CHAPTER XI. Who Stole the Tarts?", "Chapter 12", "BOOK ONE", "Chapter the First",
                                 "Chapter Mix", "Chapter IIII", "Part of the reason")] == [11, 12, 1, 1, None, None, None]
+    # number words followed by an ordinary sentence aren't headings; compound number words are
+    assert [number(h) for h in ("Book one was better than book two.", "Part one of the plan was simple.",
+                                "Letter one arrived on Monday", "Chapter 3 of the manual says so.",
+                                "Chapter Twenty-One", "CHAPTER THIRTY-TWO. The End", "Chapter Twenty-Ten")] == \
+        [None, None, None, None, 21, 32, None]
 
 
 def test_book_find_and_bookmarks(tmp_path, monkeypatch):
@@ -623,16 +628,95 @@ def test_reader_pauses_when_a_passage_never_arrives(tmp_path, monkeypatch):
                 sent.append(kw)   # swallowed: no transcript ever comes back
         bridge._stream = types.SimpleNamespace(handler=Handler(), _asyncio_loop=asyncio.get_running_loop(), _mic_muted=False)
         book = rr.parse(FIXTURES / "books" / "alice_excerpt.txt")
-        bridge.publish("assistant_transcript_done")
         rr.READER.start(book, 2)
         await asyncio.sleep(0.3)
         bridge.publish("assistant_transcript_done")   # the tool's confirmation finished
-        await asyncio.sleep(1.5)
+        for _ in range(100):                          # timeout 0.5 s after the send; allow a loaded machine
+            if not rr.READER.reading:
+                break
+            await asyncio.sleep(0.1)
         return book
 
     book = asyncio.run(scenario())
     assert len(sent) == 1, "only the first passage should have been sent"
     assert rr.READER.reading is False and rr.bookmark(book.key) == 2, "bookmark must stay on the unread passage"
+
+
+def test_reader_waits_for_the_conversation_and_pauses_on_wake_word(tmp_path, monkeypatch):
+    """Never queue a passage behind an active reply; "Hey Jarvis" in the pause stops the next passage;
+    stop_now only cancels a passage that is really active on the server (else it would cut the model's reply)."""
+    import importlib
+    import sys
+    import types
+    monkeypatch.setenv("REACHY_BOOKMARKS_FILE", str(tmp_path / "marks.json"))
+    monkeypatch.syspath_prepend(str(ROOT / "local_backend"))
+    for m in ("reachy_bridge", "reachy_reader"):
+        sys.modules.pop(m, None)
+    bridge = importlib.import_module("reachy_bridge")
+    rr = importlib.import_module("reachy_reader")
+    rr.GEN_TIMEOUT_S, rr.GAP_S, rr.LEAD_S = 5, 1.0, 0.0
+    sent, cancels = [], []
+
+    async def until(cond, timeout=5.0):
+        for _ in range(int(timeout / 0.05)):
+            if cond():
+                return True
+            await asyncio.sleep(0.05)
+        return False
+
+    async def scenario():
+        async def cancel():
+            cancels.append(1)
+
+        class Handler:
+            def __init__(self):
+                self._response_done_event = asyncio.Event()   # clear: the model is still answering
+                self._pending_responses = asyncio.Queue()
+                self.connection = types.SimpleNamespace(response=types.SimpleNamespace(cancel=cancel))
+
+            async def _safe_response_create(self, **kw):
+                sent.append(kw)
+        h = Handler()
+        bridge._stream = types.SimpleNamespace(handler=h, _asyncio_loop=asyncio.get_running_loop(), _mic_muted=False,
+                                               clear_audio_queue=lambda: None)
+        book = rr.parse(FIXTURES / "books" / "alice_excerpt.txt")
+        out = {}
+        rr.READER.start(book, 0)
+        await asyncio.sleep(0.1)
+        bridge.publish("assistant_transcript_done")    # the tool's confirmation finished...
+        await asyncio.sleep(1.0)
+        out["sent_while_busy"] = len(sent)             # ...but its response is still active
+        h._response_done_event.set()
+        out["sent_when_idle"] = await until(lambda: len(sent) == 1)
+        bridge.publish("response_created")
+        out["inflight"] = await until(lambda: rr.READER._inflight)
+        bridge.publish("assistant_transcript_done")    # passage 0 read; the pause begins
+        await asyncio.sleep(0.3)
+        bridge.publish("wake_word")                    # "Hey Jarvis" in the pause
+        out["paused"] = await until(lambda: not rr.READER.reading)
+        await asyncio.sleep(1.2)                       # past the end of the pause
+        out.update(sent_after_wake=len(sent), mark=rr.bookmark(book.key))
+
+        for label, created in (("cancels_not_inflight", False), ("cancels_inflight", True)):
+            rr.READER.start(book, 1)
+            await asyncio.sleep(0.1)
+            bridge.publish("assistant_transcript_done")
+            n = len(sent)
+            await until(lambda: len(sent) > n)
+            if created:
+                bridge.publish("response_created")
+                await until(lambda: rr.READER._inflight)
+            await rr.READER.stop_now()
+            out[label] = len(cancels)
+        return out
+
+    r = asyncio.run(scenario())
+    assert r["sent_while_busy"] == 0, "a passage must not be queued behind an active reply"
+    assert r["sent_when_idle"] and r["inflight"]
+    assert r["paused"] and r["sent_after_wake"] == 1, "wake word in the pause must stop the next passage"
+    assert r["mark"] == 1, "passage 0 was heard in full: resume with the next one"
+    assert r["cancels_not_inflight"] == 0, "no passage active on the server: don't cancel the model's reply"
+    assert r["cancels_inflight"] == 1
 
 
 @pytest.mark.online
@@ -710,15 +794,17 @@ def test_lists_removal_priority_and_names(tmp_path):
     r = _run_tools("""
 import reachy_lists as rl
 rl.add('shopping', ['vegan eggs', 'eggs', 'eggplant', 'milk'])
-out = [rl.list_key('my shopping list'), rl.list_key('The to do list'),
+out = [rl.list_key('my shopping list'), rl.list_key('The to do list'), rl.list_key('my list'),
        rl.remove('shopping', 'egg')[1], rl.remove('shopping', 'vegan')[1], rl.remove('shopping', 'plant')[1], rl.read('shopping')[1]]
+rl.add('shopping', ['tomato']); out.append(rl.remove('shopping', 'tomatoes')[1])
 open(rl.STATE_FILE, 'w').write('{broken')
 out.append(rl.lists())
 print(json.dumps(out))
 """, REACHY_LISTS_FILE=str(tmp_path / "lists.json"))
-    assert r[:2] == ["shopping", "todo"]
-    assert r[2:6] == [["eggs"], ["vegan eggs"], ["eggplant"], ["milk"]]
-    assert r[6] == {} and any(p.name.startswith("lists.corrupt") for p in tmp_path.iterdir()), "corrupt file backed up"
+    assert r[:3] == ["shopping", "todo", "notes"]
+    assert r[3:7] == [["eggs"], ["vegan eggs"], ["eggplant"], ["milk"]]
+    assert r[7] == ["tomato"], "plural 'tomatoes' removes 'tomato'"
+    assert r[8] == {} and any(p.name.startswith("lists.corrupt") for p in tmp_path.iterdir()), "corrupt file backed up"
 
 
 def test_mute_state_follows_the_ui_toggle():
@@ -739,6 +825,29 @@ print(json.dumps(out))
     assert r["hard_before"] is True
     assert r["after_ui_unmute"] == {"listening": True, "muted": False}
     assert r["hard_after_ui_mute"] is False and "resumes_at" not in r["status_ui_mute"]
+
+
+def test_mute_survives_the_per_frame_sync():
+    """With --wake, every mic frame calls is_hard_muted() -> _sync_with_mic(). A frame landing between mute()
+    recording its state and flipping the mic used to look like a UI un-mute and drop the hard flag and timer.
+    Force a frame into exactly that moment: it must wait for mute() to finish."""
+    r = _run_tools("""
+import threading, time, types
+import reachy_bridge as b; b.install()
+import reachy_listening as rl
+from reachy_mini_conversation_app.console import LocalStream
+s = LocalStream(types.SimpleNamespace(output_queue=asyncio.Queue()), types.SimpleNamespace(media=types.SimpleNamespace(audio=None)))
+real_set = b.set_mic_muted
+def set_mic_muted(muted):
+    if muted:   # a mic frame arrives right before the flag flips
+        t = threading.Thread(target=rl.is_hard_muted); t.start(); t.join(0.2)
+    return real_set(muted)
+b.set_mic_muted = set_mic_muted
+rl.mute(30, hard=True)
+time.sleep(0.3)
+print(json.dumps(rl.status()))
+""")
+    assert r["muted"] is True and r["hard"] is True and r["minutes_left"] == 30, r
 
 
 def test_bridge_playback_clock_survives_odd_frames():
@@ -1165,7 +1274,7 @@ def test_book_reader_reads_verbatim_paces_and_pauses(tmp_path, monkeypatch):
             await asyncio.sleep(0.2)
         bridge.publish("interrupted")
         await asyncio.sleep(1.0)
-        playing = rr.READER.pos   # the reader never advances past an interrupted passage
+        playing = rr.READER.pos   # the passage that was cut off (or the next one, if it came in the pause)
         paused = {"reading": rr.READER.reading, "mark": rr.bookmark(book.key)}
         pump.cancel()
         await ws.close()

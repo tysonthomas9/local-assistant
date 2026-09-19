@@ -695,3 +695,35 @@ So the reader uses the robot's own voice, word for word, and the Piper fallback 
 | live | Bare wake word; follow-up window too short | Profile rule: a bare wake word gets "Yes?". The follow-up window is counted from the end of *playback* (+10 s). Near-miss wake scores (0.2–0.5) are logged. |
 
 **Tests:** 95 passed without the speech-server group, and every tool-choice check was 8/8. Then 5/5 realtime tests with the app stopped: reader passages matched 1.0, max buffered 9.2 s.
+
+### Echo-cancellation channel experiment and the third Fable review (2026-09-19, 10:31–10:50)
+
+**Question:** can "Hey Jarvis" be heard while the robot reads, if we listen to the audio board's *unsuppressed* echo-cancelled signal instead of its processed output? The XVF3800 can route the linear AEC residual (category 7) to one USB channel: `audio_control_utils.py AUDIO_MGR_OP_R --values 7 0` (default `8 0` = processed; not saved, so a power cycle resets it too).
+
+**Test:** right channel set to 7, 45 s stereo recording while the robot played a cue and a 40 s passage, and the user said "Hey Jarvis, stop" three times. Scored offline with the same openWakeWord model:
+
+| | Channel 0 (processed; what the app uses) | Channel 1 (AEC residual) |
+| --- | --- | --- |
+| User's "Hey Jarvis" during reading | **1.00 (detected)** at 23.3 s; near miss 0.42 at 27.8 s | 0.37 / 0.38 near misses only |
+| Robot's own "Hey Jarvis" (in the cue) | ignored | 0.36 (echo leaks through) |
+| Level during reading | -25.8 dBFS | -34.8 dBFS |
+
+**Result:** the residual channel is worse on both counts, so there is no second detector on it; the board is back to `8 0`. The processed channel *does* let a clear "Hey Jarvis" through during playback (1 of 3 tries); the live app detected it at 10:33:20. The words after it came out as "See that oh.", so "stop" itself was lost. Next idea (not built): on a wake detection while the robot is speaking, stop playback at once instead of relying on the transcribed "stop".
+
+**Wake threshold:** a later "Hey Jarvis" scored 0.48 and was ignored, so the default is now 0.4 (`REACHY_WAKE_THRESHOLD` overrides it).
+
+**Third review (Fable, of e11dbe6):** 14 of the 17 earlier findings fixed, 2 partial (4, 17), 1 documented only (8). New findings and fixes:
+
+| # | Finding | Fix |
+| --- | --- | --- |
+| 1 | "Hey Jarvis, stop" in the pause was racy: the server hears the user after the 1.5 s pause ends, so the next passage was queued behind the user's turn and read after "stop" | The reader pauses on the in-process `wake_word` event (it arrives before the pause ends), and only sends a passage when no in-band response is active or queued (`_response_done_event`, `_pending_responses`). An interruption in the pause after a passage resumes at the *next* passage. |
+| 2 | `mute()` flipped the mic after releasing its lock; a mic frame in between (every frame calls `_sync_with_mic` with `--wake`) looked like a UI un-mute and dropped the hard flag and timer | The mic flag is set, and read by `_sync_with_mic`, under the mute lock. The new test forces a frame into that moment; it fails on the old code. |
+| 3 | `stop_now` cancelled whichever response was active, usually the model's own reply that called the tool (cutting its "Okay" and its tool bookkeeping) | Only cancels when a passage is active on the server (sent, `response_created` seen, no transcript/interruption yet) |
+| 4 | "Book one was better than…", "Part one of the plan…" became chapters; "Twenty-One" parsed as 20 | A heading's title must start with a capital or punctuation; compound number words (twenty-one … ninety-nine) parse |
+| 5 | Follow-up window assumes the playback clock runs ahead of real time | Not changed (needs a live check) |
+| 6 | `save_mark` file I/O under the reader lock | Not changed (milliseconds, no deadlock) |
+| 7 | The reader timeout test had ~0.7 s of slack | Polls up to 10 s instead; dead `publish` removed |
+| 8 | `list_key("my list")` → "list"; "tomatoes" didn't remove "tomato" | "my list" → the default list (notes); `-es` plurals match |
+| 17 | Docstrings still said ~150-word passages and "just before the current one runs out" | Updated (reader, bridge) |
+
+**Tests:** 35 offline tests pass (LLM and realtime groups not re-run: no prompt changes, and the live app holds the speech server).

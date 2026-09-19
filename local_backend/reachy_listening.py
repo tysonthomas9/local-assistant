@@ -107,7 +107,9 @@ def mute(minutes: float | None, hard: bool, mm: Any = None) -> dict[str, Any]:
         _state["until"] = time.time() + minutes * 60 if minutes else None
         _state["by_us"] = True
         _state["wake"] = wake = threading.Event()
-    reachy_bridge.set_mic_muted(True)
+        # flip the mic under the same lock: _sync_with_mic (every mic frame with --wake) must never see our
+        # state without the mic muted, or it would take it for a UI un-mute and drop the timer/hard flag
+        reachy_bridge.set_mic_muted(True)
     if minutes:
         threading.Thread(target=_auto_resume, args=(gen, minutes * 60, mm, wake), daemon=True, name="mute-timer").start()
     if mm is not None:
@@ -125,8 +127,8 @@ def _supersede() -> None:
 
 def _sync_with_mic() -> None:
     """The web UI's mic toggle sets _mic_muted directly; reconcile our state with it."""
-    muted = reachy_bridge.mic_muted()
     with _lock:
+        muted = reachy_bridge.mic_muted()
         if not muted and (_state["by_us"] or _state["hard"] or _state["until"]):
             _supersede()   # un-muted from the UI: forget our mute (timer, hard flag)
             _state.update(until=None, hard=False, by_us=False)
@@ -138,7 +140,7 @@ def resume(mm: Any = None, reason: str = "asked") -> dict[str, Any]:
     with _lock:
         _supersede()
         _state["until"], _state["hard"], _state["by_us"] = None, False, False
-    reachy_bridge.set_mic_muted(False)
+        reachy_bridge.set_mic_muted(False)
     return {**status(), "resumed_by": reason}
 
 

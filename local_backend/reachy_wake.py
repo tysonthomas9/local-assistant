@@ -19,7 +19,7 @@ Near misses (scores between NEAR_MISS and the threshold) are logged, to tell "no
 "heard but under the threshold" when tuning.
 
 Settings: REACHY_WAKE_WORD (hey_jarvis | hey_mycroft | hey_marvin | alexa, or a path to a custom
-.onnx model), REACHY_WAKE_THRESHOLD (0.5), REACHY_WAKE_WINDOW_S (8), REACHY_WAKE_FOLLOWUP_S (10).
+.onnx model), REACHY_WAKE_THRESHOLD (0.4; a clear "Hey Jarvis" scored 0.48 live), REACHY_WAKE_WINDOW_S (8), REACHY_WAKE_FOLLOWUP_S (10).
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ def install() -> None:
     word = os.environ.get("REACHY_WAKE_WORD", "").strip()
     if not word:
         return
-    GATE = Gate(Detector(word, float(os.environ.get("REACHY_WAKE_THRESHOLD", 0.5))),
+    GATE = Gate(Detector(word, float(os.environ.get("REACHY_WAKE_THRESHOLD", 0.4))),
                 window_s=float(os.environ.get("REACHY_WAKE_WINDOW_S", 8)),
                 followup_s=float(os.environ.get("REACHY_WAKE_FOLLOWUP_S", 10)))
     reachy_bridge.subscribe(GATE.on_activity)

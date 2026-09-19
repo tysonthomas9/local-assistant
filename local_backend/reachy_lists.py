@@ -24,7 +24,7 @@ def list_key(name: str) -> str:
     n = " ".join((name or "").strip().lower().split())
     n = re.sub(r"^(my|the|our)\s+", "", n)
     n = _ALIASES.get(n, n)
-    n = re.sub(r"\s+list$", "", n)
+    n = re.sub(r"(^|\s+)list$", "", n)             # "my list" -> "" -> the default list
     return _ALIASES.get(n, n) or "notes"
 
 
@@ -70,8 +70,9 @@ def remove(name: str, words: str) -> tuple[str, list[str]]:
     with _lock:
         data = _load()
         lst = data.get(key, [])
-        exact = [x for x in lst if w and x.lower() in (w, w + "s", w + "es", w.rstrip("s"))]
-        whole = [x for x in lst if w and re.search(rf"\b{re.escape(w)}s?\b", x.lower())]
+        forms = {w, w + "s", w + "es", w.rstrip("s")} | ({w[:-2]} if w.endswith("es") else set())
+        exact = [x for x in lst if w and x.lower() in forms]
+        whole = [x for x in lst if w and re.search(rf"\b{re.escape(w)}(?:e?s)?\b", x.lower())]
         gone = exact or whole or [x for x in lst if w and w in x.lower()]
         data[key] = [x for x in lst if x not in gone]
         if not data[key]:

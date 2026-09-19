@@ -2,7 +2,7 @@
 
 Library: local_backend/books/*.txt (UTF-8). Project Gutenberg texts are cleaned (licence header and
 footer removed), chapter headings are detected ("CHAPTER IV. ..." -> "Chapter 4. ..."; a table of
-contents is skipped because its lines don't stand alone), and the text is split into ~150-word
+contents is skipped because its lines don't stand alone), and the text is split into ~110-word
 passages on sentence boundaries. Bookmarks live in local_backend/state/books.json.
 
 Reading: each passage is sent as an *out-of-band* response (`conversation: "none"`) through the
@@ -10,8 +10,10 @@ app's own response queue, with instructions to read it word for word. Measured o
 error rate 0.000 on a 148-word Alice passage, first audio 0.6 s, and the passage stays out of the
 conversation history. Out-of-band responses also skip the speech server's "tool result pending"
 check, so reading doesn't block the conversation. Pacing uses the bridge's playback clock. Any
-barge-in ("interrupted" / user speech) pauses the reader; the bookmark then points at the passage
-that was playing, which is re-read on resume.
+barge-in ("interrupted" / user speech / an in-process "Hey Jarvis" detection) pauses the reader; the
+bookmark then points at the passage that was playing, which is re-read on resume (or at the next one,
+if the interruption came in the pause after a passage). A passage is only
+sent when no in-band response is active or queued, so it can never be queued behind the user's turn.
 
 Pauses between passages: measured live, the robot's audio board suppresses the microphone while the
 robot speaks (mic level -39.9 dBFS during playback vs -35.1 in a quiet room: its echo cancellation
@@ -19,7 +21,8 @@ removes the robot's own voice, but also the user's). With back-to-back passages 
 be heard, so "Hey Jarvis, stop" failed. The reader therefore waits until a passage has finished
 playing, then pauses GAP_S (plus ~0.6 s until the next passage's first audio) before continuing; the
 user can speak in those pauses. Stopping via the tool cancels the passage on the speech server and
-flushes local audio, so reading stops at once.
+flushes local audio if a passage is still active there (otherwise the cancel would hit the model's
+own reply).
 
 Downloads (web profile): Gutenberg's own OPDS search feed + /ebooks/<id>.txt.utf-8.
 """
@@ -61,11 +64,14 @@ ATOM = "{http://www.w3.org/2005/Atom}"
 _ROMAN = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
 _ROMAN_OK = re.compile(r"^m{0,4}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$", re.I)
 _NUMBER_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
-                 "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"]
+                 "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+_TENS = ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
 _ORDINALS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
 # "CHAPTER IV.", "Chapter 12", "BOOK ONE", "Chapter the First", optionally followed by a title. The number must be a
-# real number (valid roman numeral, digits or a number word), so "Part of the reason..." or "Chapter Mix" don't match.
-_HEADING = re.compile(r"^(chapter|book|part|stave|letter)\s+(?:the\s+)?([ivxlcdm]+|\d+|[a-z]+)\b\.?:?\s*(.{0,80})$", re.I)
+# real number (valid roman numeral, digits or a number word), so "Part of the reason..." or "Chapter Mix" don't match,
+# and a title after it starts with a capital (or punctuation), so "Book one was better than..." isn't a heading.
+_HEADING = re.compile(r"^(chapter|book|part|stave|letter)\s+(?:the\s+)?([ivxlcdm]+|\d+|[a-z]+(?:-[a-z]+)?)\b\.?:?\s*"
+                      r"(|(?-i:[^a-z\s]).{0,79})$", re.I)
 
 
 def _roman(s: str) -> int | None:
@@ -85,6 +91,9 @@ def _heading_number(token: str) -> int | None:
         return int(t)
     if t in _NUMBER_WORDS:
         return _NUMBER_WORDS.index(t) + 1
+    tens, _, units = t.partition("-")               # "twenty", "Twenty-One"
+    if tens in _TENS and (not units or units in _NUMBER_WORDS[:9]):
+        return 20 + 10 * _TENS.index(tens) + (_NUMBER_WORDS.index(units) + 1 if units else 0)
     if t in _ORDINALS:
         return _ORDINALS.index(t) + 1
     return _roman(t) if token.isupper() else None   # headings write numerals in capitals ("Chapter IX"), not "Mix"
@@ -270,6 +279,7 @@ class Reader:
         self.book: Book | None = None
         self.pos = 0
         self.reading = False
+        self._inflight = False     # a passage response is active on the server (created, not yet done)
 
     def _send(self, text: str) -> None:
         s = reachy_bridge.stream()
@@ -297,9 +307,14 @@ class Reader:
         return was
 
     async def stop_now(self) -> bool:
-        """Stop from the app's event loop (the read_book tool): also cancel and flush the passage in progress."""
+        """Stop from the app's event loop (the read_book tool): also cancel and flush a passage in progress.
+
+        Only when a passage is really active on the server: the tool runs inside the model's own response, and
+        the server cancels whichever response is active, so an unconditional cancel would cut off the model's
+        "Okay" and drop its tool bookkeeping. (While a passage is active no in-band response can be.)"""
+        inflight = self._inflight
         was = self.stop()
-        if was:
+        if was and inflight:
             s = reachy_bridge.stream()
             try:
                 await s.handler.connection.response.cancel()
@@ -315,11 +330,28 @@ class Reader:
         interrupted = threading.Event()
         transcript_done = threading.Event()
 
+        sent = threading.Event()
+
         def on_event(reason: str) -> None:
-            if reason in ("interrupted", "user_speech_started"):
+            # "wake_word" is detected in-process, before the speech server has even heard the user, so it
+            # pauses the reader before the next passage can be queued behind the user's turn.
+            if reason in ("interrupted", "user_speech_started", "wake_word"):
+                self._inflight = False
                 interrupted.set()
+            elif reason == "response_created" and sent.is_set():
+                self._inflight = True
             elif reason == "assistant_transcript_done":
+                self._inflight = False
+                sent.clear()
                 transcript_done.set()
+
+        def conversation_idle() -> bool:
+            """No in-band response active or queued (the app sends queued responses one at a time)."""
+            h = getattr(reachy_bridge.stream(), "handler", None)
+            try:
+                return h._response_done_event.is_set() and h._pending_responses.empty()
+            except AttributeError:
+                return True
 
         # Let the tool's spoken confirmation finish first.
         reachy_bridge.wait_for({"assistant_transcript_done"}, 8)
@@ -337,7 +369,18 @@ class Reader:
                             save_mark(book.key, -1)   # finished: next time starts over
                     logger.info("Finished reading %s", book.title)
                     break
+                t0 = time.monotonic()
+                while not conversation_idle() and not interrupted.is_set() and gen == self._gen:
+                    if time.monotonic() - t0 > GEN_TIMEOUT_S:
+                        logger.warning("Conversation busy for %d s; pausing", GEN_TIMEOUT_S)
+                        interrupted.set()
+                    time.sleep(0.1)
+                if interrupted.is_set() or gen != self._gen:
+                    if gen == self._gen:
+                        logger.info("Reading paused at passage %d of %s", pos, book.key)
+                    break                     # the bookmark already points at this unsent passage
                 transcript_done.clear()
+                sent.set()
                 self._send(book.chunks[pos])
                 t0 = time.monotonic()
                 while not transcript_done.is_set() and not interrupted.is_set() and gen == self._gen:
@@ -350,15 +393,19 @@ class Reader:
                 while (not interrupted.is_set() and gen == self._gen
                        and reachy_bridge.audio_seconds_left() > LEAD_S):
                     time.sleep(0.2)
-                if not interrupted.is_set() and gen == self._gen:
+                played = not interrupted.is_set() and gen == self._gen
+                if played:
                     interrupted.wait(GAP_S)   # a pause the user can speak into (see module docstring)
                 if gen != self._gen:
                     break                     # stopped or restarted: stop()/start() own the bookmark
                 if interrupted.is_set():
+                    # cut off mid-passage: re-read it on resume; interrupted in the pause after it: go on from the next
+                    resume_at = pos + 1 if played else pos
                     with self._lock:
                         if gen == self._gen:
-                            save_mark(book.key, pos)  # re-read the passage that was playing
-                    logger.info("Reading paused at passage %d of %s", pos, book.key)
+                            self.pos = resume_at
+                            save_mark(book.key, resume_at)
+                    logger.info("Reading paused at passage %d of %s", resume_at, book.key)
                     break
                 with self._lock:
                     if gen != self._gen:
@@ -369,7 +416,7 @@ class Reader:
             unsubscribe()
             with self._lock:
                 if gen == self._gen:
-                    self.reading = False
+                    self.reading = self._inflight = False
 
     def status(self) -> dict[str, Any]:
         with self._lock:
