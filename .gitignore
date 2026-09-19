@@ -17,3 +17,6 @@ local_backend/logs/
 local_backend/tests/fixtures/camera_frame.jpg
 local_backend/tests/fixtures/stt/
 local_backend/searxng/
+
+# Runtime state (your reminders)
+local_backend/state/

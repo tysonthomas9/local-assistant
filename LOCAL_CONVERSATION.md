@@ -49,6 +49,8 @@ cd local_backend && ../third_party/speech-to-speech/.venv/bin/python -m pytest -
 | **Daemon: dataset preload/update** (emotions + dances) at start and every 24 h | Found by the audit; cached, and `--dataset-update-interval 0` |
 | Daemon: TURN credentials from HF | Only when an HF token is configured (none here) |
 | App web UI and daemon WebRTC signalling listened on 0.0.0.0 (LAN could change settings / request camera+mic) | Bound to 127.0.0.1 by `run_app.py` / `run_daemon.py` |
+| Reminders and timers (both profiles) | Local only: the scheduler thread calls the app's own `conversation.say` on 127.0.0.1:7860 |
+| **Opt-in online radio** (`--web` only) | `play_radio` → station lookup on radio-browser.info, then the station's audio stream |
 | **Opt-in online tools** (`--web` only) | `get_weather` → Open-Meteo (place name + coordinates); `web_search` → local SearXNG, which queries public engines; `tech_news` → Hacker News, Ars Technica and The Verge RSS. Speech, the LLM, the camera and the conversation itself stay on this PC. The default `--local` profile has none of these. |
 
 ---
@@ -453,4 +455,34 @@ You asked for these after the fully local work, so they're **opt-in**. The offli
 - **Tools called directly:** Paris 59°F overcast (high 77°F); "San Jose, California" → San Jose, California, US; no place / nonsense place → clear errors; the search returned Pollen's product page; news returned headlines from all three feeds, and The Verge alone when filtered.
 - **New tests** (8): the profile diff; the live tool check (`-m online`); and tool choice on 6 prompts × 8 runs with the web profile's prompt and all 20 tools. **All 8/8**: get_weather (Tokyo weather; rain in Seattle), web_search (last F1 winner; Raspberry Pi 5 price), tech_news (tech news today; Hacker News).
 - **The rest of the suite** (services not running, since the daemon and speech server were stopped at 17:05): 28 passed.
+- **Not yet tried live with the robot.**
+
+
+### Scheduler (reminders, timers) and radio (2026-09-19)
+
+**Scheduler:** `set_reminder`, `list_reminders`, `cancel_reminder`. They're local, so they're in **both** profiles.
+- **Why not a tool that just sleeps until the due time:** the app sends a tool's result to the model only when the tool finishes, and the speech server refuses new responses while a result is pending ("Cannot create a response while function call outputs are pending", seen in phase 2). A sleeping reminder would freeze the conversation.
+- **How it works instead:** the tools return at once. A background thread in [`reachy_scheduler.py`](local_backend/reachy_scheduler.py) fires each reminder through the app's own JSON-RPC method `conversation.say` (WebSocket `ws://127.0.0.1:7860/rpc`, the same one its web UI uses; it exists only with `--ui`). The injected text is `(Reminder due now) <message>`. A profile rule tells the model to announce it, starting with "Reminder:".
+- **Time formats:** "in N minutes", or a clock time ("17:30", "5:30 pm", "9am", "noon"). A time already past today means tomorrow.
+- **Storage:** reminders are kept in `local_backend/state/reminders.json` (git-ignored), so they survive an app restart. After a restart, one up to an hour late is still announced ("it was due at 8:17 AM"); older ones are dropped and logged. Delivery is retried 3× at 5 s intervals if the app is busy or restarting.
+- **Missing UI warning:** if `/rpc` isn't reachable when a reminder is set (app started without `--ui`), the tool says so.
+
+**Radio:** `play_radio`, `stop_radio`, in `--web` only (they need the internet).
+- **How it plays:** [`reachy_radio.py`](local_backend/reachy_radio.py) looks up stations on radio-browser.info (free, no key; by name first, then by genre tag; MP3/AAC/OGG only; most popular first). It plays them with a GStreamer `playbin` inside the app, into the shared `reachymini_audio_sink` dmix, so the robot's voice mixes over the music.
+- **Volume and fallback:** default volume 30% (`REACHY_RADIO_VOLUME`). If a stream won't start within 8 s, it tries the next station, up to 3. A watcher thread cleans up if the stream drops.
+- **No spoken reply to stop:** `stop_radio` has `needs_response = False`, so "be quiet" doesn't get a spoken reply.
+- **Untested risk:** the microphone may pick up the music and start turns. The audio board's echo cancellation should remove its own output, but this hasn't been tested live yet.
+
+**Loader detail:** the app finds external tools by file name (`<tool_name>.py`) and re-runs those files when the profile changes. So each tool is its own small file, and the shared state (scheduler thread, radio player) lives in normally imported helper modules that are loaded once.
+
+**Tests** (39 passed, services not running):
+- **Direct tool runs:**
+  - Parsing: 7 good times, and 6 bad inputs rejected with clear messages.
+  - A reminder fired after 3 s into a fake `/rpc` server, which first sent a notification that was correctly ignored.
+  - Cancel by words; a 5-minute-late reminder is announced, a 2-hour-late one dropped.
+  - Radio: "jazz" → 101 Smooth Jazz, playing in 1.4 s (to a `fakesink`); stop, and a double stop; a nonsense name gives an error.
+- **The test suite now builds prompts from the profile files.** The captured request gives the app's wrapper around the profile text (`system_prefix`/`system_suffix` in the fixture), and tool schemas missing from the capture are loaded from `local_backend/tools`. Tests no longer go stale when a profile changes.
+- **New tests:** scheduler end to end; "announces a due reminder" (no tool call, mentions the reminder); radio play and stop (`-m online`); and tool choice.
+- **Tool choice, 8 runs each:** set_reminder 8/8 ×3 (in 10 minutes; 5-minute timer; at 6 pm), list_reminders 8/8, cancel 8/8 (listing first also counts), play_radio 8/8 ×2 (jazz; BBC Radio 1), stop_radio 8/8, and a timer in the web profile 8/8. The old checks: dance 7/8, all others 8/8.
+- The old `test_llm_does_not_promise_reminders` was retired, since reminders now exist.
 - **Not yet tried live with the robot.**

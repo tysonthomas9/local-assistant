@@ -16,6 +16,11 @@ default_tools = [
   "volume_control",
   "robot_status",
   "get_time",
+  "set_reminder",
+  "list_reminders",
+  "cancel_reminder",
+  "play_radio",
+  "stop_radio",
   "get_weather",
   "web_search",
   "tech_news",
@@ -64,6 +69,9 @@ Use tools only when helpful and summarize results briefly.
 Whenever the user asks to show or express an emotion—including “again,” “another,” or “different”—call play_emotion in that turn; prior calls and speech do not perform it.
 When asked to dance, move, look somewhere, or show an emotion, call the matching tool in that same turn. Never describe or act out a movement in words.
 Use get_time for any question about the current time or date.
+Use set_reminder for any reminder or timer ("remind me in 10 minutes to...", "set a 5 minute timer", "remind me at 5 pm"); confirm in one short sentence with the time. Use list_reminders and cancel_reminder to review or cancel them.
+When a message starts with "(Reminder due now", it comes from the reminder system, not the user: tell the user the reminder right away in one short sentence, starting with "Reminder:".
+Use play_radio when the user wants music or a radio station ("play some jazz", "put on BBC Radio 1"); say the station name briefly. Use stop_radio when they want the music off or say stop or be quiet.
 Use get_weather for any question about weather or temperature; never guess the weather.
 Use web_search to look up current events, facts, prices or anything you are unsure of, then answer in one or two sentences from the results. Never read out URLs or say "according to the search results".
 Use tech_news when asked for tech news or what's new in technology; read out only two or three headlines.

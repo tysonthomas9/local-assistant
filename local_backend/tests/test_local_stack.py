@@ -75,11 +75,49 @@ def llm() -> OpenAI:
     return client
 
 
-def chat(llm: OpenAI, user_content, history=None, **kwargs):
-    messages = [{"role": "system", "content": APP_REQUEST["system"]}, *(history or []),
+_PROFILE_REQUESTS: dict = {}
+
+
+def profile_request(profile: str) -> dict:
+    """The system prompt and tools the app sends for `profile`, built from the current profile file.
+
+    The app wraps the profile body in its own template (captured once in the fixture as
+    system_prefix/system_suffix). Tool schemas come from the captured request where available
+    (core tools, plus the app's system tools task_status/task_cancel), else from local_backend/tools.
+    """
+    if profile in _PROFILE_REQUESTS:
+        return _PROFILE_REQUESTS[profile]
+    text = (ROOT / f"local_backend/profiles/{profile}/profile.md").read_text()
+    names = re.findall(r'"([a-z_]+)"', text.split("+++")[1].split("default_tools", 1)[1].split("]", 1)[0])
+    captured = {t["function"]["name"]: t for t in APP_REQUEST["tools"]}
+    missing = [n for n in names if n not in captured]
+    code = (
+        "import importlib.util, inspect, json, sys;"
+        "from reachy_mini_conversation_app.tools.core_tools import Tool;"
+        f"base = '{ROOT}/local_backend/tools/'; specs = {{}}"
+        "\nfor name in sys.argv[1:]:"
+        "\n    spec = importlib.util.spec_from_file_location(name, base + name + '.py'); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)"
+        "\n    cls = next(c for c in vars(m).values() if inspect.isclass(c) and issubclass(c, Tool) and c is not Tool and c.name == name)"
+        "\n    specs[name] = cls().spec()"
+        "\nprint(json.dumps(specs))"
+    )
+    env = {**os.environ, "REACHY_REMINDERS_FILE": "/tmp/reachy_test_reminders.json"}  # never touch real reminders
+    out = subprocess.run([str(APP_PYTHON), "-c", code, *missing], capture_output=True, text=True, check=True, env=env).stdout
+    loaded = json.loads(out.strip().splitlines()[-1])
+    to_chat = lambda sp: sp if "function" in sp else {"type": "function", "function": {k: v for k, v in sp.items() if k != "type"}}
+    tools = [captured[n] if n in captured else to_chat(loaded[n]) for n in names]
+    tools += [t for n, t in captured.items() if n not in names and n.startswith("task_")]  # added by the app itself
+    system = APP_REQUEST["system_prefix"] + text.split("+++", 2)[2].strip() + APP_REQUEST["system_suffix"]
+    _PROFILE_REQUESTS[profile] = {"system": system, "tools": tools, "names": names}
+    return _PROFILE_REQUESTS[profile]
+
+
+def chat(llm: OpenAI, user_content, history=None, profile="local_reachy", **kwargs):
+    req = profile_request(profile)
+    messages = [{"role": "system", "content": req["system"]}, *(history or []),
                 {"role": "user", "content": user_content}]
     t0 = time.time()
-    r = llm.chat.completions.create(model=MODEL, messages=messages, tools=APP_REQUEST["tools"],
+    r = llm.chat.completions.create(model=MODEL, messages=messages, tools=req["tools"],
                                     tool_choice="auto", max_tokens=300,
                                     extra_body={"reasoning_effort": "none"}, **kwargs)
     return r.choices[0].message, time.time() - t0
@@ -210,17 +248,23 @@ TOOL_CASES = [
     ("What time is it?", "get_time"),
     ("What do you see right now?", "camera"),
     ("Turn your speaker volume up, please.", "volume_control"),
+    ("Remind me in 10 minutes to check the oven.", "set_reminder"),
+    ("Set a timer for 5 minutes.", "set_reminder"),
+    ("Remind me at 6 pm to call my mom.", "set_reminder"),
+    ("What reminders do I have?", "list_reminders"),
+    ("Cancel my oven reminder.", ("cancel_reminder", "list_reminders")),  # listing first is also right
 ]
 
 
-@pytest.mark.parametrize("prompt,tool", TOOL_CASES, ids=[t for _, t in TOOL_CASES])
+@pytest.mark.parametrize("prompt,tool", TOOL_CASES, ids=[f"{t if isinstance(t, str) else t[0]}-{i}" for i, (_, t) in enumerate(TOOL_CASES)])
 def test_llm_calls_the_right_tool(llm, prompt, tool):
     results = []
     for _ in range(TOOL_RUNS):
         msg, dt = chat(llm, prompt)
         results.append(([tc.function.name for tc in (msg.tool_calls or [])], msg.content or "", round(dt, 2)))
-    hits = sum(tool in names for names, _, _ in results)
-    record("tool_call", tool=tool, hits=hits, runs=TOOL_RUNS, seconds=[r[2] for r in results])
+    ok = (tool,) if isinstance(tool, str) else tool
+    hits = sum(bool(set(ok) & set(names)) for names, _, _ in results)
+    record("tool_call", tool=ok[0], prompt=prompt, hits=hits, runs=TOOL_RUNS, seconds=[r[2] for r in results])
     assert hits >= TOOL_MIN_HITS, f"{tool}: {hits}/{TOOL_RUNS} -> {results}"
 
 
@@ -237,10 +281,60 @@ def test_llm_admits_it_is_offline(llm):
     assert re.search(r"offline|can't|cannot|don't have|unable|no access|not able", msg.content or "", re.I), msg.content
 
 
-def test_llm_does_not_promise_reminders(llm):
-    # qwen3.6 once replied "Sure! I'll remind you in ten minutes." with no tool that can do that.
-    msg, _ = chat(llm, "Set a reminder for ten minutes from now.")
-    assert not re.search(r"\bI('ll| will) remind you\b", msg.content or "", re.I), msg.content
+def test_llm_announces_due_reminder(llm):
+    # What reachy_scheduler injects through conversation.say when a reminder is due.
+    replies = [chat(llm, "(Reminder due now) take the pizza out of the oven")[0] for _ in range(3)]
+    for msg in replies:
+        assert not msg.tool_calls, msg
+        assert re.search(r"reminder", msg.content or "", re.I) and re.search(r"pizza|oven", msg.content or "", re.I), msg.content
+
+
+def test_scheduler_parses_times_and_delivers(tmp_path, monkeypatch):
+    """reachy_scheduler end to end against a fake /rpc: schedule, list, cancel, fire, overdue handling."""
+    import importlib
+    import sys
+    from datetime import datetime, timedelta
+    monkeypatch.setenv("REACHY_REMINDERS_FILE", str(tmp_path / "rem.json"))
+    monkeypatch.setenv("REACHY_APP_RPC_URL", "ws://127.0.0.1:18779/rpc")
+    monkeypatch.syspath_prepend(str(ROOT / "local_backend"))
+    sys.modules.pop("reachy_scheduler", None)
+    rs = importlib.import_module("reachy_scheduler")
+
+    ref = datetime(2026, 9, 19, 14, 0).astimezone()
+    assert rs.parse_due(None, "5:30 pm", ref=ref).strftime("%d %H:%M") == "19 17:30"
+    assert rs.parse_due(None, "9am", ref=ref).strftime("%d %H:%M") == "20 09:00"   # already past -> tomorrow
+    assert rs.parse_due(None, "noon", ref=ref).strftime("%d %H:%M") == "20 12:00"
+    for bad in [(None, "25:00"), (None, "13 pm"), (5, "5pm"), (None, None), (-3, None), (None, "later")]:
+        with pytest.raises(ValueError):
+            rs.parse_due(*bad, ref=ref)
+
+    said = []
+
+    async def fake_rpc(ws):
+        async for raw in ws:
+            req = json.loads(raw)
+            said.append(req["params"]["text"])
+            await ws.send(json.dumps({"jsonrpc": "2.0", "method": "conversation.level", "params": {}}))  # noise
+            await ws.send(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": {"ok": True}}))
+
+    async def scenario():
+        async with websockets.serve(fake_rpc, "127.0.0.1", 18779):
+            n = rs.now()
+            rs.SCHEDULER._items = [
+                {"id": "old001", "message": "water the plants", "due": (n - timedelta(hours=2)).isoformat(), "created": n.isoformat()},
+                {"id": "late01", "message": "stretch", "due": (n - timedelta(minutes=5)).isoformat(), "created": n.isoformat()},
+            ]
+            rs.SCHEDULER.add("check the oven", n + timedelta(seconds=2))
+            rs.SCHEDULER.add("call mom", n + timedelta(hours=3))
+            assert [x["message"] for x in rs.SCHEDULER.cancel("mom")] == ["call mom"]
+            await asyncio.sleep(6)
+
+    asyncio.run(scenario())
+    assert any(t.startswith("(Reminder due now, it was due at") and t.endswith("stretch") for t in said), said
+    assert "(Reminder due now) check the oven" in said, said
+    assert not any("plants" in t for t in said), "a 2-hour-old reminder should be dropped"
+    assert not any("mom" in t for t in said), "a cancelled reminder fired"
+    assert rs.SCHEDULER.pending() == []
 
 
 def test_llm_describes_camera_image(llm):
@@ -262,8 +356,7 @@ def test_llm_describes_camera_image(llm):
 
 # --- Online tools (local_reachy_web profile: --web) ----------------------------------------
 
-WEB_TOOLS = ("get_weather", "web_search", "tech_news")
-OFFLINE_RULE = "You run entirely offline on this computer: you cannot search the web or check the weather. If asked, say so in one short sentence.\n"
+WEB_TOOLS = ("get_weather", "web_search", "tech_news", "play_radio", "stop_radio")
 
 
 def web_profile_body() -> str:
@@ -282,25 +375,7 @@ def test_web_profile_adds_exactly_the_online_tools():
 
 @pytest.fixture(scope="session")
 def web_request():
-    """The app's captured system prompt and tools, turned into the web profile's (same edit as the profile)."""
-    code = (
-        "import importlib.util, json;"
-        "specs = [];"
-        f"base = '{ROOT}/local_backend/tools/';"
-        "\nfor name, cls in (('get_weather','GetWeather'),('web_search','WebSearch'),('tech_news','TechNews')):"
-        "\n    spec = importlib.util.spec_from_file_location(name, base + name + '.py'); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)"
-        "\n    specs.append(getattr(m, cls)().spec())"
-        "\nprint(json.dumps(specs))"
-    )
-    out = subprocess.run([str(APP_PYTHON), "-c", code], capture_output=True, text=True, check=True).stdout
-    specs = json.loads(out.strip().splitlines()[-1])
-    tools = APP_REQUEST["tools"] + [{"type": "function", "function": {k: v for k, v in sp.items() if k != "type"}}
-                                    if "function" not in sp else sp for sp in specs]
-    body = web_profile_body()
-    web_rules = body[body.index("Use get_weather"):body.index("## SPEECH RULES")]
-    assert OFFLINE_RULE in APP_REQUEST["system"]
-    system = APP_REQUEST["system"].replace(OFFLINE_RULE, web_rules.strip() + "\n")
-    return {"system": system, "tools": tools}
+    return profile_request("local_reachy_web")
 
 
 WEB_TOOL_CASES = [
@@ -310,6 +385,10 @@ WEB_TOOL_CASES = [
     ("Search the web for the price of a Raspberry Pi 5.", "web_search"),
     ("Any tech news today?", "tech_news"),
     ("What's on Hacker News right now?", "tech_news"),
+    ("Play some jazz.", "play_radio"),
+    ("Put on BBC Radio 1.", "play_radio"),
+    ("Stop the music, please.", "stop_radio"),
+    ("Set a timer for 3 minutes.", "set_reminder"),
 ]
 
 
@@ -348,6 +427,29 @@ def test_web_tools_return_data():
     assert len(news.get("headlines", [])) >= 2, news
 
 
+@pytest.mark.online
+def test_radio_plays_and_stops():
+    """Finds a jazz station and plays it into a fakesink (no sound), then stops it."""
+    code = (
+        "import asyncio, importlib.util, json;"
+        f"base = '{ROOT}/local_backend/tools/';"
+        "\ndef load(n, c):"
+        "\n    spec = importlib.util.spec_from_file_location(n, base + n + '.py'); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return getattr(m, c)()"
+        "\nasync def main():"
+        "\n    play, stop = load('play_radio','PlayRadio'), load('stop_radio','StopRadio')"
+        "\n    a = await play(None, query='jazz'); await asyncio.sleep(2); b = await stop(None); c = await stop(None)"
+        "\n    d = await play(None, query='zzqxnonexistentstation')"
+        "\n    return [a, b, c, d]"
+        "\nprint(json.dumps(asyncio.run(main())))"
+    )
+    env = {**os.environ, "REACHY_RADIO_SINK": "fakesink"}
+    out = subprocess.run([str(APP_PYTHON), "-c", code], capture_output=True, text=True, check=True, env=env).stdout
+    played, stopped, again, nonsense = json.loads(out.strip().splitlines()[-1])
+    assert played.get("playing"), played
+    assert stopped.get("stopped") == played["playing"], stopped
+    assert "note" in again and "error" in nonsense
+
+
 # --- Realtime server (the path the conversation app uses) ----------------------------------
 
 async def realtime_turns():
@@ -359,9 +461,10 @@ async def realtime_turns():
     if first.get("type") != "session.created":
         return f"unexpected first event {first}"
     try:
-        tools = [{"type": "function", **t["function"]} for t in APP_REQUEST["tools"]]
+        req = profile_request("local_reachy")
+        tools = [{"type": "function", **t["function"]} for t in req["tools"]]
         await ws.send(json.dumps({"type": "session.update", "session": {"type": "realtime",
-                      "instructions": APP_REQUEST["system"], "tools": tools, "audio": {"output": {"voice": "Aiden"}}}}))
+                      "instructions": req["system"], "tools": tools, "audio": {"output": {"voice": "Aiden"}}}}))
 
         async def turn(content):
             await ws.send(json.dumps({"type": "conversation.item.create",
