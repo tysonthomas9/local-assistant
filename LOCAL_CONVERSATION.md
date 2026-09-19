@@ -572,3 +572,18 @@ You asked for these after the fully local work, so they're **opt-in**. The offli
 - a persona keeping its tools: in `local_victorian_butler` — time, dance, "go back to being yourself", 12×12.
 
 **Not yet tried live:** the persona switch (the session restart and greeting, and whether the voices sound right).
+
+### Batch 2: privacy mute (2026-09-19)
+
+`listening` tool (both base profiles and all personas): `action=stop|resume|status`, `minutes` (default 60, 0 = until resumed), `hard`.
+- **Mechanism:** [`reachy_listening.py`](local_backend/reachy_listening.py) sets `LocalStream._mic_muted` through the bridge. The app's `record_loop` then drops every microphone frame before sending (`console.py:881`), so no audio leaves the process. The robot can still speak, so confirmations, reminders and the radio work while muted.
+- **Un-muting:** the timer, the web UI's mic toggle, or, once built, the wake word (`hard=true` will make the wake word ignored).
+- **Muted pose:** antennas at [-2.2, +2.2] rad and head pitched down 12°.
+  - **Values** taken from Pollen's recorded emotions (downcast1, yes_sad1 and sad2 have antennas ≈ ±2.2–2.7 and head pitch ≈ 20°; positive pitch = head down, checked with `create_head_pose`).
+  - **Why a `BreathingMove` subclass:** only an idle `BreathingMove` gives way to a queued move (`moves.py:457`); any other endless move would block every dance behind it. A watcher re-queues the pose every 3 s when the robot is back to plain breathing, and clears it on unmute.
+- **Tests (79 passed):**
+  - Mute/pose/timer/resume against a real `LocalStream` with a fake movement manager.
+  - Tool choice for "stop listening", "don't listen for the next hour", "mute yourself for 10 minutes", "are you listening?": all 8/8.
+  - "Stop listening for 10 minutes" → `action=stop, minutes=10`, 8/8.
+  - Every other tool-choice check still 8/8.
+- **Needs the robot:** whether the pose looks right, and confirming in `speech.log` that no turns arrive while muted.

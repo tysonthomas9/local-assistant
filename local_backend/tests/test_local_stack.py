@@ -265,6 +265,10 @@ TOOL_CASES = [
     ("What's on my to-do list?", "lists"),
     ("Talk like a noir detective from now on.", "switch_persona"),
     ("Can you be a Victorian butler?", "switch_persona"),
+    ("Stop listening.", "listening"),
+    ("Please don't listen to me for the next hour.", "listening"),
+    ("Mute yourself for 10 minutes.", "listening"),
+    ("Are you listening right now?", "listening"),
 ]
 
 
@@ -504,6 +508,50 @@ print(json.dumps([m.match(q) for q in qs]))
 """)
     assert r == ["victorian_butler", "noir_detective", "nature_documentarian", "cosmic_kitchen", "", "mars_rover",
                  "mad_scientist_assistant", "time_traveler", None]
+
+
+def test_privacy_mute_and_timer():
+    r = _run_tools("""
+import types, time
+import reachy_bridge as b; b.install()
+import reachy_listening as rl
+from reachy_mini_conversation_app.console import LocalStream
+from reachy_mini_conversation_app.moves import BreathingMove, MovementState
+m, T = load('listening', 'Listening')
+class FakeMM:
+    def __init__(self): self.state = MovementState(); self.move_queue = []; self.cleared = 0
+    def queue_move(self, mv): self.state.current_move = mv
+    def clear_move_queue(self): self.cleared += 1; self.state.current_move = None
+mm = FakeMM(); deps = types.SimpleNamespace(movement_manager=mm); rl.CUE_CHECK_S = 0.2
+async def main():
+    s = LocalStream(types.SimpleNamespace(output_queue=asyncio.Queue()), types.SimpleNamespace(media=types.SimpleNamespace(audio=None)))
+    out = {'before': await T(deps, action='status'), 'stop': await T(deps, action='stop', minutes=0.03)}
+    await asyncio.sleep(0.5)
+    cur = mm.state.current_move; h, ants, _ = cur.evaluate(5.0)
+    out.update(muted=s._mic_muted, pose=type(cur).__name__, preemptable=isinstance(cur, BreathingMove), antennas=list(ants))
+    await asyncio.sleep(2)
+    out.update(after_timer=s._mic_muted, pose_cleared=mm.cleared >= 1)
+    out['default'] = await T(deps, action='stop'); out['resume'] = await T(deps, action='resume'); out['resumed'] = s._mic_muted
+    out['bad'] = await T(deps, action='stop', minutes=-5)
+    return out
+print(json.dumps(asyncio.run(main())))
+""")
+    assert r["before"]["listening"] is True and r["stop"]["muted"] is True
+    assert r["muted"] is True and r["pose"] == "MutedPose" and r["preemptable"] and r["antennas"] == [-2.2, 2.2]
+    assert r["after_timer"] is False and r["pose_cleared"], "timer should unmute and drop the pose"
+    assert r["default"]["minutes_left"] == 60 and r["resume"]["listening"] is True and r["resumed"] is False
+    assert "error" in r["bad"]
+
+
+def test_llm_mute_duration(llm):
+    got = []
+    for _ in range(TOOL_RUNS):
+        msg, _ = chat(llm, "Stop listening for 10 minutes.")
+        calls = [tc for tc in (msg.tool_calls or []) if tc.function.name == "listening"]
+        got.append(json.loads(calls[0].function.arguments) if calls else None)
+    ok = sum(bool(g) and g.get("action") == "stop" and float(g.get("minutes") or 0) == 10 for g in got)
+    record("mute_minutes", hits=ok, runs=TOOL_RUNS, got=got)
+    assert ok >= TOOL_MIN_HITS, got
 
 
 LIST_ARG_CASES = [

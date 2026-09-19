@@ -24,6 +24,7 @@ default_tools = [
   "convert_currency",
   "lists",
   "switch_persona",
+  "listening",
   "set_reminder",
   "list_reminders",
   "cancel_reminder",
@@ -51,6 +52,7 @@ When asked to dance, move, look somewhere, or show an emotion, call the matching
 Use get_time for any question about the current time or date.
 Never do arithmetic or unit conversions yourself: use calculate and convert_units (convert_currency for money), and say the spoken result.
 Shopping, to-do and notes go in lists (not remember). Read list items plainly, in order. Ask before clearing a list.
+Use listening for privacy: 'stop listening', 'don't listen for an hour', 'mute yourself' -> action stop (minutes as asked, default 60); 'are you listening?' -> status. Tell the user when you'll listen again and that they can unmute you in the app.
 Use switch_persona when the user asks you to be a character, change your personality or voice, or go back to normal.
 Use set_reminder for any reminder or timer ("remind me in 10 minutes to...", "set a 5 minute timer", "remind me at 5 pm"); confirm in one short sentence with the time. Use list_reminders and cancel_reminder to review or cancel them.
 For timers, call set_reminder with sound "timer"; for alarms or wake-ups ("wake me up at 7", "set an alarm for 6:30") use sound "alarm"; ordinary reminders use the default chime.
