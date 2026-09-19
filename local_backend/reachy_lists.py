@@ -10,6 +10,7 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 
 STATE_FILE = Path(os.environ.get("REACHY_LISTS_FILE", Path(__file__).parent / "state" / "lists.json"))
@@ -21,6 +22,7 @@ _ALIASES = {"to do": "todo", "to-do": "todo", "todos": "todo", "to dos": "todo",
 
 def list_key(name: str) -> str:
     n = " ".join((name or "").strip().lower().split())
+    n = re.sub(r"^(my|the|our)\s+", "", n)
     n = _ALIASES.get(n, n)
     n = re.sub(r"\s+list$", "", n)
     return _ALIASES.get(n, n) or "notes"
@@ -28,8 +30,15 @@ def list_key(name: str) -> str:
 
 def _load() -> dict[str, list[str]]:
     try:
-        return json.loads(STATE_FILE.read_text())
+        data = json.loads(STATE_FILE.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+        return data
     except FileNotFoundError:
+        return {}
+    except ValueError:   # corrupt file: keep a copy, start empty rather than failing every action
+        backup = STATE_FILE.with_suffix(f".corrupt-{int(time.time())}.json")
+        STATE_FILE.replace(backup)
         return {}
 
 
@@ -56,12 +65,14 @@ def add(name: str, items: list[str]) -> tuple[str, list[str], list[str]]:
 
 
 def remove(name: str, words: str) -> tuple[str, list[str]]:
-    """Remove items containing `words` (case-insensitive)."""
+    """Remove the item matching `words`: exact (or singular/plural) match first, then whole words, then substring."""
     key, w = list_key(name), (words or "").strip().lower()
     with _lock:
         data = _load()
         lst = data.get(key, [])
-        gone = [x for x in lst if w and w in x.lower()]
+        exact = [x for x in lst if w and x.lower() in (w, w + "s", w + "es", w.rstrip("s"))]
+        whole = [x for x in lst if w and re.search(rf"\b{re.escape(w)}s?\b", x.lower())]
+        gone = exact or whole or [x for x in lst if w and w in x.lower()]
         data[key] = [x for x in lst if x not in gone]
         if not data[key]:
             data.pop(key, None)

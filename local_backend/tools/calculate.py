@@ -26,6 +26,7 @@ FUNCS = {"sqrt": math.sqrt, "sin": lambda x: math.sin(math.radians(x)), "cos": l
 CONSTS = {"pi": math.pi, "e": math.e}
 MAX_EXPONENT = 1000
 MAX_ABS = 1e100
+MAX_ROUND_DIGITS = 20
 
 
 def _eval(node: ast.AST) -> float:
@@ -44,17 +45,28 @@ def _eval(node: ast.AST) -> float:
         if isinstance(node.op, ast.Pow) and abs(right) > MAX_EXPONENT:
             raise ValueError("exponent too large")
         result = BINOPS[type(node.op)](left, right)
-        if isinstance(result, complex) or abs(result) > MAX_ABS:
+        if isinstance(result, complex) or result != result or abs(result) > MAX_ABS:
             raise ValueError("result too large or not a real number")
         return result
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FUNCS
             and not node.keywords and 1 <= len(node.args) <= 2):
-        return FUNCS[node.func.id](*[_eval(a) for a in node.args])
+        args = [_eval(a) for a in node.args]
+        if node.func.id == "round" and len(args) == 2:
+            if not float(args[1]).is_integer() or abs(args[1]) > MAX_ROUND_DIGITS:
+                raise ValueError(f"round() digits must be a whole number within ±{MAX_ROUND_DIGITS}")
+            args[1] = int(args[1])      # round(1, -10**8) would otherwise compute 10**100000000
+        elif node.func.id in ("min", "max") and len(args) == 1:
+            raise ValueError(f"{node.func.id}() needs two numbers")
+        result = FUNCS[node.func.id](*args)
+        if isinstance(result, complex) or result != result or abs(result) > MAX_ABS:   # complex, nan, huge
+            raise ValueError("result too large or not a real number")
+        return result
     raise ValueError(f"unsupported: {ast.dump(node)[:40]}")
 
 
 def normalise(expression: str) -> str:
-    x = expression.strip().lower().replace("×", "*").replace("÷", "/").replace("^", "**").replace(",", "")
+    x = expression.strip().lower().replace("×", "*").replace("÷", "/").replace("^", "**")
+    x = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", x)   # thousands separators only: 1,000 -> 1000; min(1,2) untouched
     x = re.sub(r"(\d)\s*x\s*(\d)", r"\1*\2", x)                                           # 3 x 4
     x = re.sub(r"([\d.]+)\s*(%|percent)\s*of\s*", r"(\1/100)*", x)                        # 15% of 80
     x = re.sub(r"\b(times)\b", "*", x)

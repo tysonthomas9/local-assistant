@@ -27,15 +27,22 @@ done
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 # --web implies --local.
-local=0; profile=local_reachy; args=()
+local=0; wake=0; profile=local_reachy; args=()
 for a in "$@"; do
     case "$a" in
         --local) local=1 ;;
         --web)   local=1; profile=local_reachy_web ;;
-        --wake)  export REACHY_WAKE_WORD="${REACHY_WAKE_WORD:-hey_jarvis}" ;;
+        --wake)  wake=1 ;;
         *)       args+=("$a") ;;
     esac
 done
+if [ "$wake" = 1 ]; then
+    if [ "$local" = 1 ]; then
+        export REACHY_WAKE_WORD="${REACHY_WAKE_WORD:-hey_jarvis}"
+    else
+        echo "Note: --wake only works with --local/--web; ignoring it." >&2
+    fi
+fi
 if [ "$local" = 1 ]; then
     export HF_REALTIME_CONNECTION_MODE=local
     export HF_REALTIME_WS_URL=ws://127.0.0.1:8765/v1/realtime

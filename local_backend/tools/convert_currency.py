@@ -6,6 +6,7 @@ day per base currency in local_backend/state/currency_rates.json.
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict
@@ -37,23 +38,31 @@ def code(name: str) -> str:
     return NAMES.get(n, n.upper())
 
 
+_CACHE_LOCK = threading.Lock()
+
+
 def _rates(base: str) -> Dict[str, Any]:
-    try:
-        cache = json.loads(CACHE.read_text())
-    except (OSError, ValueError):
-        cache = {}
-    hit = cache.get(base)
-    if hit and time.time() - hit["fetched"] < TTL_S:
-        return hit
-    r = httpx.get(API, params={"base": base}, timeout=8)
-    if r.status_code == 404:
-        raise ValueError(f"unknown currency {base!r}")
-    r.raise_for_status()
-    data = r.json()
-    cache[base] = {"date": data["date"], "rates": data["rates"], "fetched": time.time()}
-    CACHE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE.write_text(json.dumps(cache))
-    return cache[base]
+    with _CACHE_LOCK:
+        try:
+            cache = json.loads(CACHE.read_text())
+        except (OSError, ValueError):
+            cache = {}
+        hit = cache.get(base)
+        if hit and time.time() - hit.get("fetched", 0) < TTL_S and isinstance(hit.get("rates"), dict):
+            return hit
+        r = httpx.get(API, params={"base": base}, timeout=8)
+        if r.status_code == 404:
+            raise ValueError(f"unknown currency {base!r}")
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data.get("rates"), dict):
+            raise ValueError("unexpected answer from the currency service")
+        cache[base] = {"date": data.get("date", ""), "rates": data["rates"], "fetched": time.time()}
+        CACHE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CACHE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache))
+        tmp.replace(CACHE)
+        return cache[base]
 
 
 class ConvertCurrency(Tool):

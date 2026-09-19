@@ -9,10 +9,17 @@ Reading: each passage is sent as an *out-of-band* response (`conversation: "none
 app's own response queue, with instructions to read it word for word. Measured on this stack: word
 error rate 0.000 on a 148-word Alice passage, first audio 0.6 s, and the passage stays out of the
 conversation history. Out-of-band responses also skip the speech server's "tool result pending"
-check, so reading doesn't block the conversation. Pacing uses the bridge's playback clock: the next
-passage is sent once the current one has been generated and less than LEAD_S seconds of audio are
-left, so at most one passage is ever buffered. Any barge-in ("interrupted" / user speech) pauses the
-reader; the bookmark then points at the passage that was playing, which is re-read on resume.
+check, so reading doesn't block the conversation. Pacing uses the bridge's playback clock. Any
+barge-in ("interrupted" / user speech) pauses the reader; the bookmark then points at the passage
+that was playing, which is re-read on resume.
+
+Pauses between passages: measured live, the robot's audio board suppresses the microphone while the
+robot speaks (mic level -39.9 dBFS during playback vs -35.1 in a quiet room: its echo cancellation
+removes the robot's own voice, but also the user's). With back-to-back passages the user could never
+be heard, so "Hey Jarvis, stop" failed. The reader therefore waits until a passage has finished
+playing, then pauses GAP_S (plus ~0.6 s until the next passage's first audio) before continuing; the
+user can speak in those pauses. Stopping via the tool cancels the passage on the speech server and
+flushes local audio, so reading stops at once.
 
 Downloads (web profile): Gutenberg's own OPDS search feed + /ebooks/<id>.txt.utf-8.
 """
@@ -39,8 +46,9 @@ logger = logging.getLogger("reachy_reader")
 HERE = Path(__file__).resolve().parent
 BOOKS = Path(os.environ.get("REACHY_BOOKS_DIR", HERE / "books"))
 BOOKMARKS = Path(os.environ.get("REACHY_BOOKMARKS_FILE", HERE / "state" / "books.json"))
-PASSAGE_WORDS = 150
-LEAD_S = 6.0
+PASSAGE_WORDS = 110   # ~40 s of speech, so there is a pause for the user at least that often
+LEAD_S = 0.0          # send the next passage only when the current one has finished playing...
+GAP_S = 1.5           # ...plus this pause, during which the microphone is not suppressed
 GEN_TIMEOUT_S = 90
 READ_INSTRUCTIONS = (
     "You are a narrator reading a book aloud. Read the text inside <passage> exactly as written, word for word, "
@@ -51,18 +59,35 @@ TEXT_URL = "https://www.gutenberg.org/ebooks/{id}.txt.utf-8"
 ATOM = "{http://www.w3.org/2005/Atom}"
 
 _ROMAN = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
-_HEADING = re.compile(r"^(chapter|book|part|stave|letter)\s+([ivxlcdm]+|\d+|[a-z-]+)\b\.?\s*(.{0,80})$", re.I)
+_ROMAN_OK = re.compile(r"^m{0,4}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$", re.I)
+_NUMBER_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+                 "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"]
+_ORDINALS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
+# "CHAPTER IV.", "Chapter 12", "BOOK ONE", "Chapter the First", optionally followed by a title. The number must be a
+# real number (valid roman numeral, digits or a number word), so "Part of the reason..." or "Chapter Mix" don't match.
+_HEADING = re.compile(r"^(chapter|book|part|stave|letter)\s+(?:the\s+)?([ivxlcdm]+|\d+|[a-z]+)\b\.?:?\s*(.{0,80})$", re.I)
 
 
 def _roman(s: str) -> int | None:
     s = s.lower()
-    if not s or any(c not in _ROMAN for c in s):
+    if not s or not _ROMAN_OK.match(s):
         return None
     total = 0
     for a, b in zip(s, s[1:] + " "):
         v = _ROMAN[a]
         total += -v if b != " " and _ROMAN.get(b, 0) > v else v
     return total
+
+
+def _heading_number(token: str) -> int | None:
+    t = token.lower()
+    if t.isdigit():
+        return int(t)
+    if t in _NUMBER_WORDS:
+        return _NUMBER_WORDS.index(t) + 1
+    if t in _ORDINALS:
+        return _ORDINALS.index(t) + 1
+    return _roman(t) if token.isupper() else None   # headings write numerals in capitals ("Chapter IX"), not "Mix"
 
 
 # -- parsing -------------------------------------------------------------------------------------
@@ -115,10 +140,12 @@ def parse(path: Path) -> Book:
 
     for p in paragraphs:
         m = _HEADING.match(p)
-        if m and len(p) < 100:
+        num = _heading_number(m.group(2)) if m else None
+        # A heading names one chapter; a paragraph naming several is a table of contents.
+        if m and num is not None and len(p) < 100 and len(re.findall(
+                r"\b(?:chapter|book|part|stave|letter)\s+(?:[IVXLCDM]+\b|\d+)", p, re.I)) <= 1:
             flush()
-            num = _roman(m.group(2))
-            label = f"{m.group(1).title()} {num if num is not None else m.group(2)}"
+            label = f"{m.group(1).title()} {num}"
             heading = label + (f". {m.group(3).strip().rstrip('.')}" if m.group(3).strip() else "")
             chapter += 1
             book.chapters.append((heading, len(book.chunks)))
@@ -177,7 +204,15 @@ def _load_marks() -> dict[str, Any]:
         return {}
 
 
+_marks_lock = threading.Lock()
+
+
 def save_mark(key: str, chunk: int) -> None:
+    with _marks_lock:
+        _save_mark_locked(key, chunk)
+
+
+def _save_mark_locked(key: str, chunk: int) -> None:
     marks = _load_marks()
     marks[key] = {"chunk": chunk, "updated": datetime.now().isoformat(timespec="seconds")}
     marks["_last"] = key
@@ -256,6 +291,24 @@ class Reader:
             was = self.reading
             self._gen += 1
             self.reading = False
+            book, pos = self.book, self.pos
+        if was and book is not None:
+            save_mark(book.key, pos)
+        return was
+
+    async def stop_now(self) -> bool:
+        """Stop from the app's event loop (the read_book tool): also cancel and flush the passage in progress."""
+        was = self.stop()
+        if was:
+            s = reachy_bridge.stream()
+            try:
+                await s.handler.connection.response.cancel()
+            except Exception as e:  # nothing active, or connection gone
+                logger.debug("response.cancel: %r", e)
+            try:
+                s.clear_audio_queue()
+            except Exception as e:
+                logger.debug("clear_audio_queue: %r", e)
         return was
 
     def _run(self, gen: int) -> None:
@@ -279,7 +332,9 @@ class Reader:
                         return
                     book, pos = self.book, self.pos
                 if pos >= len(book.chunks):
-                    save_mark(book.key, -1)   # finished: next time starts over
+                    with self._lock:
+                        if gen == self._gen:
+                            save_mark(book.key, -1)   # finished: next time starts over
                     logger.info("Finished reading %s", book.title)
                     break
                 transcript_done.clear()
@@ -287,20 +342,29 @@ class Reader:
                 t0 = time.monotonic()
                 while not transcript_done.is_set() and not interrupted.is_set() and gen == self._gen:
                     if time.monotonic() - t0 > GEN_TIMEOUT_S:
-                        logger.warning("Passage %d: no transcript after %d s", pos, GEN_TIMEOUT_S)
+                        # e.g. the backend restarted (persona switch) or cancelled the passage: don't skip it
+                        logger.warning("Passage %d: no transcript after %d s; pausing", pos, GEN_TIMEOUT_S)
+                        interrupted.set()
                         break
                     time.sleep(0.1)
                 while (not interrupted.is_set() and gen == self._gen
                        and reachy_bridge.audio_seconds_left() > LEAD_S):
                     time.sleep(0.2)
-                if interrupted.is_set() or gen != self._gen:
-                    save_mark(book.key, pos)  # re-read the passage that was playing
+                if not interrupted.is_set() and gen == self._gen:
+                    interrupted.wait(GAP_S)   # a pause the user can speak into (see module docstring)
+                if gen != self._gen:
+                    break                     # stopped or restarted: stop()/start() own the bookmark
+                if interrupted.is_set():
+                    with self._lock:
+                        if gen == self._gen:
+                            save_mark(book.key, pos)  # re-read the passage that was playing
                     logger.info("Reading paused at passage %d of %s", pos, book.key)
                     break
                 with self._lock:
-                    if gen == self._gen:
-                        self.pos = pos + 1
-                save_mark(book.key, pos + 1)
+                    if gen != self._gen:
+                        break
+                    self.pos = pos + 1
+                    save_mark(book.key, pos + 1)
         finally:
             unsubscribe()
             with self._lock:

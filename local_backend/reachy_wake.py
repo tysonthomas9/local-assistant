@@ -9,12 +9,17 @@ replaces LocalStream.record_loop with a version that runs every mic frame throug
   * On detection: un-mute if muted, send the ring buffer (so the words right after the wake word
     survive), and open a listening window.
   * The window stays open while the conversation is active (the user speaking, a response being
-    generated, a reminder via conversation.say) and for FOLLOWUP_S after the robot finishes a reply,
+    generated, a reminder via conversation.say) and for FOLLOWUP_S after the robot has finished
+    *speaking* a reply (the playback clock, not the end of generation: audio keeps playing a few
+    seconds after the transcript is done, and the audio board suppresses the mic meanwhile),
     so follow-ups and barge-in need no new wake word. Book reading (out-of-band passages) does NOT keep
     it open, so the robot can't hear its own reading; "Hey Jarvis, stop" still interrupts it.
 
+Near misses (scores between NEAR_MISS and the threshold) are logged, to tell "not heard" from
+"heard but under the threshold" when tuning.
+
 Settings: REACHY_WAKE_WORD (hey_jarvis | hey_mycroft | hey_marvin | alexa, or a path to a custom
-.onnx model), REACHY_WAKE_THRESHOLD (0.5), REACHY_WAKE_WINDOW_S (8), REACHY_WAKE_FOLLOWUP_S (8).
+.onnx model), REACHY_WAKE_THRESHOLD (0.5), REACHY_WAKE_WINDOW_S (8), REACHY_WAKE_FOLLOWUP_S (10).
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ RATE = 16000
 FRAME = 1280                       # openWakeWord's 80 ms step
 PREROLL_S = 1.5
 COOLDOWN_S = 2.0
+NEAR_MISS = 0.2
 
 
 def _model_path(word: str) -> str:
@@ -59,6 +65,7 @@ class Detector:
         self.model = Model(wakeword_model_paths=[_model_path(word)])
         self._buf = np.zeros(0, dtype=np.int16)
         self._last = 0.0
+        self._last_near = 0.0
 
     def feed(self, mono16k_int16: np.ndarray) -> float | None:
         """Add samples; returns the score if the wake word was just detected, else None."""
@@ -70,6 +77,9 @@ class Detector:
             now = time.monotonic()
             if score >= self.threshold and now - self._last > COOLDOWN_S:
                 self._last, hit = now, score
+            elif NEAR_MISS <= score < self.threshold and now - self._last_near > 1.0:
+                self._last_near = now
+                logger.info("Wake word near miss: score %.2f (threshold %.2f)", score, self.threshold)
         return hit
 
 
@@ -84,7 +94,7 @@ def to_mono_int16(frame: np.ndarray, rate: int) -> np.ndarray:
 
 
 class Gate:
-    def __init__(self, detector: Detector | Any, window_s: float = 8.0, followup_s: float = 8.0) -> None:
+    def __init__(self, detector: Detector | Any, window_s: float = 8.0, followup_s: float = 10.0) -> None:
         self.detector = detector
         self.window_s, self.followup_s = window_s, followup_s
         self.open_until = 0.0
@@ -99,7 +109,11 @@ class Gate:
 
     def extend(self, seconds: float) -> None:
         with self._lock:
-            self.open_until = max(self.open_until, time.monotonic() + seconds)
+            now = time.monotonic()
+            if now >= self.open_until:     # closed -> open: pre-window audio must not be sent later
+                self._ring.clear()
+                self._ring_samples = 0
+            self.open_until = max(self.open_until, now + seconds)
 
     def on_activity(self, reason: str) -> None:
         reading = _reader_reading()
@@ -109,7 +123,8 @@ class Gate:
         elif reason in ("response_created", "assistant_audio_delta") and self.is_open() and not reading:
             self.extend(self.window_s)       # keep an open conversation open while the robot answers
         elif reason == "assistant_transcript_done" and self.is_open() and not reading:
-            self.extend(self.followup_s)
+            # count the follow-up from when the reply has finished *playing*, not generating
+            self.extend(self.followup_s + reachy_bridge.audio_seconds_left())
 
     # -- frames --------------------------------------------------------------------------------
     def process(self, frame: np.ndarray, rate: int, muted: bool, hard_muted: bool) -> list[np.ndarray]:
@@ -117,16 +132,17 @@ class Gate:
         if not hard_muted and self.detector.feed(to_mono_int16(frame, rate)) is not None:
             self.detections += 1
             logger.info("Wake word %r detected", getattr(self.detector, "word", "?"))
+            with self._lock:                    # take the pre-roll *before* opening the window (which clears it)
+                preroll = list(self._ring)
+                self._ring.clear()
+                self._ring_samples = 0
             if muted:
                 import reachy_listening
                 reachy_listening.resume(reason="wake word")
                 muted = False
             reachy_bridge.publish("wake_word")   # opens the window via on_activity
             self.extend(self.window_s)
-            preroll = list(self._ring)
-            self._ring.clear()
-            self._ring_samples = 0
-            return [] if muted else preroll + [frame]
+            return preroll + [frame]
         if muted:
             return []
         if self.is_open():
@@ -157,7 +173,7 @@ def install() -> None:
         return
     GATE = Gate(Detector(word, float(os.environ.get("REACHY_WAKE_THRESHOLD", 0.5))),
                 window_s=float(os.environ.get("REACHY_WAKE_WINDOW_S", 8)),
-                followup_s=float(os.environ.get("REACHY_WAKE_FOLLOWUP_S", 8)))
+                followup_s=float(os.environ.get("REACHY_WAKE_FOLLOWUP_S", 10)))
     reachy_bridge.subscribe(GATE.on_activity)
 
     from reachy_mini_conversation_app import console

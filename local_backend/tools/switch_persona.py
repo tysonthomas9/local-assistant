@@ -15,7 +15,8 @@ from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, Dict
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import reachy_bridge  # noqa: E402
 
 from reachy_mini_conversation_app import config  # noqa: E402
@@ -67,6 +68,11 @@ def match(request: str) -> str | None:
 def _apply_later(profile: str) -> None:
     """After the confirmation has been spoken, restart the session with the new profile."""
     reachy_bridge.wait_for({"assistant_transcript_done"}, SWITCH_WAIT_S)
+    try:
+        import reachy_reader  # the session restart would otherwise leave the reader feeding a dead handler
+        reachy_reader.READER.stop()
+    except Exception:
+        logger.debug("reader stop before persona switch failed", exc_info=True)
     try:
         stream = reachy_bridge.stream()
         reachy_bridge.run_in_app_loop(lambda: stream.apply_personality(profile), timeout=30)

@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import reachy_scheduler as rs  # noqa: E402
 
 from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies  # noqa: E402

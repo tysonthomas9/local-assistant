@@ -28,7 +28,7 @@ MUTED_PITCH_DEG = 12.0
 CUE_CHECK_S = 3.0
 
 _lock = threading.Lock()
-_state: dict[str, Any] = {"until": None, "hard": False, "generation": 0}
+_state: dict[str, Any] = {"until": None, "hard": False, "generation": 0, "by_us": False, "wake": None}
 
 
 def _muted_pose_class():
@@ -50,12 +50,16 @@ def _muted_pose_class():
 
 
 def _current_pose(mm: Any) -> tuple[Any, Any]:
+    head, antennas = None, None
     try:
-        head = mm.state.last_primary_pose[0] if getattr(mm.state, "last_primary_pose", None) else None
+        last = getattr(mm.state, "last_primary_pose", None)
+        if last:
+            head, antennas = last[0], last[1]
     except Exception:
-        head = None
+        pass
     from reachy_mini.utils import create_head_pose
-    return (head if head is not None else create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)), (-0.17, 0.17)
+    return (head if head is not None else create_head_pose(0, 0, 0, 0, 0, 0, degrees=True),
+            tuple(antennas) if antennas is not None else (-0.17, 0.17))
 
 
 def _cue_watcher(mm: Any, generation: int) -> None:
@@ -77,15 +81,15 @@ def _cue_watcher(mm: Any, generation: int) -> None:
         except Exception as e:
             logger.debug("muted pose check failed: %r", e)
         time.sleep(CUE_CHECK_S)
-    try:  # leave the pose: let idle breathing take over again
-        if type(mm.state.current_move).__name__ == "MutedPose":
+    try:  # leave the pose only if we're really listening again (a re-mute keeps the new pose)
+        if not reachy_bridge.mic_muted() and type(mm.state.current_move).__name__ == "MutedPose":
             mm.clear_move_queue()
     except Exception:
         pass
 
 
-def _auto_resume(generation: int, seconds: float, mm: Any) -> None:
-    time.sleep(seconds)
+def _auto_resume(generation: int, seconds: float, mm: Any, wake: threading.Event) -> None:
+    wake.wait(seconds)            # set early when this mute is superseded, so the thread doesn't linger
     with _lock:
         if _state["generation"] != generation:
             return
@@ -97,27 +101,49 @@ def mute(minutes: float | None, hard: bool, mm: Any = None) -> dict[str, Any]:
     if reachy_bridge.stream() is None:
         return {"error": "The conversation app isn't running."}
     with _lock:
-        _state["generation"] += 1
+        _supersede()
         gen = _state["generation"]
         _state["hard"] = bool(hard)
         _state["until"] = time.time() + minutes * 60 if minutes else None
+        _state["by_us"] = True
+        _state["wake"] = wake = threading.Event()
     reachy_bridge.set_mic_muted(True)
     if minutes:
-        threading.Thread(target=_auto_resume, args=(gen, minutes * 60, mm), daemon=True, name="mute-timer").start()
+        threading.Thread(target=_auto_resume, args=(gen, minutes * 60, mm, wake), daemon=True, name="mute-timer").start()
     if mm is not None:
         threading.Thread(target=_cue_watcher, args=(mm, gen), daemon=True, name="muted-pose").start()
     return status()
 
 
+def _supersede() -> None:
+    """New generation; wake the previous mute's timer so it exits now. Call with _lock held."""
+    _state["generation"] += 1
+    if _state["wake"] is not None:
+        _state["wake"].set()
+        _state["wake"] = None
+
+
+def _sync_with_mic() -> None:
+    """The web UI's mic toggle sets _mic_muted directly; reconcile our state with it."""
+    muted = reachy_bridge.mic_muted()
+    with _lock:
+        if not muted and (_state["by_us"] or _state["hard"] or _state["until"]):
+            _supersede()   # un-muted from the UI: forget our mute (timer, hard flag)
+            _state.update(until=None, hard=False, by_us=False)
+        elif muted and not _state["by_us"]:
+            _state.update(until=None, hard=False)   # muted from the UI: a plain (soft) mute
+
+
 def resume(mm: Any = None, reason: str = "asked") -> dict[str, Any]:
     with _lock:
-        _state["generation"] += 1
-        _state["until"], _state["hard"] = None, False
+        _supersede()
+        _state["until"], _state["hard"], _state["by_us"] = None, False, False
     reachy_bridge.set_mic_muted(False)
     return {**status(), "resumed_by": reason}
 
 
 def status() -> dict[str, Any]:
+    _sync_with_mic()
     muted = reachy_bridge.mic_muted()
     out: dict[str, Any] = {"listening": muted is False, "muted": bool(muted)}
     if muted and _state["until"]:
@@ -130,4 +156,5 @@ def status() -> dict[str, Any]:
 
 
 def is_hard_muted() -> bool:
+    _sync_with_mic()
     return bool(reachy_bridge.mic_muted()) and bool(_state["hard"])

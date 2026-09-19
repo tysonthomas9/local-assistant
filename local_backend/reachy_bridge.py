@@ -72,11 +72,14 @@ def install() -> None:
 
         def push_audio_sample(self: Any, data: Any) -> None:
             orig_push(self, data)
-            try:
+            try:  # bookkeeping only: must never break the app's play loop
                 rate = self.get_output_audio_samplerate() or OUTPUT_RATE
+                shape = getattr(data, "shape", None) or (len(data),)
+                # samples = the longer axis (upstream accepts (n,), (n, ch) and (ch, n))
+                samples = shape[0] if len(shape) == 1 else max(shape[0], shape[1])
+                add_played_audio(samples / float(rate))
             except Exception:
-                rate = OUTPUT_RATE
-            add_played_audio(len(data) / float(rate))
+                logger.debug("playback clock: couldn't account for %r", type(data), exc_info=True)
 
         media_manager.MediaManager.push_audio_sample = push_audio_sample
     except Exception:

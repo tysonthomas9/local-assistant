@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import reachy_bridge  # noqa: E402
 import reachy_reader as rr  # noqa: E402
 
@@ -29,7 +30,8 @@ class ReadBook(Tool):
         "Read a book aloud, word for word, in the background. action: start (title; optional chapter number; "
         "resumes from the bookmark unless from_start), continue (the last book), stop (pause, keeps the bookmark), "
         "chapter (jump to chapter N of the current book), list (books on this robot), status, download (fetch a "
-        "public-domain book from Project Gutenberg; web only). Before starting, say one short line only."
+        "public-domain book from Project Gutenberg; web only). Before starting, say one short line only. The user "
+        "can only be heard in the short pauses between passages."
     )
     parameters_schema = {
         "type": "object",
@@ -52,7 +54,7 @@ class ReadBook(Tool):
         if action == "status":
             return rr.READER.status()
         if action == "stop":
-            was = rr.READER.stop()
+            was = await rr.READER.stop_now() if reachy_bridge.stream() is not None else rr.READER.stop()
             return {"stopped": was, **rr.READER.status()}
         if action == "download":
             if not str(config.REACHY_MINI_CUSTOM_PROFILE or "").endswith("_web"):

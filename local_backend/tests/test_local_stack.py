@@ -435,7 +435,9 @@ def test_calculator_and_unit_conversion():
     r = _run_tools("""
 _, C = load('calculate', 'Calculate'); _, U = load('convert_units', 'ConvertUnits')
 exprs = ['17*23', '17 x 23', '15% of 80', '2^10', 'sqrt(2)*10', '(3+4)*5/2', '100 divided by 7', 'sin(30)', '12 plus 5 minus 3',
-         '5 squared', '1/0', '2**100000', "__import__('os')", '(1).__class__', "open('x')", 'a+b', '9'*400, '('*500 + '1' + ')'*500]
+         '5 squared', 'min(1,2)', 'max(3, 7)', 'round(3.14159, 2)', '1,234,567 * 2',
+         '1/0', '2**100000', "__import__('os')", '(1).__class__', "open('x')", 'a+b', '9'*400, '('*500 + '1' + ')'*500,
+         'round(1, -10**9)', 'floor(exp(709))', 'min(5)']
 convs = [(72, '°F', 'celsius'), (3.5, 'cups', 'ml'), (10, 'km', 'miles'), (1, 'lb', 'grams'), (2, 'tablespoons', 'teaspoons'),
          (60, 'mph', 'km/h'), (3, 'kg', 'celsius'), (1, 'parsec', 'km')]
 async def main():
@@ -444,8 +446,10 @@ print(json.dumps(asyncio.run(main())))
 """)
     calc, conv = r
     results = [c.get("result") for c in calc]
-    assert results[:10] == [391, 391, 12, 1024, pytest.approx(14.1421356), 17.5, pytest.approx(14.2857142), pytest.approx(0.5), 14, 25]
-    assert all("error" in c for c in calc[10:]), calc[10:]   # 1/0, huge power, code injection, names, huge inputs
+    assert results[:14] == [391, 391, 12, 1024, pytest.approx(14.1421356), 17.5, pytest.approx(14.2857142), pytest.approx(0.5), 14, 25,
+                            1, 7, 3.14, 2469134]
+    # 1/0, huge power, code injection, names, huge inputs, round() digit bomb, huge function result, 1-arg min
+    assert all("error" in c for c in calc[14:]), calc[14:]
     assert [round(c["result"], 2) if "result" in c else "error" for c in conv] == [22.22, 828.06, 6.21, 453.59, 6.0, 96.56, "error", "error"]
 
 
@@ -558,28 +562,77 @@ def test_llm_mute_duration(llm):
     assert ok >= TOOL_MIN_HITS, got
 
 
-def test_book_parsing(monkeypatch):
+def _reader_module(monkeypatch, **env):
     import importlib
     import sys
     import types
-    src = ROOT / "local_backend/books/alice_s_adventures_in_wonderland.txt"
-    if not src.exists():
-        pytest.skip("put Alice (Gutenberg #11) in local_backend/books/ to run this test")
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
     monkeypatch.syspath_prepend(str(ROOT / "local_backend"))
     monkeypatch.setitem(sys.modules, "reachy_bridge", types.ModuleType("reachy_bridge"))
     sys.modules.pop("reachy_reader", None)
-    rr = importlib.import_module("reachy_reader")
-    b = rr.parse(src)
+    return importlib.import_module("reachy_reader")
+
+
+def test_book_parsing(monkeypatch):
+    """Committed excerpt: Gutenberg header/footer, a short table of contents, heading-like sentences."""
+    rr = _reader_module(monkeypatch)
+    b = rr.parse(FIXTURES / "books" / "alice_excerpt.txt")
     assert b.title == "Alice's Adventures in Wonderland"
-    assert len(b.chapters) == 12 and b.chapters[0][0] == "Chapter 1. Down the Rabbit-Hole"
-    assert b.chapters[-1][0].startswith("Chapter 12.")
-    assert b.chunks[b.chapters[0][1]].startswith("Chapter 1. Down the Rabbit-Hole. Alice was beginning")
-    assert b.chunks[-1].rstrip().endswith("THE END"), "Gutenberg footer should be stripped"
-    assert not any("[Illustration" in c or "Project Gutenberg" in c for c in b.chunks[b.chapters[0][1]:])
-    words = [len(c.split()) for c in b.chunks]
-    assert max(words) <= 200 and sorted(words)[len(words) // 2] >= 80
+    assert [t for t, _ in b.chapters] == ["Chapter 1. Down the Rabbit-Hole", "Chapter 11. Who Stole the Tarts?"]
+    first = b.chunks[b.chapters[0][1]]
+    assert first.startswith("Chapter 1. Down the Rabbit-Hole. Alice was beginning")
+    body = " ".join(b.chunks[b.chapters[0][1]:])
+    assert "Licence text" not in body and "[Illustration" not in body and body.rstrip().endswith("THE END")
+    assert "Part of the reason was that nobody had told her." in body, "an ordinary sentence must not become a chapter"
+    assert max(len(c.split()) for c in b.chunks) <= 180
     assert rr._sentences('He said "Oh dear!" Then he left.') == ['He said "Oh dear!"', "Then he left."]
-    assert rr.find("the wonderland book") == src and rr.find("moby dick") is None
+    number = lambda h: rr._heading_number(rr._HEADING.match(h).group(2)) if rr._HEADING.match(h) else None
+    assert [number(h) for h in ("CHAPTER XI. Who Stole the Tarts?", "Chapter 12", "BOOK ONE", "Chapter the First",
+                                "Chapter Mix", "Chapter IIII", "Part of the reason")] == [11, 12, 1, 1, None, None, None]
+
+
+def test_book_find_and_bookmarks(tmp_path, monkeypatch):
+    books = tmp_path / "books"
+    books.mkdir()
+    (books / "alice.txt").write_text((FIXTURES / "books" / "alice_excerpt.txt").read_text())
+    rr = _reader_module(monkeypatch, REACHY_BOOKS_DIR=str(books), REACHY_BOOKMARKS_FILE=str(tmp_path / "marks.json"))
+    assert rr.find("the wonderland book").name == "alice.txt" and rr.find("moby dick") is None
+    assert rr.bookmark("alice") == -1
+    rr.save_mark("alice", 4)
+    assert rr.bookmark("alice") == 4 and rr.last_book() == "alice"
+
+
+def test_reader_pauses_when_a_passage_never_arrives(tmp_path, monkeypatch):
+    """No transcript within GEN_TIMEOUT_S (e.g. backend restarted) must pause, not skip the passage."""
+    import importlib
+    import sys
+    import types
+    monkeypatch.setenv("REACHY_BOOKMARKS_FILE", str(tmp_path / "marks.json"))
+    monkeypatch.syspath_prepend(str(ROOT / "local_backend"))
+    for m in ("reachy_bridge", "reachy_reader"):
+        sys.modules.pop(m, None)
+    bridge = importlib.import_module("reachy_bridge")
+    rr = importlib.import_module("reachy_reader")
+    rr.GEN_TIMEOUT_S, rr.GAP_S = 0.5, 0.0
+    sent = []
+
+    async def scenario():
+        class Handler:
+            async def _safe_response_create(self, **kw):
+                sent.append(kw)   # swallowed: no transcript ever comes back
+        bridge._stream = types.SimpleNamespace(handler=Handler(), _asyncio_loop=asyncio.get_running_loop(), _mic_muted=False)
+        book = rr.parse(FIXTURES / "books" / "alice_excerpt.txt")
+        bridge.publish("assistant_transcript_done")
+        rr.READER.start(book, 2)
+        await asyncio.sleep(0.3)
+        bridge.publish("assistant_transcript_done")   # the tool's confirmation finished
+        await asyncio.sleep(1.5)
+        return book
+
+    book = asyncio.run(scenario())
+    assert len(sent) == 1, "only the first passage should have been sent"
+    assert rr.READER.reading is False and rr.bookmark(book.key) == 2, "bookmark must stay on the unread passage"
 
 
 @pytest.mark.online
@@ -646,11 +699,68 @@ out['reading_holds_open'] = gate.is_open()
 print(json.dumps(out))
 """.replace("sys.argv[2]", repr(str(tmp_path))))
     assert r["other"] == 0.0, "speech without the wake word must not be forwarded"
-    assert r["wake"] > 1.0 and r["open_after_wake"] and r["closed_later"]
+    assert r["wake"] > 2.5 and r["open_after_wake"] and r["closed_later"], "wake word + pre-roll should be forwarded"
     assert r["kept_open_while_answering"]
     assert r["muted_wake_forwarded"] > 0.5 and r["unmuted_by_wake"]
     assert r["hard_forwarded"] == 0.0 and r["still_hard_muted"]
     assert r["reading_holds_open"] is False
+
+
+def test_lists_removal_priority_and_names(tmp_path):
+    r = _run_tools("""
+import reachy_lists as rl
+rl.add('shopping', ['vegan eggs', 'eggs', 'eggplant', 'milk'])
+out = [rl.list_key('my shopping list'), rl.list_key('The to do list'),
+       rl.remove('shopping', 'egg')[1], rl.remove('shopping', 'vegan')[1], rl.remove('shopping', 'plant')[1], rl.read('shopping')[1]]
+open(rl.STATE_FILE, 'w').write('{broken')
+out.append(rl.lists())
+print(json.dumps(out))
+""", REACHY_LISTS_FILE=str(tmp_path / "lists.json"))
+    assert r[:2] == ["shopping", "todo"]
+    assert r[2:6] == [["eggs"], ["vegan eggs"], ["eggplant"], ["milk"]]
+    assert r[6] == {} and any(p.name.startswith("lists.corrupt") for p in tmp_path.iterdir()), "corrupt file backed up"
+
+
+def test_mute_state_follows_the_ui_toggle():
+    r = _run_tools("""
+import types
+import reachy_bridge as b; b.install()
+import reachy_listening as rl
+from reachy_mini_conversation_app.console import LocalStream
+s = LocalStream(types.SimpleNamespace(output_queue=asyncio.Queue()), types.SimpleNamespace(media=types.SimpleNamespace(audio=None)))
+rl.mute(30, hard=True)
+out = {'hard_before': rl.is_hard_muted()}
+s._mic_muted = False              # the web UI un-mutes
+out['after_ui_unmute'] = rl.status()
+s._mic_muted = True               # ...and mutes again: a plain mute, not our old hard one
+out['hard_after_ui_mute'] = rl.is_hard_muted(); out['status_ui_mute'] = rl.status()
+print(json.dumps(out))
+""")
+    assert r["hard_before"] is True
+    assert r["after_ui_unmute"] == {"listening": True, "muted": False}
+    assert r["hard_after_ui_mute"] is False and "resumes_at" not in r["status_ui_mute"]
+
+
+def test_bridge_playback_clock_survives_odd_frames():
+    """The push_audio_sample wrapper must never raise (it runs inside the app's play loop) and count samples right."""
+    r = _run_tools("""
+import types, numpy as np
+from reachy_mini.media import media_manager
+media_manager.MediaManager.push_audio_sample = lambda self, data: None   # stand-in for the real pipeline push
+import reachy_bridge as b; b.install()                                  # wraps the stand-in
+fake = types.SimpleNamespace(get_output_audio_samplerate=lambda: 16000)
+out = {}
+for name, arr in [('mono_1s', np.zeros(16000, np.float32)), ('n_by_ch_0.5s', np.zeros((8000, 2), np.float32)),
+                  ('ch_by_n_0.5s', np.zeros((2, 8000), np.float32)), ('zero_d', np.float32(0.0))]:
+    b._play_end = 0.0
+    try:
+        media_manager.MediaManager.push_audio_sample(fake, arr)
+        out[name] = round(b.audio_seconds_left(), 1)
+    except Exception as e:
+        out[name] = 'raised ' + type(e).__name__
+print(json.dumps(out))
+""")
+    assert r == {"mono_1s": 1.0, "n_by_ch_0.5s": 0.5, "ch_by_n_0.5s": 0.5, "zero_d": 0.0}, r
 
 
 LIST_ARG_CASES = [
@@ -1014,16 +1124,14 @@ class _FakeApp:
 def test_book_reader_reads_verbatim_paces_and_pauses(tmp_path, monkeypatch):
     import importlib
     import sys
-    book_src = ROOT / "local_backend/books/alice_s_adventures_in_wonderland.txt"
-    if not book_src.exists():
-        pytest.skip("put Alice (Gutenberg #11) in local_backend/books/ to run this test")
+    book_src = FIXTURES / "books" / "alice_excerpt.txt"
     monkeypatch.setenv("REACHY_BOOKMARKS_FILE", str(tmp_path / "books.json"))
     monkeypatch.syspath_prepend(str(ROOT / "local_backend"))
     for m in ("reachy_bridge", "reachy_reader"):
         sys.modules.pop(m, None)
     bridge = importlib.import_module("reachy_bridge")
     rr = importlib.import_module("reachy_reader")
-    rr.LEAD_S = 6.0 / _FakeApp.SPEEDUP      # same pacing, compressed time
+    rr.LEAD_S, rr.GAP_S = 0.0, 1.5 / _FakeApp.SPEEDUP   # same pacing, compressed time
     book = rr.parse(book_src)
     start = book.chapters[0][1]
 
@@ -1055,10 +1163,9 @@ def test_book_reader_reads_verbatim_paces_and_pauses(tmp_path, monkeypatch):
         t0 = time.time()
         while len(app.transcripts) < 2 and time.time() - t0 < 120:
             await asyncio.sleep(0.2)
-        await asyncio.sleep(0.3)
-        playing = rr.READER.pos
         bridge.publish("interrupted")
         await asyncio.sleep(1.0)
+        playing = rr.READER.pos   # the reader never advances past an interrupted passage
         paused = {"reading": rr.READER.reading, "mark": rr.bookmark(book.key)}
         pump.cancel()
         await ws.close()
@@ -1076,7 +1183,7 @@ def test_book_reader_reads_verbatim_paces_and_pauses(tmp_path, monkeypatch):
         assert ratio >= 0.95, f"passage {start + i} not read verbatim ({ratio:.3f}): {text[:120]!r}"
     record("reader_pacing", max_buffered_s=round(app.max_buffered * _FakeApp.SPEEDUP, 1))
     one_passage = max(len(c.split()) for c in book.chunks[start:start + 3]) / 2.0  # >= ~2 words/s of speech
-    assert app.max_buffered * _FakeApp.SPEEDUP <= 6.0 + one_passage + 2, "reader buffered more than ~one passage ahead"
+    assert app.max_buffered * _FakeApp.SPEEDUP <= one_passage + 2, "reader buffered more than one passage"
     assert paused["reading"] is False, "reader should pause on interruption"
     assert paused["mark"] == playing, "bookmark should point at the passage that was playing"
     assert playing >= start + 1

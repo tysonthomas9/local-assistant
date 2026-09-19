@@ -37,6 +37,11 @@ reachy_bridge.install()
 
 # Optional wake-word gate (start_conversation.sh --wake / REACHY_WAKE_WORD).
 if os.environ.get("REACHY_WAKE_WORD"):
+    try:
+        import openwakeword  # noqa: F401
+    except ImportError:
+        sys.exit("--wake needs openWakeWord in the app venv: "
+                 "uv pip install --python reachy_mini_conversation_app/.venv/bin/python openwakeword")
     import reachy_wake  # noqa: E402
 
     reachy_wake.install()

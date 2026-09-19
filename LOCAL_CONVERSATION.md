@@ -660,3 +660,38 @@ So the reader uses the robot's own voice, word for word, and the Piper fallback 
 3. **Muted pose:** does it look right? And no turns in `speech.log` while muted.
 4. **Persona switch:** the session restart, the greeting, and whether the voices suit the characters.
 5. **Radio and sounds:** loudness on the robot's speaker.
+
+### Live test and the second Fable review (2026-09-19, 10:07–10:30)
+
+**Live test** (`--web --wake`):
+- **What worked:** the wake word (speech before it never reached the speech server); follow-ups inside the window without the wake word; `lists` add/read; `convert_units` (3.5 cups → 828.1 ml); `read_book` start and resume from the bookmark.
+- **Speech-to-text errors** (Parakeet): "Hey Jarvis" → "eight jar is"; "and eggs" → "annex"; "eggs" → "X two" (added to the list as-is).
+- **Couldn't interrupt the robot while it read.** From 10:09:40 to 10:12:23 there were no wake detections and no VAD events.
+  - **Measured:** playing speech through the robot while recording its mic gives -39.9 dBFS during playback, against -35.1 dBFS in the quiet room. The board's echo cancellation removes the robot's own voice (good: it can't hear itself), but its post-processor also gates the user while the robot talks.
+  - **Stopgap (still in place):** a 1.5 s pause after each 110-word passage. You rejected it: "how will I time the 2-second pause". A real fix is below.
+- **Stopping didn't cut the passage in progress:** only local audio was flushed. `read_book stop` now cancels the passage on the speech server too (`READER.stop_now`).
+- **A bare "Hey Jarvis" with a pause after it was answered in full,** and the follow-up window counted from the end of *generation*, while the reply was still playing and the mic suppressed. Both fixed below.
+
+**Fixes for the review's findings** (all 17), plus the live-test ones:
+
+| # | Finding | Fix |
+| --- | --- | --- |
+| 1 | The calculator removed every comma, so `min(1,2)`, `max`, `round(x, n)` broke and `round(1, -10**9)` returned -999999999 | Only thousands separators are removed; `round` digits are capped at ±20 (`round(1, -10**8)` would compute 10^100000000); function results are checked against the size cap; `min(5)` is rejected |
+| 2 | The reader skipped a passage and moved the bookmark on when no transcript arrived | A timeout now pauses reading at that passage |
+| 3 | A stop/start race could overwrite the new bookmark, and bookmark writes were unlocked | Only the current generation writes, under the reader lock; `save_mark` has its own lock; `stop()` saves the position |
+| 4 | Sentences like "Part of the reason…" and "Chapter Mix" became chapters | A heading needs a real number (digits, number words or ordinals, or a *capitalised*, valid Roman numeral). A paragraph naming several chapters is a table of contents: the committed excerpt's 2-line contents was parsed as a chapter until this. |
+| 5 | The `push_audio_sample` wrapper could raise inside the app's play loop | All bookkeeping is inside `try`; samples counted as the longer axis ((n,), (n,ch), (ch,n)) |
+| 6 | A persona switch didn't stop the reader | `_apply_later` stops it first |
+| 7 | The web UI's mic toggle left stale mute state (a hard flag, timer) | `_sync_with_mic()` reconciles on every status/hard-mute check |
+| 9 | A re-mute could knock off the new pose | The pose is only cleared when really un-muted |
+| 10 | The muted pose started from hard-coded antenna positions | Uses `last_primary_pose` antennas |
+| 11 | Superseded mute timers slept for up to 24 h | Each timer waits on an Event that the next mute/resume sets |
+| 12 | `--wake` applied in hosted mode; a missing openwakeword gave a traceback | `--wake` needs `--local`/`--web` (otherwise a note); `run_app.py` gives a clear install message |
+| 13 | The wake ring buffer kept pre-window audio | Cleared whenever the window opens. My first version also cleared the pre-roll *on detection*, before it was sent; caught while writing the test and fixed (the pre-roll is taken first). |
+| 14 | Lists and currency edge cases | Corrupt `lists.json` is backed up; removal prefers exact/plural matches ("egg" removes "eggs", not "vegan eggs"); "my/the shopping list" → shopping; currency guards bad responses, locks and writes the cache atomically |
+| 15 | `sys.path` grew on every profile reload | Guarded in every tool file |
+| 16 | Test gaps | Committed a public-domain excerpt fixture ([`tests/fixtures/books/alice_excerpt.txt`](local_backend/tests/fixtures/books/alice_excerpt.txt)), so the parsing and reader tests always run. New tests: two-argument calculator and the rounding cap; lists priority/names/corruption; mute following the UI toggle; the bridge clock with odd frames (it was vacuous in my first draft; rewritten to go through the real wrapper); a reader that never gets a transcript pauses. The reader integration test's bookmark check is now deterministic. |
+| 8, 17 | Reminders pause a book (reminder `say` flushes audio); doc drift | Documented here; reading resumes with "keep reading" |
+| live | Bare wake word; follow-up window too short | Profile rule: a bare wake word gets "Yes?". The follow-up window is counted from the end of *playback* (+10 s). Near-miss wake scores (0.2–0.5) are logged. |
+
+**Tests:** 95 passed without the speech-server group, and every tool-choice check was 8/8. Then 5/5 realtime tests with the app stopped: reader passages matched 1.0, max buffered 9.2 s.
