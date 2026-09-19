@@ -23,13 +23,14 @@ Robot speaker ◀─USB─ conversation app ◀────── audio + tool c
 **Run it:**
 
 ```bash
-local_backend/cache_models.sh            # once, while online (face model + motion datasets)
+local_backend/cache_models.sh            # once, while online (face model, motion datasets, wake-phrase model)
 ./start_daemon.sh                         # terminal 1: offline, no dataset updates, signalling on localhost
 local_backend/start_local_backend.sh      # terminal 2: loads + keeps Ollama model, starts speech server
 ./start_conversation.sh --local --ui      # terminal 3: the app; UI at http://127.0.0.1:7860
 # or, with online tools (weather, web search, tech news):
 local_backend/start_searxng.sh            # local SearXNG search engine in Docker, 127.0.0.1:8888
 ./start_conversation.sh --web --ui        # --web implies --local; profile local_reachy_web
+./start_conversation.sh --web --wake --ui # only listen after "Hey Reachy" (REACHY_WAKE_WORD to change)
 cd local_backend && ../third_party/speech-to-speech/.venv/bin/python -m pytest -v   # 28 checks
 ```
 
@@ -738,6 +739,37 @@ So the reader uses the robot's own voice, word for word, and the Piper fallback 
 
 **Fix:** restart the daemon (the app only reconnects). Afterwards: z = -1.8 mm at rest, 0 IK errors, no jerk on app start (max 4.5 mm per half second, all of it the greeting's normal wobble). Ruled out on the way: two wobblers (the app-side one moves the head for audio the app plays, the daemon's for the daemon's own audio, so there's no doubling) and the app's startup audio-board writes (rewriting all 7 settings moved the head at most 0.8 mm / 0.6°).
 
-**Check:** `curl -s 127.0.0.1:8000/api/state/present_head_pose`. At rest, `z` should be within about ±10 mm. If it's around -150 mm, restart the daemon.
+**Check:** `curl -s 127.0.0.1:8000/api/state/present_head_pose`. The head can physically only reach about -56…+25 mm, so any `z` outside -70…+50 mm (Fable found wrong solutions at -98, -103, -154 and -207 mm) means the daemon's estimate is on a wrong branch: restart the daemon.
 
 **Also:** stop the app with Ctrl-C / SIGINT, not a plain `pkill` (SIGTERM). SIGTERM skips the app's `finally:` shutdown (motion loop stop, wobbler off, clean disconnect).
+
+**Vetted by Fable** (read-only; offline kinematics experiments, 20 live GETs): the diagnosis holds; corrections:
+- **Why it happens:** `AnalyticalKinematics.fk` is a Newton solver that keeps its state between calls (seeded once from the sleep pose, then 3 iterations per 50 Hz tick). Neutral joints have a second, stable solution at z = -153.9 mm, upright, so the "not upright" guard never rejects it and the daemon can't recover by itself. It's a real second root of the rod equations, not a frame bug. Reproduced offline: a joint jump of 0.35 rad or more within one 20 ms tick flips the estimate. Motors move about 0.12 rad per tick, so the likely trigger is a control-loop stall of 2–3 ticks during a fast move (dance/emotion), or a bad joint read. Stalls are only logged at DEBUG. Starting the daemon from the sleep pose converged correctly in every case tried.
+- **Not only app restarts:** with the bad estimate, *every* restart of idle breathing jerks: after each emotion or dance, `move_head`, `sweep_look`, and the head-tracking hand-off while speaking. App restarts just made it reliable to see.
+- **The recorded numbers were themselves wrong-branch readings.** Inverting them gives the real motion: a drop of about 36 mm, a nod of about 20° and a 15 mm backward shift. The head couldn't move for the first ~68 % of the glide: 7 % had IK solutions outside the motor limits (rejected by the motors), 56 % had no IK solution (the "IK error" lines), and 5 % were reachable but beyond the limits. First movement predicted at 8.43 s, observed at 8.45 s.
+- **On an unreachable target** the daemon keeps sending the last good joints (`update_target_head_joints_from_ik` raises before assigning, and the error is logged throttled), which is why the head held still.
+- The rotation of up to 17.5° yaw in half a second during the greeting after the fix is more than normal speech wobble (≤8°), probably a greeting emotion (unverified). It isn't the failure signature.
+- SIGTERM does skip the app's `finally:` (the app installs no signal handlers), but that's unrelated to the jerk: the daemon just drops the client.
+- **Possible safeguard (not built):** at app start, one GET of `/api/state/full?with_head_joints=true`; warn if `z` is outside -70…+50 mm, or if a fresh `AnalyticalKinematics().fk(head_joints)` differs from the published `z` by more than 20 mm.
+
+### Wake phrase "Hey Reachy" (2026-09-19, 10:56–11:10)
+
+openWakeWord only ships alexa, hey_jarvis, hey_marvin and hey_mycroft; a "hey_reachy" model would need training (several GB of training data plus GPU time). Instead, `--wake` now uses **sherpa-onnx's open-vocabulary keyword spotter**, which takes the phrase as text: `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01` (Apache-2.0, 18 MB, downloaded by `cache_models.sh` into `local_backend/models/kws/`, git-ignored). It runs offline in the app process. Packages added to the app venv: `sherpa-onnx` 1.13.8 and `sentencepiece` 0.2.2 (not in uv.lock, like openwakeword).
+
+**Tuning** (synthetic Piper clips: 7 "Hey Reachy ..." sentences × 3 speeds; 14 near-miss sentences; 4.6 min of other speech, including the robot reading and a robot line with "reaching"):
+
+| Setting | "Hey Reachy" clean | with room noise (10 dB SNR) | Near misses | Other speech |
+| --- | --- | --- | --- | --- |
+| int8 model, 4 paths, boost 2.0, threshold 0.15 | 14/21 | 15/21 | none | 0 false alarms |
+| **fp32 model, 8 paths, boost 2.0, threshold 0.15 (chosen)** | **18/21** | **17/21** | "Hey Richie" | **0 false alarms** |
+| fp32, 8 paths, boost 3.0, threshold 0.1 | 19/21 | 17/21 | "Hey Richie" | 0 false alarms |
+
+A bare "Hey Reachy." was caught every time; the misses were all "Hey Reachy, <request>" clips. Other spellings (REECHY, REACHEE, REACHIE) didn't help, and "HEY RICHY" caught more but also woke on "Hey Richie". CPU: about 1.4 % of one core for the spotter (the whole app idles at about 6 %).
+
+**Profiles:** the wake rule now names "Hey Reachy" and the spellings Parakeet may produce ("Hey Richie", "Hey Ritchie", "Hey Reach"). Checked 4× each: "Hey Reachy." and "Hey Richie." → "Yes?"; "Hey Richie, what time is it?" → `get_time`; "Hey Reach, what's 17 times 23?" → `calculate` (16/16).
+
+**Settings:** `REACHY_WAKE_WORD` takes any phrase (default "hey reachy"), or an openWakeWord name/`.onnx` path to use openWakeWord as before. `REACHY_WAKE_THRESHOLD` defaults to 0.15 for the spotter (lower wakes more easily) and 0.4 for openWakeWord. The spotter gives no scores, so there is no near-miss logging for it.
+
+**Tests:** `test_wake_phrase_hey_reachy` (engine routing, a phrase the model can't spell is rejected, "Hey Reachy ..." forwarded with pre-roll, "Hey Reggie" and "reaching"/"peachy" speech not forwarded). 36 offline tests pass.
+
+**First live try: it didn't wake** (11:07–11:10, no detections). Investigation below.

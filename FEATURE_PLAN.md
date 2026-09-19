@@ -55,7 +55,7 @@ The RPC (`ws://127.0.0.1:7860/rpc`) stays for cross-process callers such as the 
 - **Privacy:** gated audio never leaves the process.
 - **Opt-in:** a `--wake` launcher flag.
 
-**The wake word itself:** start with a **pre-trained word** (e.g. "hey jarvis"; the exact list is unverified). Train a custom **"Hey Reachy"** model later with openWakeWord's notebook, estimated at ~1 h on this GPU (unverified).
+**Update (2026-09-19):** "Hey Reachy" now works without training, via sherpa-onnx's open-vocabulary keyword spotter (LOCAL_CONVERSATION.md, "Wake phrase"). **Original plan:** start with a **pre-trained word** (e.g. "hey jarvis"; the exact list is unverified). Train a custom **"Hey Reachy"** model later with openWakeWord's notebook, estimated at ~1 h on this GPU (unverified).
 
 **Rejected:**
 - **Porcupine:** it needs an online AccessKey.
