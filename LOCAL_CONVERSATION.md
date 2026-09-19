@@ -727,3 +727,17 @@ So the reader uses the robot's own voice, word for word, and the Piper fallback 
 | 17 | Docstrings still said ~150-word passages and "just before the current one runs out" | Updated (reader, bridge) |
 
 **Tests:** 35 offline tests pass (LLM and realtime groups not re-run: no prompt changes, and the live app holds the speech server).
+
+### Head jerks on every app restart (2026-09-19, 10:46–10:55)
+
+**Symptom:** "the motors shake a lot" whenever the app was restarted. It looked like a second connection, but there was only one: the daemon had one `/ws/sdk` client and drops clients on disconnect.
+
+**Measured** (head pose from `/api/state/full` at 60 Hz through a restart): 0.8 s after the app started, the head was frozen for 0.75 s, then nodded down 24° and dropped 27 mm within 130 ms, and sprang back within 250 ms. That was followed by the normal talking wobble of the greeting. The daemon logged 2–4 `IK error: Collision detected or head pose not achievable!` at every app start (16 in total).
+
+**Cause:** the daemon's *reported* head pose was wrong: z = -154 mm at neutral, while the joints (all ±0.627 rad) are exactly neutral and the SDK's own `AnalyticalKinematics().fk()` gives -1 mm for them. The daemon's forward kinematics is iterative, seeded from its previous estimate, and had locked onto a wrong solution. The app starts its idle `BreathingMove` with a 1 s glide from `get_current_head_pose()` (that wrong pose) to neutral. The first 75 % of the glide was unreachable (IK errors, head held still), then the head snapped to the first reachable pose.
+
+**Fix:** restart the daemon (the app only reconnects). Afterwards: z = -1.8 mm at rest, 0 IK errors, no jerk on app start (max 4.5 mm per half second, all of it the greeting's normal wobble). Ruled out on the way: two wobblers (the app-side one moves the head for audio the app plays, the daemon's for the daemon's own audio, so there's no doubling) and the app's startup audio-board writes (rewriting all 7 settings moved the head at most 0.8 mm / 0.6°).
+
+**Check:** `curl -s 127.0.0.1:8000/api/state/present_head_pose`. At rest, `z` should be within about ±10 mm. If it's around -150 mm, restart the daemon.
+
+**Also:** stop the app with Ctrl-C / SIGINT, not a plain `pkill` (SIGTERM). SIGTERM skips the app's `finally:` shutdown (motion loop stop, wobbler off, clean disconnect).
