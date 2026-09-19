@@ -49,6 +49,15 @@ logger = logging.getLogger("reachy_reader")
 HERE = Path(__file__).resolve().parent
 BOOKS = Path(os.environ.get("REACHY_BOOKS_DIR", HERE / "books"))
 BOOKMARKS = Path(os.environ.get("REACHY_BOOKMARKS_FILE", HERE / "state" / "books.json"))
+
+
+def _bookmarks() -> Path:
+    """This file, or the active assistant's own bookmarks with --assistants (reachy_assistants)."""
+    try:
+        import reachy_assistants
+        return reachy_assistants.data_file("books.json", BOOKMARKS)
+    except ImportError:
+        return BOOKMARKS
 PASSAGE_WORDS = 110   # ~40 s of speech, so there is a pause for the user at least that often
 LEAD_S = 0.0          # send the next passage only when the current one has finished playing...
 GAP_S = 1.5           # ...plus this pause, during which the microphone is not suppressed
@@ -208,7 +217,7 @@ def find(query: str) -> Path | None:
 
 def _load_marks() -> dict[str, Any]:
     try:
-        return json.loads(BOOKMARKS.read_text())
+        return json.loads(_bookmarks().read_text())
     except (FileNotFoundError, ValueError):
         return {}
 
@@ -225,10 +234,10 @@ def _save_mark_locked(key: str, chunk: int) -> None:
     marks = _load_marks()
     marks[key] = {"chunk": chunk, "updated": datetime.now().isoformat(timespec="seconds")}
     marks["_last"] = key
-    BOOKMARKS.parent.mkdir(parents=True, exist_ok=True)
-    tmp = BOOKMARKS.with_suffix(".tmp")
+    _bookmarks().parent.mkdir(parents=True, exist_ok=True)
+    tmp = _bookmarks().with_suffix(".tmp")
     tmp.write_text(json.dumps(marks, indent=1))
-    tmp.replace(BOOKMARKS)
+    tmp.replace(_bookmarks())
 
 
 def bookmark(key: str) -> int:

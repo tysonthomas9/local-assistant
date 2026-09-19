@@ -15,7 +15,7 @@ if str(Path(__file__).resolve().parents[1]) not in sys.path:
 import reachy_bridge  # noqa: E402
 import reachy_reader as rr  # noqa: E402
 
-from reachy_mini_conversation_app import config  # noqa: E402
+from reachy_mini_conversation_app.config import config  # noqa: E402  (the settings object, not the module)
 from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies  # noqa: E402
 
 

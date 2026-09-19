@@ -35,6 +35,13 @@ import reachy_bridge  # noqa: E402
 
 reachy_bridge.install()
 
+# Optional: several assistants picked by wake word (start_conversation.sh --assistants). Before the wake gate,
+# which takes its words from the assistant registry.
+if os.environ.get("REACHY_ASSISTANTS"):
+    import reachy_assistants  # noqa: E402
+
+    reachy_assistants.install()
+
 # Optional wake-word gate (start_conversation.sh --wake / REACHY_WAKE_WORD).
 if os.environ.get("REACHY_WAKE_WORD"):
     import reachy_wake  # noqa: E402

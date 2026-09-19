@@ -14,6 +14,15 @@ import time
 from pathlib import Path
 
 STATE_FILE = Path(os.environ.get("REACHY_LISTS_FILE", Path(__file__).parent / "state" / "lists.json"))
+
+
+def _file() -> Path:
+    """This file, or the active assistant's own lists with --assistants (reachy_assistants)."""
+    try:
+        import reachy_assistants
+        return reachy_assistants.data_file("lists.json", STATE_FILE)
+    except ImportError:
+        return STATE_FILE
 _lock = threading.Lock()
 _ALIASES = {"to do": "todo", "to-do": "todo", "todos": "todo", "to dos": "todo", "tasks": "todo", "task": "todo",
             "groceries": "shopping", "grocery": "shopping", "grocery list": "shopping", "shopping list": "shopping",
@@ -30,23 +39,23 @@ def list_key(name: str) -> str:
 
 def _load() -> dict[str, list[str]]:
     try:
-        data = json.loads(STATE_FILE.read_text())
+        data = json.loads(_file().read_text())
         if not isinstance(data, dict):
             raise ValueError("not a JSON object")
         return data
     except FileNotFoundError:
         return {}
     except ValueError:   # corrupt file: keep a copy, start empty rather than failing every action
-        backup = STATE_FILE.with_suffix(f".corrupt-{int(time.time())}.json")
-        STATE_FILE.replace(backup)
+        backup = _file().with_suffix(f".corrupt-{int(time.time())}.json")
+        _file().replace(backup)
         return {}
 
 
 def _save(data: dict[str, list[str]]) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".tmp")
+    _file().parent.mkdir(parents=True, exist_ok=True)
+    tmp = _file().with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False))
-    tmp.replace(STATE_FILE)
+    tmp.replace(_file())
 
 
 def add(name: str, items: list[str]) -> tuple[str, list[str], list[str]]:

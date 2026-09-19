@@ -19,7 +19,7 @@ if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import reachy_bridge  # noqa: E402
 
-from reachy_mini_conversation_app import config  # noqa: E402
+from reachy_mini_conversation_app.config import config  # noqa: E402  (the settings object, not the module)
 from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies  # noqa: E402
 
 
@@ -44,9 +44,19 @@ SYNONYMS = {  # words people use -> persona name
 SWITCH_WAIT_S = 8
 
 
+def _assistant_names() -> set[str]:
+    """Assistants picked by wake word (local_backend/assistants.json) are not personas."""
+    try:
+        import json
+        return set(json.loads((PROFILES.parent / "assistants.json").read_text()).get("assistants", {}))
+    except (OSError, ValueError):
+        return set()
+
+
 def available() -> list[str]:
+    skip = {"local_reachy"} | {f"local_{n}" for n in _assistant_names()}
     return sorted(p.name[len("local_"):] for p in PROFILES.glob("local_*")
-                  if not p.name.endswith("_web") and p.name not in ("local_reachy",))
+                  if not p.name.endswith("_web") and p.name not in skip)
 
 
 def match(request: str) -> str | None:
@@ -106,7 +116,14 @@ class SwitchPersona(Tool):
         if name is None:
             return {"error": f"No persona like {request!r}.", "personas": available()}
         web = str(config.REACHY_MINI_CUSTOM_PROFILE or "").endswith("_web")
-        profile = ("local_reachy" if name == "" else f"local_{name}") + ("_web" if web else "")
+        normal = "local_reachy"
+        try:
+            import reachy_assistants  # with --assistants, "normal" is the active assistant's own style
+            if reachy_assistants.enabled():
+                normal = reachy_assistants.spec()["profile"]
+        except ImportError:
+            pass
+        profile = (normal if name == "" else f"local_{name}") + ("_web" if web else "")
         if profile == config.REACHY_MINI_CUSTOM_PROFILE:
             return {"note": "Already in that persona."}
         if reachy_bridge.stream() is None:

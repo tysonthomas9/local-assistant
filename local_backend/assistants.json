@@ -1,0 +1,8 @@
+{
+  "_doc": "Assistants picked by wake word (start_conversation.sh --assistants). See MULTI_ASSISTANT_PLAN.md and local_backend/reachy_assistants.py. profile = base profile name without _web; run make_personas.py after adding one.",
+  "default": "jarvis",
+  "assistants": {
+    "jarvis": {"wake_word": "hey_jarvis", "threshold": 0.4, "profile": "local_jarvis", "voice": "Ryan"},
+    "marvin": {"wake_word": "hey_marvin", "threshold": 0.5, "profile": "local_marvin", "voice": "Eric"}
+  }
+}

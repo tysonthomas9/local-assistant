@@ -7,7 +7,9 @@ immediately and this module's background thread fires each reminder by calling t
 JSON-RPC method `conversation.say` on ws://127.0.0.1:7860/rpc (served when the app runs with --ui).
 The model then speaks the reminder in its own voice.
 
-Reminders are kept in local_backend/state/reminders.json, so they survive an app restart. One that
+Reminders are kept in local_backend/state/reminders.json, so they survive an app restart. With several
+assistants (--assistants), each reminder has an "owner"; an assistant only lists and cancels its own, and a
+reminder that comes due while another assistant is active is announced as its owner's. One that
 came due while the app was down is still announced if it is less than an hour late; older ones are
 dropped (and logged).
 
@@ -122,6 +124,14 @@ async def rpc_reachable(url: str = RPC_URL) -> bool:
         return False
 
 
+def _owner() -> str:
+    try:
+        import reachy_assistants
+        return reachy_assistants.active() if reachy_assistants.enabled() else ""
+    except ImportError:
+        return ""
+
+
 class Scheduler:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -155,6 +165,8 @@ class Scheduler:
     def add(self, message: str, due: datetime, sound: str = "chime") -> dict[str, Any]:
         item = {"id": uuid.uuid4().hex[:6], "message": message.strip(), "due": due.isoformat(),
                 "created": now().isoformat(), "sound": (sound or "none").strip().lower()}
+        if _owner():
+            item["owner"] = _owner()
         with self._lock:
             self._items.append(item)
             self._items.sort(key=lambda x: x["due"])
@@ -163,18 +175,22 @@ class Scheduler:
         self.ensure_started()
         return item
 
+    def _mine(self, item: dict[str, Any]) -> bool:
+        return item.get("owner", "") in ("", _owner())
+
     def pending(self) -> list[dict[str, Any]]:
         with self._lock:
-            return list(self._items)
+            return [x for x in self._items if self._mine(x)]
 
     def cancel(self, which: str = "", all_: bool = False) -> list[dict[str, Any]]:
         which = which.strip().lower()
         with self._lock:
             if all_:
-                removed, self._items = self._items, []
+                removed = [x for x in self._items if self._mine(x)]
             else:
-                removed = [x for x in self._items if which and (x["id"] == which or which in x["message"].lower())]
-                self._items = [x for x in self._items if x not in removed]
+                removed = [x for x in self._items if self._mine(x) and which
+                           and (x["id"] == which or which in x["message"].lower())]
+            self._items = [x for x in self._items if x not in removed]
             if removed:
                 self._save()
         self._wake.set()
@@ -225,6 +241,9 @@ class Scheduler:
         self._ring(item.get("sound", "chime"))
         due = datetime.fromisoformat(item["due"])
         when = f", it was due at {spoken_time(due)}" if late > timedelta(minutes=2) else ""
+        owner = item.get("owner", "")
+        if owner and owner != _owner():
+            when += f"; {owner.title()} set it, so say it's {owner.title()}'s reminder"
         text = f"{FIRE_PREFIX}{when}) {item['message']}"
         for attempt in range(1, 4):
             try:

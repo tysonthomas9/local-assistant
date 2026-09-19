@@ -66,6 +66,8 @@ def install() -> None:
 
     cls.__init__, cls._dispatch_activity, cls.clear_audio_queue = __init__, _dispatch_activity, clear_audio_queue
 
+    _install_slot_wait()
+
     try:
         from reachy_mini.media import media_manager
 
@@ -86,6 +88,54 @@ def install() -> None:
     except Exception:
         logger.warning("playback clock unavailable", exc_info=True)
     _installed = True
+
+
+SLOT_WAIT_S = 3.0
+
+
+def _pool_url() -> str | None:
+    """http://host:port/v1/pool of a local speech server, from the app's realtime URL."""
+    import os
+    from urllib.parse import urlparse
+    try:
+        from reachy_mini_conversation_app.config import HF_REALTIME_WS_URL_ENV
+        url = os.environ.get(HF_REALTIME_WS_URL_ENV, "")
+    except Exception:
+        return None
+    u = urlparse(url)
+    if u.hostname not in ("127.0.0.1", "localhost", "::1") or not u.port:
+        return None
+    return f"http://{u.hostname}:{u.port}/v1/pool"
+
+
+def _install_slot_wait() -> None:
+    """Before (re)connecting, wait until the speech server has freed a session slot.
+
+    After a session closes the server needs ~50 ms (longer if a reply was being generated) to release its
+    pipeline; a reconnect that arrives earlier is rejected and the app only retries after 1-1.5 s.
+    """
+    try:
+        from reachy_mini_conversation_app import huggingface_realtime as hr
+    except Exception:
+        return
+    orig_start_up = hr.HuggingFaceRealtimeHandler.start_up
+
+    async def start_up(self: Any) -> None:
+        url = _pool_url()
+        if url:
+            import httpx
+            deadline = time.monotonic() + SLOT_WAIT_S
+            try:
+                async with httpx.AsyncClient(timeout=1.0) as client:
+                    while time.monotonic() < deadline:
+                        pool = (await client.get(url)).json()
+                        if pool.get("in_use", 0) < pool.get("size", 1):
+                            break
+                        await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.debug("slot wait skipped: %r", e)
+        return await orig_start_up(self)
+    hr.HuggingFaceRealtimeHandler.start_up = start_up
 
 
 def add_played_audio(seconds: float) -> None:

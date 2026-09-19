@@ -835,6 +835,156 @@ print(json.dumps(out))
     assert r["wake"] > 1.5 and r["short"] > 0.5, "'Hey Reachy' (+ pre-roll) should be forwarded"
 
 
+def test_two_wake_words_report_which_fired(tmp_path):
+    """--assistants: one openWakeWord detector for hey_jarvis + hey_marvin says which word fired."""
+    piper = ROOT / ".venv" / "bin" / "python"
+    clips = {"jarvis": "Hey Jarvis, what time is it?", "marvin": "Hey Marvin, what time is it?",
+             "jarvis_stop": "Hey Jarvis, stop.", "marvin_short": "Hey Marvin.",
+             "other": "Hey, could you tell me a joke about robots and the weather?"}
+    code = ("import sys, wave; from piper import PiperVoice; v = PiperVoice.load(sys.argv[1])\n"
+            "for name, text in [a.split('=', 1) for a in sys.argv[3:]]:\n"
+            "    w = wave.open(sys.argv[2] + '/' + name + '.wav', 'wb'); v.synthesize_wav(text, w); w.close()")
+    subprocess.run([str(piper), "-c", code, str(ROOT / "voices/en_US-lessac-medium.onnx"), str(tmp_path),
+                    *[f"{k}={v}" for k, v in clips.items()]], check=True, capture_output=True)
+    r = _run_tools(r"""
+import wave, numpy as np
+from scipy.signal import resample_poly
+import reachy_wake as rw
+d = sys.argv[2]
+out = {}
+for name in ('jarvis', 'marvin', 'jarvis_stop', 'marvin_short', 'other'):
+    with wave.open(d + '/' + name + '.wav') as w:
+        a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768; sr = w.getframerate()
+    a = np.concatenate([np.zeros(8000), resample_poly(a, 16000, sr), np.zeros(16000)])
+    det = rw.Detector(words={'hey_jarvis': 0.4, 'hey_marvin': 0.5})
+    fired = [det.last_word for i in range(0, len(a) - 1279, 1280)
+             if det.feed((np.clip(a[i:i+1280], -1, 1) * 32767).astype(np.int16)) is not None]
+    out[name] = fired
+print(json.dumps(out))
+""".replace("sys.argv[2]", repr(str(tmp_path))))
+    assert r["jarvis"] == ["hey_jarvis"] and r["jarvis_stop"] == ["hey_jarvis"], r
+    assert r["marvin"] == ["hey_marvin"] and r["marvin_short"] == ["hey_marvin"], r
+    assert r["other"] == [], r
+
+
+def test_assistant_router_switch_isolation(tmp_path):
+    """--assistants end to end with the real app classes and a fake speech session: a wake word for the other
+    assistant holds the mic audio, restarts as that assistant, replays only its history and releases the audio;
+    memory, lists, bookmarks and reminders are per assistant; restyling is saved per assistant."""
+    r = _run_tools(r"""
+import os, types, time
+os.environ['REACHY_MINI_CUSTOM_PROFILE'] = 'local_reachy_web'
+import reachy_bridge as b; b.install()
+import reachy_assistants as ra
+ra.install()
+import reachy_wake as rw, reachy_lists, reachy_scheduler, reachy_reader
+from reachy_mini_conversation_app import config, memory, huggingface_realtime as hr
+from reachy_mini_conversation_app.console import LocalStream
+out = {'boot': ra.active(), 'boot_profile': config.config.REACHY_MINI_CUSTOM_PROFILE}
+
+class Conn:
+    def __init__(self): self.items = []
+    @property
+    def conversation(self):
+        conn = self
+        class C:
+            class item:
+                @staticmethod
+                async def create(item): conn.items.append(item)
+        return C
+class FakeHandler:
+    def __init__(self): self._startup_greeting_sent = False; self.connection = Conn(); self.greeted = False
+    def get_current_voice(self): return 'Ryan'
+    async def change_voice(self, v): self.voice = v
+sessions = []
+async def fake_apply(stream, profile):      # stands in for LocalStream.apply_personality's session restart
+    h = FakeHandler(); sessions.append((profile, h))
+    await hr.HuggingFaceRealtimeHandler._send_startup_greeting_prompt(h)
+ra._orig_apply_personality = fake_apply
+
+class Det:
+    word = 'hey_jarvis,hey_marvin'; last_word = 'hey_jarvis'; fire = None
+    def feed(self, x):
+        if self.fire: self.last_word, self.fire = self.fire, None; return 0.9
+        return None
+det = Det(); rw.GATE = rw.Gate(det, window_s=5, followup_s=5); b.subscribe(rw.GATE.on_activity)
+import numpy as np
+frame = np.zeros((512, 2), np.float32)
+
+async def wake(word, n_after=5):
+    det.fire = word
+    first = rw.GATE.process(frame, 16000, False, False)
+    held = [rw.GATE.process(frame, 16000, False, False) for _ in range(n_after)]
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        if not rw.GATE.holding: break
+    after = rw.GATE.process(frame, 16000, False, False)
+    return len(first), sum(len(h) for h in held), len(after)
+
+async def main():
+    s = LocalStream(types.SimpleNamespace(output_queue=asyncio.Queue()), types.SimpleNamespace(media=types.SimpleNamespace(audio=None)))
+    s._asyncio_loop = asyncio.get_running_loop()
+    # Jarvis: a conversation, a memory fact, a list item, a reminder
+    s._dispatch_transcript('user', 'My cat is called Tom.', True); s._dispatch_transcript('assistant', 'Noted, a fine name.', True)
+    memory.add_memory_fact(None, 'The user has a cat called Tom')
+    reachy_lists.add('shopping', ['milk'])
+    reachy_scheduler.SCHEDULER.add('feed Tom', reachy_scheduler.now() + reachy_scheduler.timedelta(hours=2))
+    out['jarvis_mem_file'] = str(memory.memory_path_for_instance(None)).split('assistants/')[1]
+    # "Hey Marvin, ..." -> switch
+    out['to_marvin_frames'] = await wake('hey_marvin')
+    out['after_marvin'] = {'active': ra.active(), 'profile': sessions[-1][0], 'replayed': len(sessions[-1][1].connection.items),
+                           'greeting_suppressed': sessions[-1][1]._startup_greeting_sent, 'lists': reachy_lists.lists(),
+                           'reminders': len(reachy_scheduler.SCHEDULER.pending()), 'memory': [f.text for f in memory.list_memory_facts(None)]}
+    s._dispatch_transcript('user', 'What is the meaning of life?', True); s._dispatch_transcript('assistant', 'Forty-two, sadly.', True)
+    # same assistant's wake word: no switch
+    n = len(sessions); await wake('hey_marvin'); out['same_word_no_switch'] = len(sessions) == n
+    # restyle Marvin, then back to normal
+    await s.apply_personality('local_noir_detective_web')
+    out['restyle'] = {'profile': sessions[-1][0], 'style': ra.style()}
+    # "Hey Jarvis" -> back, with Jarvis's history only
+    out['to_jarvis_frames'] = await wake('hey_jarvis')
+    items = sessions[-1][1].connection.items
+    out['after_jarvis'] = {'active': ra.active(), 'profile': sessions[-1][0],
+                           'replayed_texts': [i['content'][0]['text'] for i in items], 'roles': [i['role'] for i in items],
+                           'lists': reachy_lists.lists(), 'reminders': [x['message'] for x in reachy_scheduler.SCHEDULER.pending()]}
+    # Marvin's style survived; Jarvis unstyled
+    out['styles'] = {'marvin': ra.style('marvin'), 'jarvis': ra.style('jarvis')}
+    out['identity'] = ra.identity_note()[:120]
+    out['forget'] = ra.clear_history('jarvis')
+asyncio.run(main())
+print(json.dumps(out))
+""", REACHY_ASSISTANTS_STATE=str(tmp_path / "assistants"), REACHY_REMINDERS_FILE=str(tmp_path / "reminders.json"),
+       REACHY_LISTS_FILE=str(tmp_path / "lists.json"), REACHY_BOOKMARKS_FILE=str(tmp_path / "books.json"))
+    assert r["boot"] == "jarvis" and r["boot_profile"] == "local_jarvis_web"
+    assert r["jarvis_mem_file"] == "jarvis/memory.v1.json"
+    first, held, after = r["to_marvin_frames"]
+    assert first == 0 and held == 0 and after >= 7, "wake frame + following frames held, then released together"
+    m = r["after_marvin"]
+    assert m["active"] == "marvin" and m["profile"] == "local_marvin_web" and m["replayed"] == 0 and m["greeting_suppressed"]
+    assert m["lists"] == {} and m["reminders"] == 0 and m["memory"] == [], "Marvin must not see Jarvis's data"
+    assert r["same_word_no_switch"]
+    assert r["restyle"]["profile"] == "local_noir_detective_web" and r["restyle"]["style"] == {"profile": "local_noir_detective"}
+    j = r["after_jarvis"]
+    assert j["active"] == "jarvis" and j["profile"] == "local_jarvis_web"
+    assert j["replayed_texts"] == ["My cat is called Tom.", "Noted, a fine name."] and j["roles"] == ["user", "assistant"]
+    assert j["lists"] == {"shopping": 1} and j["reminders"] == ["feed Tom"]
+    assert r["styles"] == {"marvin": {"profile": "local_noir_detective"}, "jarvis": {}}
+    assert r["identity"].startswith("## WHO YOU ARE\nYour name is Jarvis") and r["forget"] == 2
+
+
+def test_tools_read_the_profile_setting():
+    """switch_persona and read_book read the current profile from the settings object; they imported the
+    config *module* by mistake (AttributeError on every real switch / download, found 2026-09-19)."""
+    r = _run_tools("""
+_, P = load('switch_persona', 'SwitchPersona'); _, B = load('read_book', 'ReadBook')
+async def main():
+    return {'persona': await P(None, persona='butler'), 'download': await B(None, action='download', title='Dracula')}
+print(json.dumps(asyncio.run(main())))
+""", REACHY_MINI_CUSTOM_PROFILE="local_reachy")
+    assert "needs the conversation app" in r["persona"]["error"]
+    assert "needs the internet" in r["download"]["error"]
+
+
 def test_lists_removal_priority_and_names(tmp_path):
     r = _run_tools("""
 import reachy_lists as rl

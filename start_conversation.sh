@@ -6,6 +6,9 @@
 #                                                local SearXNG, tech news); run local_backend/start_searxng.sh first
 #   add --wake                                   only listen after the wake word ("Hey Marvin" by default;
 #                                                REACHY_WAKE_WORD="<any phrase>" or hey_jarvis|hey_mycroft|hey_marvin|alexa); local modes only
+#   add --assistants                             several assistants picked by wake word ("Hey Jarvis" -> Jarvis,
+#                                                "Hey Marvin" -> Marvin), each with its own history, memory and
+#                                                lists; local_backend/assistants.json. Implies --wake.
 # Other arguments are passed through to the app, e.g. --no-camera, --debug.
 # The app runs via local_backend/run_app.py, which binds the --ui web page to 127.0.0.1 instead of
 # 0.0.0.0 (set REACHY_UI_HOST=0.0.0.0 to open it to the LAN).
@@ -27,18 +30,20 @@ done
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 # --web implies --local.
-local=0; wake=0; profile=local_reachy; args=()
+local=0; wake=0; assistants=0; profile=local_reachy; args=()
 for a in "$@"; do
     case "$a" in
         --local) local=1 ;;
         --web)   local=1; profile=local_reachy_web ;;
         --wake)  wake=1 ;;
+        --assistants) wake=1; assistants=1 ;;
         *)       args+=("$a") ;;
     esac
 done
 if [ "$wake" = 1 ]; then
     if [ "$local" = 1 ]; then
         export REACHY_WAKE_WORD="${REACHY_WAKE_WORD:-hey_marvin}"
+        [ "$assistants" = 1 ] && export REACHY_ASSISTANTS=1   # wake words come from assistants.json
     else
         echo "Note: --wake only works with --local/--web; ignoring it." >&2
     fi

@@ -1,6 +1,6 @@
 # Plan: several assistants on one robot, picked by wake word
 
-Drafted and vetted by Fable on 2026-09-19. Status: **plan approved in part (decisions below); not started.** Paths are relative to `~/codebase/robots`. "App" = `reachy_mini_conversation_app/src/reachy_mini_conversation_app/`, "S2S" = `third_party/speech-to-speech/src/speech_to_speech/`. Upstream stays unmodified: everything is wrapped or patched from `local_backend/`.
+Drafted and vetted by Fable on 2026-09-19. Status: **built 2026-09-19 (`start_conversation.sh --assistants`); offline tests pass; live test in progress.** Boot assistant = the one active last; the web UI persona picker restyles the active assistant. Paths are relative to `~/codebase/robots`. "App" = `reachy_mini_conversation_app/src/reachy_mini_conversation_app/`, "S2S" = `third_party/speech-to-speech/src/speech_to_speech/`. Upstream stays unmodified: everything is wrapped or patched from `local_backend/`.
 
 ## Goal
 

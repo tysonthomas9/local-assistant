@@ -56,6 +56,8 @@ FRAME = 1280                       # openWakeWord's 80 ms step
 PREROLL_S = 1.5
 COOLDOWN_S = 2.0
 NEAR_MISS = 0.2
+ARBITRATE_FRAMES = 2               # with several wake words: after one fires, compare scores for 2 more frames
+HOLD_MAX_S = 10.0                  # audio held during an assistant switch (reachy_assistants)
 
 
 KWS_MODEL = Path(__file__).parent / "models" / "kws" / "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
@@ -87,28 +89,65 @@ def make_detector(word: str, threshold: float | None = None) -> "Detector | Phra
 
 
 class Detector:
-    def __init__(self, word: str, threshold: float) -> None:
+    """openWakeWord, one or several words (`words` = {name: threshold}); `last_word` says which fired.
+
+    With several words, similar ones can both score (hey_marvin reached 0.4 on a real "Hey Jarvis, stop"),
+    so after the first one crosses its threshold the scores are compared over ARBITRATE_FRAMES more frames
+    (160 ms) and the highest word that crossed its own threshold wins.
+    """
+
+    def __init__(self, word: str = "", threshold: float = 0.5, words: dict[str, float] | None = None) -> None:
         from openwakeword.model import Model
-        self.word, self.threshold = word, threshold
-        self.model = Model(wakeword_model_paths=[_model_path(word)])
+        self.thresholds = dict(words) if words else {word: threshold}
+        self.word = ",".join(self.thresholds)
+        self.threshold = min(self.thresholds.values())
+        self.model = Model(wakeword_model_paths=[_model_path(w) for w in self.thresholds])
+        # prediction keys are model file stems ("hey_jarvis_v0.1"); map them back to our names
+        self._names = {k: next((w for w in self.thresholds if Path(_model_path(w)).stem == k or k.startswith(w)), k)
+                       for k in self.model.models}
+        self.last_word = next(iter(self.thresholds))
+        self._pending: dict[str, float] | None = None
+        self._pending_frames = 0
         self._buf = np.zeros(0, dtype=np.int16)
         self._last = 0.0
         self._last_near = 0.0
 
     def feed(self, mono16k_int16: np.ndarray) -> float | None:
-        """Add samples; returns the score if the wake word was just detected, else None."""
+        """Add samples; returns the score if a wake word was just detected (see last_word), else None."""
         self._buf = np.concatenate([self._buf, mono16k_int16])
         hit = None
         while len(self._buf) >= FRAME:
             chunk, self._buf = self._buf[:FRAME], self._buf[FRAME:]
-            score = max(float(v) for v in self.model.predict(chunk).values())
+            scores = {self._names.get(k, k): float(v) for k, v in self.model.predict(chunk).items()}
             now = time.monotonic()
-            if score >= self.threshold and now - self._last > COOLDOWN_S:
-                self._last, hit = now, score
-            elif NEAR_MISS <= score < self.threshold and now - self._last_near > 1.0:
-                self._last_near = now
-                logger.info("Wake word near miss: score %.2f (threshold %.2f)", score, self.threshold)
+            if self._pending is not None:
+                for w, sc in scores.items():
+                    self._pending[w] = max(self._pending.get(w, 0.0), sc)
+                self._pending_frames += 1
+                if self._pending_frames >= ARBITRATE_FRAMES:
+                    hit = self._decide(now)
+                continue
+            fired = [w for w, sc in scores.items() if sc >= self.thresholds.get(w, self.threshold)]
+            if fired and now - self._last > COOLDOWN_S:
+                self._pending, self._pending_frames = dict(scores), 0
+                if len(self.thresholds) == 1:
+                    hit = self._decide(now)
+            elif not fired and now - self._last_near > 1.0:
+                w, sc = max(scores.items(), key=lambda kv: kv[1])
+                if sc >= NEAR_MISS:
+                    self._last_near = now
+                    logger.info("Wake word near miss: %s score %.2f (threshold %.2f)", w, sc,
+                                self.thresholds.get(w, self.threshold))
         return hit
+
+    def _decide(self, now: float) -> float:
+        scores, self._pending = self._pending or {}, None
+        over = {w: sc for w, sc in scores.items() if sc >= self.thresholds.get(w, self.threshold)}
+        self.last_word = max(over or scores, key=(over or scores).get)
+        if len(scores) > 1:
+            logger.info("Wake word %s (scores %s)", self.last_word, {w: round(sc, 2) for w, sc in scores.items()})
+        self._last = now
+        return scores[self.last_word]
 
 
 class PhraseDetector:
@@ -136,6 +175,7 @@ class PhraseDetector:
         finally:
             os.unlink(f.name)
         self.stream = self.kws.create_stream()
+        self.last_word = self.word
         self._last = 0.0
 
     def feed(self, mono16k_int16: np.ndarray) -> float | None:
@@ -171,6 +211,28 @@ class Gate:
         self._ring_samples = 0
         self._lock = threading.Lock()
         self.detections = 0
+        self.last_word = getattr(detector, "last_word", getattr(detector, "word", ""))
+        self.holding = False               # an assistant switch is in progress: keep frames, send them later
+        self._held: list[np.ndarray] = []
+        self._held_samples = 0
+
+    # -- holding (reachy_assistants) -------------------------------------------------------------
+    def hold(self) -> None:
+        """Keep every forwarded frame until release() (the session is being rebuilt)."""
+        with self._lock:
+            self.holding = True
+
+    def release(self) -> None:
+        """Send the held frames with the next mic frame."""
+        with self._lock:
+            self.holding = False
+
+    def _stash(self, frames: list[np.ndarray], rate: int) -> None:
+        with self._lock:
+            self._held.extend(frames)
+            self._held_samples += sum(len(f) for f in frames)
+            while self._held and self._held_samples > HOLD_MAX_S * rate:
+                self._held_samples -= len(self._held.pop(0))
 
     # -- window --------------------------------------------------------------------------------
     def is_open(self) -> bool:
@@ -200,7 +262,8 @@ class Gate:
         """Frames to forward to the speech server now (possibly the pre-roll + this one)."""
         if not hard_muted and self.detector.feed(to_mono_int16(frame, rate)) is not None:
             self.detections += 1
-            logger.info("Wake word %r detected", getattr(self.detector, "word", "?"))
+            self.last_word = getattr(self.detector, "last_word", getattr(self.detector, "word", ""))
+            logger.info("Wake word %r detected", self.last_word)
             with self._lock:                    # take the pre-roll *before* opening the window (which clears it)
                 preroll = list(self._ring)
                 self._ring.clear()
@@ -209,11 +272,21 @@ class Gate:
                 import reachy_listening
                 reachy_listening.resume(reason="wake word")
                 muted = False
-            reachy_bridge.publish("wake_word")   # opens the window via on_activity
+            reachy_bridge.publish("wake_word")   # opens the window via on_activity; may start a switch (hold)
             self.extend(self.window_s)
+            if self.holding:
+                self._stash(preroll + [frame], rate)
+                return []
             return preroll + [frame]
         if muted:
             return []
+        if self.holding:
+            self._stash([frame], rate)
+            return []
+        if self._held:
+            with self._lock:
+                out, self._held, self._held_samples = self._held + [frame], [], 0
+            return out
         if self.is_open():
             return [frame]
         self._ring.append(frame)
@@ -238,10 +311,17 @@ def install() -> None:
     """Create the detector/gate and replace LocalStream.record_loop (call before the app starts)."""
     global GATE
     word = os.environ.get("REACHY_WAKE_WORD", "").strip()
-    if not word:
+    try:
+        import reachy_assistants
+        multi = reachy_assistants.wake_words() if reachy_assistants.enabled() else None
+    except Exception:
+        multi = None
+    if not word and not multi:
         return
     threshold = os.environ.get("REACHY_WAKE_THRESHOLD")
-    GATE = Gate(make_detector(word, float(threshold) if threshold else None),
+    detector = Detector(words=multi) if multi else make_detector(word, float(threshold) if threshold else None)
+    word = detector.word
+    GATE = Gate(detector,
                 window_s=float(os.environ.get("REACHY_WAKE_WINDOW_S", 8)),
                 followup_s=float(os.environ.get("REACHY_WAKE_FOLLOWUP_S", 10)))
     reachy_bridge.subscribe(GATE.on_activity)
