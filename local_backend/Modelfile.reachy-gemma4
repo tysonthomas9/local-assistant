@@ -1,0 +1,4 @@
+# Reachy Mini conversation model: gemma4:26b with a 32k context instead of the default 262k.
+# Chosen over qwen3.6:35b-a3b because, with thinking off, it reliably calls tools (see LOCAL_CONVERSATION.md).
+FROM gemma4:26b
+PARAMETER num_ctx 32768

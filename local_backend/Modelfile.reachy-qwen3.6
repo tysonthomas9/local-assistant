@@ -1,0 +1,4 @@
+# Reachy Mini conversation model: qwen3.6:35b-a3b with a 32k context instead of the
+# default 262k, so it leaves GPU memory free for speech-to-text and text-to-speech.
+FROM qwen3.6:35b-a3b
+PARAMETER num_ctx 32768

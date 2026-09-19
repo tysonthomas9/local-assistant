@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Upstream clones (separate git repos; versions are recorded in the docs)
+reachy_mini_conversation_app/
+third_party/
+
+# Downloaded models and runtime output
+voices/
+local_backend/logs/
+
+# Personal media recorded on this machine: a camera frame of the room and voice clips.
+# Needed by the tests/benchmark; kept locally, not committed.
+local_backend/tests/fixtures/camera_frame.jpg
+local_backend/tests/fixtures/stt/
