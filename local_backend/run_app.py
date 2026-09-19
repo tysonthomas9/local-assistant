@@ -35,6 +35,12 @@ import reachy_bridge  # noqa: E402
 
 reachy_bridge.install()
 
+# Optional wake-word gate (start_conversation.sh --wake / REACHY_WAKE_WORD).
+if os.environ.get("REACHY_WAKE_WORD"):
+    import reachy_wake  # noqa: E402
+
+    reachy_wake.install()
+
 from reachy_mini_conversation_app.main import main  # noqa: E402
 
 if __name__ == "__main__":

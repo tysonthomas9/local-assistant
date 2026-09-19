@@ -4,6 +4,8 @@
 #   ./start_conversation.sh --local --ui         fully local backend (run local_backend/start_local_backend.sh first)
 #   ./start_conversation.sh --local --web --ui   local speech + LLM, plus online tools (weather, web search via the
 #                                                local SearXNG, tech news); run local_backend/start_searxng.sh first
+#   add --wake                                   only listen after the wake word ("Hey Jarvis" by default;
+#                                                REACHY_WAKE_WORD=hey_mycroft|hey_marvin|alexa to change); local modes only
 # Other arguments are passed through to the app, e.g. --no-camera, --debug.
 # The app runs via local_backend/run_app.py, which binds the --ui web page to 127.0.0.1 instead of
 # 0.0.0.0 (set REACHY_UI_HOST=0.0.0.0 to open it to the LAN).
@@ -30,6 +32,7 @@ for a in "$@"; do
     case "$a" in
         --local) local=1 ;;
         --web)   local=1; profile=local_reachy_web ;;
+        --wake)  export REACHY_WAKE_WORD="${REACHY_WAKE_WORD:-hey_jarvis}" ;;
         *)       args+=("$a") ;;
     esac
 done

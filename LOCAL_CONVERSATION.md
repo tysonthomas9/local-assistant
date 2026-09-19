@@ -626,3 +626,37 @@ So the reader uses the robot's own voice, word for word, and the Piper fallback 
 - **Slot handoff:** the reader test first skipped because the previous test's session hadn't released the server's single slot yet (the server sends an error event, then closes). It now retries for up to 15 s.
 
 **Not yet tried live:** does the robot hear its own reading? It depends on the audio board's echo cancellation, and the SDK adds none of its own with our `~/.asoundrc`. If it does, the reader will keep pausing itself; the wake word (next) would fix that.
+
+### Batch 4: wake word (2026-09-19)
+
+**openWakeWord:**
+- **Version:** `uv pip install openwakeword` in the app venv resolved **0.4.0**, not the 0.6 the plan mentioned. It runs on onnxruntime (1.27 is already there) and ships its models **inside the package** (alexa, hey_jarvis, hey_marvin, hey_mycroft, plus timer/weather), so nothing is downloaded at runtime. It isn't in the app's `uv.lock`, so re-run `uv pip install openwakeword` after re-syncing that venv.
+- **Tested on Piper-synthesised clips:**
+
+| Clip | hey_jarvis | hey_mycroft |
+| --- | --- | --- |
+| "Hey Jarvis, what time is it?" | 0.999 | 0.000 |
+| "Hey Mycroft, play some music." | 0.000 | 0.989 |
+| "Hey Reachy, tell me a joke…" | 0.007 | 0.002 |
+| "What's the weather like today?" | 0.000 | 0.000 |
+
+- **Cost:** 1.4–1.8 ms of CPU per 80 ms frame.
+
+**Gate** ([`reachy_wake.py`](local_backend/reachy_wake.py)): enabled by `./start_conversation.sh --wake` (default `hey_jarvis`; `REACHY_WAKE_WORD` selects another bundled word or a custom `.onnx`). `run_app.py` then replaces `LocalStream.record_loop` with the same loop plus the gate:
+- **Detection:** every mic frame goes to the detector, including while muted, but not when hard-muted.
+- **Closed:** frames only go into a 1.5 s ring buffer and never leave the process. While muted, not even that.
+- **On the wake word:** un-mute if muted, send the ring buffer (so the words after the wake word survive), open an 8 s window.
+- **What keeps the window open:** the user speaking or being transcribed, tool calls, reminders (`say`), and the robot answering. After a reply it stays open 8 s more for follow-ups and barge-in.
+- **Book reading doesn't keep it open,** so the robot can't hear its own reading; "Hey Jarvis, stop" still works.
+- **Profile rule:** a leading wake word in a transcript isn't part of the request.
+
+**Tests** (94 passed, 1 skipped because the app wasn't running):
+- `test_wake_word_gate` generates its clips with Piper, then checks: non-wake speech forwards 0 s; the wake clip forwards and opens; the window closes when quiet; an answering robot keeps it open; muted + wake word un-mutes; hard-muted + wake word forwards nothing; reading doesn't hold the window.
+- Tool choice after all six features (web profile 33 tools incl. the app's 2): all 8/8 except dance 7/8.
+
+**Live checks still needed on the robot** (all six features are built and tested offline):
+1. **Does the robot hear itself** during book reading and the radio (is there echo cancellation on the audio board)? Watch `speech.log` for VAD turns while it reads.
+2. **Wake word:** false triggers with the TV on, the detection rate from across the room, and whether "Hey Jarvis" needs to be louder than normal speech.
+3. **Muted pose:** does it look right? And no turns in `speech.log` while muted.
+4. **Persona switch:** the session restart, the greeting, and whether the voices suit the characters.
+5. **Radio and sounds:** loudness on the robot's speaker.

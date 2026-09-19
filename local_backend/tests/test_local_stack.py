@@ -608,6 +608,51 @@ def test_llm_bedtime_story_is_made_up(llm):
     assert ok >= TOOL_MIN_HITS, calls
 
 
+def test_wake_word_gate(tmp_path):
+    """openWakeWord + gate: speech without the wake word never leaves; 'Hey Jarvis' opens a window;
+    mute/hard-mute and book reading behave as documented (reachy_wake.py)."""
+    piper = ROOT / ".venv" / "bin" / "python"
+    clips = {"wake": "Hey Jarvis, what time is it?", "other": "Hey Reachy, tell me a joke about robots and the weather."}
+    code = ("import sys, wave; from piper import PiperVoice; v = PiperVoice.load(sys.argv[1])\n"
+            "for name, text in [a.split('=', 1) for a in sys.argv[3:]]:\n"
+            "    w = wave.open(sys.argv[2] + '/' + name + '.wav', 'wb'); v.synthesize_wav(text, w); w.close()")
+    subprocess.run([str(piper), "-c", code, str(ROOT / "voices/en_US-lessac-medium.onnx"), str(tmp_path),
+                    *[f"{k}={v}" for k, v in clips.items()]], check=True, capture_output=True)
+    r = _run_tools(r"""
+import time, types, wave, numpy as np
+from scipy.signal import resample_poly
+import reachy_bridge as b; b.install()
+import reachy_wake as rw, reachy_listening as rl, reachy_reader
+from reachy_mini_conversation_app.console import LocalStream
+d = sys.argv[2]
+def frames(name):
+    with wave.open(d + '/' + name + '.wav') as w:
+        a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768; sr = w.getframerate()
+    a = np.concatenate([np.zeros(8000), resample_poly(a, 16000, sr), np.zeros(16000)]).astype(np.float32)
+    st = np.stack([a, a], axis=1); return [st[i:i+512] for i in range(0, len(st) - 511, 512)]
+gate = rw.Gate(rw.Detector('hey_jarvis', 0.5), window_s=1.0, followup_s=1.0); b.subscribe(gate.on_activity)
+s = LocalStream(types.SimpleNamespace(output_queue=asyncio.Queue()), types.SimpleNamespace(media=types.SimpleNamespace(audio=None)))
+def run(name):
+    return sum(len(x) for f in frames(name) for x in gate.process(f, 16000, s._mic_muted, rl.is_hard_muted())) / 16000
+out = {'other': run('other')}
+out['wake'] = run('wake'); out['open_after_wake'] = gate.is_open(); time.sleep(1.2); out['closed_later'] = not gate.is_open()
+gate.extend(1.0); b.publish('response_created'); time.sleep(0.6); b.publish('assistant_audio_delta'); time.sleep(0.6)
+out['kept_open_while_answering'] = gate.is_open(); time.sleep(1.2)
+rl.mute(10, hard=False); out['muted_wake_forwarded'] = run('wake'); out['unmuted_by_wake'] = not s._mic_muted
+time.sleep(1.2); rl.mute(10, hard=True); out['hard_forwarded'] = run('wake'); out['still_hard_muted'] = s._mic_muted; rl.resume()
+time.sleep(1.2); reachy_reader.READER.reading = True; gate.extend(0.3); time.sleep(0.1)
+for _ in range(8): b.publish('assistant_audio_delta'); time.sleep(0.1)
+out['reading_holds_open'] = gate.is_open()
+print(json.dumps(out))
+""".replace("sys.argv[2]", repr(str(tmp_path))))
+    assert r["other"] == 0.0, "speech without the wake word must not be forwarded"
+    assert r["wake"] > 1.0 and r["open_after_wake"] and r["closed_later"]
+    assert r["kept_open_while_answering"]
+    assert r["muted_wake_forwarded"] > 0.5 and r["unmuted_by_wake"]
+    assert r["hard_forwarded"] == 0.0 and r["still_hard_muted"]
+    assert r["reading_holds_open"] is False
+
+
 LIST_ARG_CASES = [
     ("Add milk to my shopping list.", {"action": "add", "list": "shopping", "item": "milk"}),
     ("Put call the dentist on my to-do list.", {"action": "add", "list": "todo", "item": "dentist"}),
