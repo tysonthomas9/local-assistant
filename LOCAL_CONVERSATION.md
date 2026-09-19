@@ -587,3 +587,42 @@ You asked for these after the fully local work, so they're **opt-in**. The offli
   - "Stop listening for 10 minutes" → `action=stop, minutes=10`, 8/8.
   - Every other tool-choice check still 8/8.
 - **Needs the robot:** whether the pose looks right, and confirming in `speech.log` that no turns arrive while muted.
+
+### Batch 3: storyteller / book reader (2026-09-19)
+
+**The key experiment:** an out-of-band response (`response.create` with `conversation: "none"`, the passage as `input`, and instructions to read it "exactly as written, word for word") on the real speech server:
+- **Accuracy:** the 148-word opening of *Alice* came back with **word error rate 0.000**.
+- **Speed:** first audio in 0.61 s; ~30 s of audio generated in 8.5 s.
+- **Kept out of the conversation:** `conversation_id` was null, and a following in-band question ("did I just ask you to read a story?") got "No".
+
+So the reader uses the robot's own voice, word for word, and the Piper fallback isn't needed. Out-of-band responses also skip the speech server's pending-tool-result check, so reading never blocks the conversation.
+
+**[`reachy_reader.py`](local_backend/reachy_reader.py) + `read_book` tool** (both base profiles and all personas):
+- **Actions:** `start` (title, optional chapter; resumes from the bookmark unless `from_start`), `continue`, `stop`, `chapter`, `list`, `status`, `download` (web profile only).
+- **Parsing:**
+  - Strips the Gutenberg licence header and footer and `[Illustration]` markers.
+  - Detects headings (CHAPTER/BOOK/PART/STAVE/LETTER + Roman or Arabic numbers, converted: "CHAPTER IV." → "Chapter 4."). Heading-like lines inside a table of contents are skipped, because they aren't standalone paragraphs.
+  - ~150-word passages split at sentence boundaries. The first splitter used a variable-width look-behind, which Python's `re` rejects; it now splits on a captured punctuation group.
+  - *Alice*: 12 chapters, 218 passages (median 129 words), ends at "THE END".
+- **Title search:** the share of the query's key words ("the wonderland book" → Alice), with a fuzzy fallback. "moby dick" → no match, with an offer to download it.
+- **Bookmarks** are in `state/books.json`, and reading resumes where it stopped. After an interruption, the interrupted passage is re-read.
+- **Pacing:**
+  - The bridge now also wraps the SDK's `MediaManager.push_audio_sample` to keep a playback clock (`audio_seconds_left()`; reset on barge-in).
+  - Each passage is sent after the previous one has been generated **and** less than 6 s of its audio is left. Generation runs ~3.5× faster than speech, so without this, audio would pile up and keep playing after an interruption.
+  - The reader waits for the tool's spoken confirmation to finish before starting, and any `interrupted` / `user_speech_started` pauses it.
+- **Downloads:**
+  - Gutendex, the third-party API in the plan, timed out, so the reader uses **Gutenberg's own OPDS search feed** and `/ebooks/<id>.txt.utf-8`.
+  - It skips hits with no plain-text edition (e.g. illustration collections) and saves into `local_backend/books/`. That folder is git-ignored apart from its README; *Alice* was downloaded there for the tests.
+- **Bedtime stories:** a profile rule says to make them up, a few sentences at a time, without `read_book`.
+
+**Tests (92 passed + the realtime group):**
+- **Parsing** (offline).
+- **Gutenberg download** of *The Time Machine* (`-m online`).
+- **Tool choice** for "read me Alice", "keep reading", "stop reading", "what books do you have?": 8/8 each. "Tell me a bedtime story" doesn't call `read_book`: 8/8.
+- **Reader integration against the real speech server,** with a stand-in app that feeds the playback clock at 2× real time. The speed-up has to stay below generation speed; a first try at 10× never buffered anything, so pacing went untested. Results:
+  - 2 passages read with a normalised word match of **1.0**; the raw token comparison with punctuation gave 0.96;
+  - at most ~21 s of audio buffered, under one passage;
+  - a barge-in paused the reader, bookmarked the passage that was playing, and `reading` went false.
+- **Slot handoff:** the reader test first skipped because the previous test's session hadn't released the server's single slot yet (the server sends an error event, then closes). It now retries for up to 15 s.
+
+**Not yet tried live:** does the robot hear its own reading? It depends on the audio board's echo cancellation, and the SDK adds none of its own with our `~/.asoundrc`. If it does, the reader will keep pausing itself; the wake word (next) would fix that.

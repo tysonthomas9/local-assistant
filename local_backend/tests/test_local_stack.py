@@ -269,6 +269,10 @@ TOOL_CASES = [
     ("Please don't listen to me for the next hour.", "listening"),
     ("Mute yourself for 10 minutes.", "listening"),
     ("Are you listening right now?", "listening"),
+    ("Read me Alice in Wonderland.", "read_book"),
+    ("Keep reading the book.", "read_book"),
+    ("Stop reading, please.", "read_book"),
+    ("What books do you have?", "read_book"),
 ]
 
 
@@ -552,6 +556,56 @@ def test_llm_mute_duration(llm):
     ok = sum(bool(g) and g.get("action") == "stop" and float(g.get("minutes") or 0) == 10 for g in got)
     record("mute_minutes", hits=ok, runs=TOOL_RUNS, got=got)
     assert ok >= TOOL_MIN_HITS, got
+
+
+def test_book_parsing(monkeypatch):
+    import importlib
+    import sys
+    import types
+    src = ROOT / "local_backend/books/alice_s_adventures_in_wonderland.txt"
+    if not src.exists():
+        pytest.skip("put Alice (Gutenberg #11) in local_backend/books/ to run this test")
+    monkeypatch.syspath_prepend(str(ROOT / "local_backend"))
+    monkeypatch.setitem(sys.modules, "reachy_bridge", types.ModuleType("reachy_bridge"))
+    sys.modules.pop("reachy_reader", None)
+    rr = importlib.import_module("reachy_reader")
+    b = rr.parse(src)
+    assert b.title == "Alice's Adventures in Wonderland"
+    assert len(b.chapters) == 12 and b.chapters[0][0] == "Chapter 1. Down the Rabbit-Hole"
+    assert b.chapters[-1][0].startswith("Chapter 12.")
+    assert b.chunks[b.chapters[0][1]].startswith("Chapter 1. Down the Rabbit-Hole. Alice was beginning")
+    assert b.chunks[-1].rstrip().endswith("THE END"), "Gutenberg footer should be stripped"
+    assert not any("[Illustration" in c or "Project Gutenberg" in c for c in b.chunks[b.chapters[0][1]:])
+    words = [len(c.split()) for c in b.chunks]
+    assert max(words) <= 200 and sorted(words)[len(words) // 2] >= 80
+    assert rr._sentences('He said "Oh dear!" Then he left.') == ['He said "Oh dear!"', "Then he left."]
+    assert rr.find("the wonderland book") == src and rr.find("moby dick") is None
+
+
+@pytest.mark.online
+def test_gutenberg_download(tmp_path, monkeypatch):
+    import importlib
+    import sys
+    import types
+    monkeypatch.setenv("REACHY_BOOKS_DIR", str(tmp_path))
+    monkeypatch.syspath_prepend(str(ROOT / "local_backend"))
+    monkeypatch.setitem(sys.modules, "reachy_bridge", types.ModuleType("reachy_bridge"))
+    sys.modules.pop("reachy_reader", None)
+    rr = importlib.import_module("reachy_reader")
+    path = rr.gutenberg_download("the time machine wells")
+    book = rr.parse(path)
+    assert "time machine" in book.title.lower() and len(book.chunks) > 50
+
+
+def test_llm_bedtime_story_is_made_up(llm):
+    """'Tell me a bedtime story' (no book named) should be told by the model, not start the book reader."""
+    calls = []
+    for _ in range(TOOL_RUNS):
+        msg, _ = chat(llm, "Tell me a bedtime story.")
+        calls.append([tc.function.name for tc in (msg.tool_calls or [])])
+    ok = sum("read_book" not in c for c in calls)
+    record("bedtime_story", hits=ok, runs=TOOL_RUNS, calls=calls)
+    assert ok >= TOOL_MIN_HITS, calls
 
 
 LIST_ARG_CASES = [
@@ -870,6 +924,117 @@ def test_realtime_image_turn(realtime):
     record("realtime_image", first_audio=round(t["first_audio"] or -1, 2))
     assert re.search(r"sofa|couch", t["text"], re.I), t["text"]
     assert t["first_audio"] < IMAGE_FIRST_AUDIO_MAX
+
+
+class _FakeApp:
+    """Stands in for the conversation app so the book reader can be tested against the real speech server.
+
+    handler._safe_response_create sends response.create over a Realtime websocket, one at a time
+    (like the app's sender loop); audio deltas feed the bridge's playback clock at SPEEDUP x real time;
+    transcript.done publishes "assistant_transcript_done" through the bridge, as the app does.
+    """
+    SPEEDUP = 2.0   # must stay below the speech server's generation speed (~3.5x real time) so audio can pile up
+
+    def __init__(self, loop, ws):
+        self._asyncio_loop, self.ws = loop, ws
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.transcripts: list[str] = []
+        self.max_buffered = 0.0
+        self.handler = self
+        self._mic_muted = False
+
+    async def _safe_response_create(self, **kwargs):
+        await self.queue.put(kwargs)
+
+    async def run(self, bridge, rate: int):
+        while True:
+            kwargs = await self.queue.get()
+            await self.ws.send(json.dumps({"type": "response.create", **kwargs}))
+            text = ""
+            while True:
+                ev = json.loads(await self.ws.recv())
+                if ev["type"].endswith("audio.delta"):
+                    bridge.add_played_audio(len(base64.b64decode(ev["delta"])) / 2 / rate / self.SPEEDUP)
+                    self.max_buffered = max(self.max_buffered, bridge.audio_seconds_left())
+                elif ev["type"].endswith("audio_transcript.delta"):
+                    text += ev["delta"]
+                elif ev["type"].endswith("audio_transcript.done"):
+                    self.transcripts.append(text)
+                    bridge.publish("assistant_transcript_done")
+                elif ev["type"] in ("response.done", "error"):
+                    break
+
+
+@pytest.mark.realtime
+def test_book_reader_reads_verbatim_paces_and_pauses(tmp_path, monkeypatch):
+    import importlib
+    import sys
+    book_src = ROOT / "local_backend/books/alice_s_adventures_in_wonderland.txt"
+    if not book_src.exists():
+        pytest.skip("put Alice (Gutenberg #11) in local_backend/books/ to run this test")
+    monkeypatch.setenv("REACHY_BOOKMARKS_FILE", str(tmp_path / "books.json"))
+    monkeypatch.syspath_prepend(str(ROOT / "local_backend"))
+    for m in ("reachy_bridge", "reachy_reader"):
+        sys.modules.pop(m, None)
+    bridge = importlib.import_module("reachy_bridge")
+    rr = importlib.import_module("reachy_reader")
+    rr.LEAD_S = 6.0 / _FakeApp.SPEEDUP      # same pacing, compressed time
+    book = rr.parse(book_src)
+    start = book.chapters[0][1]
+
+    async def scenario():
+        first, ws = None, None
+        for _ in range(15):   # the previous test's session may take a few seconds to release the slot
+            try:
+                ws = await websockets.connect(REALTIME, max_size=None)
+                first = json.loads(await ws.recv())
+                if first.get("type") == "session.created":
+                    break
+                await ws.close()
+                await asyncio.sleep(1)
+            except OSError as e:
+                pytest.fail(f"speech server not reachable: {e}")
+            except websockets.exceptions.ConnectionClosed:
+                await asyncio.sleep(1)
+        if not first or first.get("type") != "session.created":
+            pytest.skip("speech server slot in use: stop the conversation app to run realtime tests")
+        rate = (first["session"].get("audio", {}).get("output", {}).get("format", {}) or {}).get("rate", 24000)
+        app = _FakeApp(asyncio.get_running_loop(), ws)
+        bridge._stream = app
+        pump = asyncio.create_task(app.run(bridge, rate))
+        bridge.publish("assistant_transcript_done")  # the tool's confirmation "finished"
+        rr.READER.start(book, start)
+        await asyncio.sleep(0.5)
+        bridge.publish("assistant_transcript_done")
+        # wait until 2 passages are transcribed and a 3rd is in flight, then interrupt it
+        t0 = time.time()
+        while len(app.transcripts) < 2 and time.time() - t0 < 120:
+            await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
+        playing = rr.READER.pos
+        bridge.publish("interrupted")
+        await asyncio.sleep(1.0)
+        paused = {"reading": rr.READER.reading, "mark": rr.bookmark(book.key)}
+        pump.cancel()
+        await ws.close()
+        return app, playing, paused
+
+    app, playing, paused = asyncio.run(scenario())
+    norm = lambda t: re.sub(r"[^a-z0-9' ]", " ", t.lower().replace("’", "'").replace("-", " ")).split()
+    for i, text in enumerate(app.transcripts[:2]):
+        from difflib import SequenceMatcher
+        ref, hyp = norm(book.chunks[start + i]), norm(text)
+        ratio = SequenceMatcher(None, ref, hyp).ratio()
+        diffs = [(op, " ".join(ref[a1:a2]), " ".join(hyp[b1:b2])) for op, a1, a2, b1, b2
+                 in SequenceMatcher(None, ref, hyp).get_opcodes() if op != "equal"]
+        record("reader_passage", passage=start + i, match_ratio=round(ratio, 3), diffs=diffs[:10])
+        assert ratio >= 0.95, f"passage {start + i} not read verbatim ({ratio:.3f}): {text[:120]!r}"
+    record("reader_pacing", max_buffered_s=round(app.max_buffered * _FakeApp.SPEEDUP, 1))
+    one_passage = max(len(c.split()) for c in book.chunks[start:start + 3]) / 2.0  # >= ~2 words/s of speech
+    assert app.max_buffered * _FakeApp.SPEEDUP <= 6.0 + one_passage + 2, "reader buffered more than ~one passage ahead"
+    assert paused["reading"] is False, "reader should pause on interruption"
+    assert paused["mark"] == playing, "bookmark should point at the passage that was playing"
+    assert playing >= start + 1
 
 
 # --- Locality and GPU ----------------------------------------------------------------------

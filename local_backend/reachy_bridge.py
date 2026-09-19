@@ -9,6 +9,11 @@ book reading and persona switching need the live conversation stream. run_app.py
                          response_created, assistant_transcript_done, ...)
   clear_audio_queue   -> publish "interrupted" (barge-in, conversation.say/interrupt)
 
+It also wraps the SDK's MediaManager.push_audio_sample to keep a playback clock:
+`audio_seconds_left()` estimates how much already-sent speech is still waiting to be played
+(pushed audio is played in real time; a barge-in flush resets it). The book reader uses it to
+send the next passage just before the current one runs out, without piling up audio.
+
 This module is imported normally (not re-executed on profile reloads like tool files), so its
 state survives persona switches. Subscribers are called on the app's event loop and must be quick.
 """
@@ -18,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Any, Callable, Coroutine
 
 logger = logging.getLogger("reachy_bridge")
@@ -26,6 +32,9 @@ _stream: Any = None
 _subscribers: list[Callable[[str], None]] = []
 _sub_lock = threading.Lock()
 _installed = False
+_play_lock = threading.Lock()
+_play_end = 0.0          # monotonic time when pushed audio will have finished playing
+OUTPUT_RATE = 16000      # the robot's audio board; refreshed from the media manager when available
 
 
 def install() -> None:
@@ -48,11 +57,44 @@ def install() -> None:
         publish(reason)
 
     def clear_audio_queue(self: Any) -> None:
+        global _play_end
         orig_clear(self)
+        with _play_lock:
+            _play_end = time.monotonic()
         publish("interrupted")
 
     cls.__init__, cls._dispatch_activity, cls.clear_audio_queue = __init__, _dispatch_activity, clear_audio_queue
+
+    try:
+        from reachy_mini.media import media_manager
+
+        orig_push = media_manager.MediaManager.push_audio_sample
+
+        def push_audio_sample(self: Any, data: Any) -> None:
+            orig_push(self, data)
+            try:
+                rate = self.get_output_audio_samplerate() or OUTPUT_RATE
+            except Exception:
+                rate = OUTPUT_RATE
+            add_played_audio(len(data) / float(rate))
+
+        media_manager.MediaManager.push_audio_sample = push_audio_sample
+    except Exception:
+        logger.warning("playback clock unavailable", exc_info=True)
     _installed = True
+
+
+def add_played_audio(seconds: float) -> None:
+    """Account for `seconds` of audio handed to the speaker (called by the push_audio_sample wrapper)."""
+    global _play_end
+    with _play_lock:
+        _play_end = max(_play_end, time.monotonic()) + seconds
+
+
+def audio_seconds_left() -> float:
+    """Seconds of already-pushed speech still to be played (0 when the robot is quiet)."""
+    with _play_lock:
+        return max(0.0, _play_end - time.monotonic())
 
 
 def stream() -> Any:

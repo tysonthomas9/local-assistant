@@ -23,3 +23,7 @@ local_backend/state/
 
 # Generated sound effects and your own custom sounds
 local_backend/sounds/
+
+# Books (except the README)
+local_backend/books/*
+!local_backend/books/README.md
