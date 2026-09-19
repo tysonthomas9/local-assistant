@@ -903,7 +903,7 @@ async def fake_apply(stream, profile):      # stands in for LocalStream.apply_pe
 ra._orig_apply_personality = fake_apply
 
 class Det:
-    word = 'hey_jarvis,hey_marvin'; last_word = 'hey_jarvis'; fire = None
+    word = 'hey_jarvis,hey_marvin'; last_word = 'hey_jarvis'; fire = None; last_scores = {}
     def feed(self, x):
         if self.fire: self.last_word, self.fire = self.fire, None; return 0.9
         return None
@@ -951,6 +951,14 @@ async def main():
     out['styles'] = {'marvin': ra.style('marvin'), 'jarvis': ra.style('jarvis')}
     out['identity'] = ra.identity_note()[:120]
     out['forget'] = ra.clear_history('jarvis')
+    # a growing transcript replaces the previous user turn instead of piling up
+    ra.record('user', 'My cat is called Tom.'); ra.record('user', 'My cat is called Tom. Marvin, be a detective.')
+    out['grown'] = [m['text'] for m in ra.history()]
+    # ambiguous scores (both words over threshold, other wins by < 0.2): stay with the active assistant (jarvis)
+    det.last_scores = {'hey_jarvis': 0.83, 'hey_marvin': 0.91}
+    n = len(sessions); await wake('hey_marvin'); out['ambiguous_stays'] = (len(sessions) == n, ra.active())
+    det.last_scores = {'hey_jarvis': 0.3, 'hey_marvin': 0.91}
+    await wake('hey_marvin'); out['clear_switches'] = (len(sessions) == n + 1, ra.active())
 asyncio.run(main())
 print(json.dumps(out))
 """, REACHY_ASSISTANTS_STATE=str(tmp_path / "assistants"), REACHY_REMINDERS_FILE=str(tmp_path / "reminders.json"),
@@ -970,6 +978,8 @@ print(json.dumps(out))
     assert j["lists"] == {"shopping": 1} and j["reminders"] == ["feed Tom"]
     assert r["styles"] == {"marvin": {"profile": "local_noir_detective"}, "jarvis": {}}
     assert r["identity"].startswith("## WHO YOU ARE\nYour name is Jarvis") and r["forget"] == 2
+    assert r["grown"] == ["My cat is called Tom. Marvin, be a detective."]
+    assert r["ambiguous_stays"] == [True, "jarvis"] and r["clear_switches"] == [True, "marvin"]
 
 
 def test_tools_read_the_profile_setting():

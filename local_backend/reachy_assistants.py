@@ -46,6 +46,7 @@ STATE = Path(os.environ.get("REACHY_ASSISTANTS_STATE", HERE / "state" / "assista
 HISTORY_TURNS = 20          # user turns kept per assistant (the server compacts beyond 30)
 MAX_TEXT = 1200             # characters kept per message
 HOLD_TIMEOUT_S = 10.0       # release the held mic audio even if a switch never completes
+SWITCH_MARGIN = 0.2         # the other word must beat the active one by this much to switch
 
 _lock = threading.RLock()
 _registry: dict[str, Any] = {}
@@ -173,9 +174,15 @@ def record(role: str, text: str, name: str | None = None) -> None:
         h = history(name)
         if h and h[-1]["role"] == role == "assistant":
             h[-1]["text"] = (h[-1]["text"] + " " + text)[:MAX_TEXT]   # one reply spoken in several parts
+        elif h and h[-1]["role"] == role == "user" and _norm(text).startswith(_norm(h[-1]["text"]).rstrip(".?!")):
+            h[-1]["text"] = text                                       # the server re-sent a growing transcript
         else:
             h.append({"role": role, "text": text, "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
         _write_json(folder(name) / "history.json", _trim(h))
+
+
+def _norm(text: str) -> str:
+    return " ".join("".join(c for c in text.lower() if c.isalnum() or c.isspace()).split())
 
 
 def clear_history(name: str | None = None) -> int:
@@ -216,6 +223,15 @@ def on_activity(reason: str) -> None:
     gate = reachy_wake.GATE
     target = assistant_for_word(getattr(gate, "last_word", "") or "")
     if target is None or target == _active or target == _switching:
+        return
+    # Similar words can both score high for one utterance (live: "Hey Jarvis" scored hey_jarvis 0.83,
+    # hey_marvin 0.91). When the active assistant's word also crossed its threshold and the other one only
+    # wins narrowly, stay: a missed switch is repeated, a wrong one leaks the request to the other assistant.
+    scores = getattr(getattr(gate, "detector", None), "last_scores", {}) or {}
+    mine = spec()["wake_word"]
+    if (scores.get(mine, 0.0) >= float(spec().get("threshold", 0.5))
+            and scores.get(spec(target)["wake_word"], 0.0) - scores[mine] < SWITCH_MARGIN):
+        logger.info("Ambiguous wake word %s; staying with %s", {w: round(v, 2) for w, v in scores.items()}, _active)
         return
     stream = reachy_bridge.stream()
     loop = getattr(stream, "_asyncio_loop", None)

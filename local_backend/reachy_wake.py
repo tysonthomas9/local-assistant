@@ -106,6 +106,7 @@ class Detector:
         self._names = {k: next((w for w in self.thresholds if Path(_model_path(w)).stem == k or k.startswith(w)), k)
                        for k in self.model.models}
         self.last_word = next(iter(self.thresholds))
+        self.last_scores: dict[str, float] = {}
         self._pending: dict[str, float] | None = None
         self._pending_frames = 0
         self._buf = np.zeros(0, dtype=np.int16)
@@ -142,6 +143,7 @@ class Detector:
 
     def _decide(self, now: float) -> float:
         scores, self._pending = self._pending or {}, None
+        self.last_scores = dict(scores)
         over = {w: sc for w, sc in scores.items() if sc >= self.thresholds.get(w, self.threshold)}
         self.last_word = max(over or scores, key=(over or scores).get)
         if len(scores) > 1:
