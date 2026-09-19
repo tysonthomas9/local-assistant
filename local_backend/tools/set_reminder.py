@@ -24,7 +24,9 @@ class SetReminder(Tool):
     description = (
         "Set a reminder or a timer. The robot will say the message out loud when it is due. Use in_minutes for "
         "relative times ('in 10 minutes', 'a 5 minute timer') or at for a clock time ('at 5:30 pm', 'at 17:30'). "
-        "For a plain timer, use a message like 'Your 5 minute timer is done'."
+        "For a plain timer, use a message like 'Your 5 minute timer is done'. When due, the robot first plays "
+        "the sound: 'timer' for timers, 'alarm' for alarms or wake-ups (rings until the user says stop), "
+        "'chime' for ordinary reminders (default), or 'none'."
     )
     parameters_schema = {
         "type": "object",
@@ -32,6 +34,7 @@ class SetReminder(Tool):
             "message": {"type": "string", "description": "What to remind the user of, e.g. 'take the pizza out of the oven'."},
             "in_minutes": {"type": "number", "description": "Minutes from now. Use this OR at."},
             "at": {"type": "string", "description": "Clock time today (or tomorrow if already past), e.g. '17:30' or '5:30 pm'. Use this OR in_minutes."},
+            "sound": {"type": "string", "description": "Sound to play when due: 'chime' (default), 'timer', 'alarm', 'bell', or 'none'."},
         },
         "required": ["message"],
     }
@@ -50,8 +53,8 @@ class SetReminder(Tool):
             due = rs.parse_due(kwargs.get("in_minutes"), kwargs.get("at"))
         except ValueError as e:
             return {"error": str(e)}
-        item = rs.SCHEDULER.add(message, due)
-        out: Dict[str, Any] = {"scheduled": True, "id": item["id"], "message": message,
+        item = rs.SCHEDULER.add(message, due, sound=kwargs.get("sound") or "chime")
+        out: Dict[str, Any] = {"scheduled": True, "id": item["id"], "message": message, "sound": item["sound"],
                                "due": rs.spoken_time(due), "in": rs.spoken_delta(due - rs.now())}
         if not await rs.rpc_reachable():
             out["warning"] = "The app's control channel isn't reachable (start it with --ui), so the reminder can't be spoken yet."

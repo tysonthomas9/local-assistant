@@ -486,3 +486,36 @@ You asked for these after the fully local work, so they're **opt-in**. The offli
 - **Tool choice, 8 runs each:** set_reminder 8/8 ×3 (in 10 minutes; 5-minute timer; at 6 pm), list_reminders 8/8, cancel 8/8 (listing first also counts), play_radio 8/8 ×2 (jazz; BBC Radio 1), stop_radio 8/8, and a timer in the web profile 8/8. The old checks: dance 7/8, all others 8/8.
 - The old `test_llm_does_not_promise_reminders` was retired, since reminders now exist.
 - **Not yet tried live with the robot.**
+
+
+### Sound effects: alarm, timer, chime… (2026-09-19)
+
+**New tools** (both profiles, fully local): `play_sound` (a name, plus `repeat`, where 0 means until stopped, max 60 s; and `volume`, default 70) and `stop_sound` (`needs_response = False`).
+
+**`set_reminder` got a `sound` argument:** `chime` (default), `timer`, `alarm`, any sound name, or `none`. When a reminder is due, [`reachy_scheduler.py`](local_backend/reachy_scheduler.py) rings it first, then the robot speaks. An `alarm` repeats until `stop_sound` or `REACHY_ALARM_SECONDS` (default 30; it's checked after each ~2 s cycle, so it can run up to one cycle over). Where GStreamer bindings are missing, as in the test venv, the scheduler just speaks.
+
+**Library** ([`reachy_sounds.py`](local_backend/reachy_sounds.py)):
+- **Synthesised with numpy on first use** into `local_backend/sounds/generated/` (git-ignored, deterministic, license-free), 16 kHz like the audio board, peaks at -3 dBFS:
+
+| Sound | Length | What |
+| --- | --- | --- |
+| alarm | 1.94 s per cycle | 4 fast double-beeps (988 Hz, softened square) + pause |
+| timer | 2.85 s | three bright bell dings + a longer one (1568 Hz) |
+| chime | 2.10 s | rising C6-E6-G6 bells |
+| bell | 2.00 s | one struck bell (880 Hz, inharmonic partials) |
+| beep / success / error | 0.30 / 0.37 / 0.57 s | short UI sounds |
+
+- **Plus the SDK's bundled robot sounds** (wake_up, go_sleep, dance, confused, impatient, count), and **your own files**: any .wav/.mp3/.ogg/.flac in `local_backend/sounds/custom/`, by file name, overriding built-ins with the same name.
+- **Names match loosely:** "alarm clock" → alarm, "kitchen timer" → timer. An unknown name returns an error listing what's available.
+- **Playback:** a GStreamer playbin into the shared `reachymini_audio_sink`, so sounds mix with the robot's voice and the radio. One sound at a time; a new one replaces the old.
+
+**Testing gotcha:** a plain `fakesink` isn't clocked, so it consumed the 2.85 s timer in 0.01 s. The first reminder test therefore looked as if the reminder spoke without waiting for its ring. With `fakesink sync=true` (silent, but real time, like the speaker) the timings are right: timer due at 1 s → spoken at 3.9 s; alarm (4 s limit) due at 6 s → spoken at 11.8 s; `none` due at 13 s → spoken at 13.0 s.
+
+**Tests** (48 passed, services not running):
+- **Library and timing:** the library is present; the alarm rings and stops; an unknown name errors; the timer ring lasts ~2.85 s; the alarm respects its limit; `none` returns at once.
+- **Tool choice:** "wake me up at 7 am" → set_reminder, "ring the alarm" / "play a bell sound" → play_sound, "stop the alarm!" → stop_sound, **8/8 each**.
+- **Sound argument:** timers → `timer`, alarms and wake-ups → `alarm`, **32/32**.
+
+**Also:** during the run, one `web_search` for "Reachy Mini robot" returned 0 results; a minute later the same query returned 27. SearXNG's upstream engines sometimes all time out at once (DuckDuckGo keeps answering with a CAPTCHA, and Wikidata times out). `web_search` now retries once when there are no results.
+
+**Not yet heard on the robot:** all sound tests used silent sinks.

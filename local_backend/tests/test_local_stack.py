@@ -253,7 +253,32 @@ TOOL_CASES = [
     ("Remind me at 6 pm to call my mom.", "set_reminder"),
     ("What reminders do I have?", "list_reminders"),
     ("Cancel my oven reminder.", ("cancel_reminder", "list_reminders")),  # listing first is also right
+    ("Wake me up at 7 am.", "set_reminder"),
+    ("Ring the alarm.", "play_sound"),
+    ("Play a bell sound.", "play_sound"),
+    ("Stop the alarm!", "stop_sound"),
 ]
+
+
+SOUND_ARG_CASES = [
+    ("Set a timer for 5 minutes.", "timer"),
+    ("Set a 20 minute timer for the pasta.", "timer"),
+    ("Wake me up at 7 am.", "alarm"),
+    ("Set an alarm for 6:30 tomorrow morning.", "alarm"),
+]
+
+
+@pytest.mark.parametrize("prompt,sound", SOUND_ARG_CASES, ids=[f"{s}-{i}" for i, (_, s) in enumerate(SOUND_ARG_CASES)])
+def test_llm_picks_reminder_sound(llm, prompt, sound):
+    """Timers should ring the timer sound, alarms/wake-ups the alarm."""
+    got = []
+    for _ in range(TOOL_RUNS):
+        msg, _ = chat(llm, prompt)
+        calls = [tc for tc in (msg.tool_calls or []) if tc.function.name == "set_reminder"]
+        got.append(json.loads(calls[0].function.arguments).get("sound") if calls else None)
+    hits = sum(g == sound for g in got)
+    record("reminder_sound", prompt=prompt, want=sound, got=got)
+    assert hits >= TOOL_MIN_HITS, f"{prompt!r}: wanted sound={sound!r}, got {got}"
 
 
 @pytest.mark.parametrize("prompt,tool", TOOL_CASES, ids=[f"{t if isinstance(t, str) else t[0]}-{i}" for i, (_, t) in enumerate(TOOL_CASES)])
@@ -352,6 +377,32 @@ def test_llm_describes_camera_image(llm):
     # The frame shows a living room: sofa, round glass/gold coffee table, laptop, person under a blue blanket.
     assert re.search(r"sofa|couch", msg.content or "", re.I), msg.content
     assert re.search(r"table|blanket|laptop|living room", msg.content or "", re.I), msg.content
+
+
+def test_sounds_library_and_timing():
+    """Generated library, play/stop, and that a reminder's ring blocks for the sound's real length."""
+    code = (
+        "import json, sys, time; sys.path.insert(0, sys.argv[1]);"
+        "import reachy_sounds as snd, reachy_scheduler as rs;"
+        "out = {'catalog': sorted(snd.catalog())};"
+        "r = snd.PLAYER.play('alarm', repeat=0); time.sleep(1.5); out['ringing'] = snd.PLAYER.current; out['stopped'] = snd.PLAYER.stop();"
+        "out['after_stop'] = snd.PLAYER.current; out['unknown'] = 'error' in snd.PLAYER.play('foghorn');"
+        "t = time.monotonic(); rs.SCHEDULER._ring('timer'); out['timer_s'] = time.monotonic() - t;"
+        "t = time.monotonic(); rs.SCHEDULER._ring('alarm'); out['alarm_s'] = time.monotonic() - t;"
+        "t = time.monotonic(); rs.SCHEDULER._ring('none'); out['none_s'] = time.monotonic() - t;"
+        "print(json.dumps(out))"
+    )
+    env = {**os.environ, "REACHY_SOUND_SINK": "fakesink sync=true",  # silent, but real-time like the speaker
+           "REACHY_ALARM_SECONDS": "3", "REACHY_REMINDERS_FILE": "/tmp/reachy_test_reminders.json"}
+    out = subprocess.run([str(APP_PYTHON), "-c", code, str(ROOT / "local_backend")], capture_output=True, text=True,
+                         check=True, env=env).stdout
+    r = json.loads(out.strip().splitlines()[-1])
+    assert {"alarm", "timer", "chime", "bell", "beep", "success", "error", "wake_up"} <= set(r["catalog"]), r["catalog"]
+    assert r["ringing"] == "alarm" and r["stopped"] == "alarm" and r["after_stop"] is None, r
+    assert r["unknown"], "unknown sound names should return an error"
+    assert 2.5 < r["timer_s"] < 5, f"timer ring should last ~2.85 s, took {r['timer_s']:.2f}"
+    assert 3 <= r["alarm_s"] < 6.5, f"alarm should ring ~3 s (+ at most one ~2 s cycle), took {r['alarm_s']:.2f}"
+    assert r["none_s"] < 0.2
 
 
 # --- Online tools (local_reachy_web profile: --web) ----------------------------------------

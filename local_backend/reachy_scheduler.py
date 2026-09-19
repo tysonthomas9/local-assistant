@@ -11,7 +11,12 @@ Reminders are kept in local_backend/state/reminders.json, so they survive an app
 came due while the app was down is still announced if it is less than an hour late; older ones are
 dropped (and logged).
 
-Settings: REACHY_APP_RPC_URL (default ws://127.0.0.1:7860/rpc), REACHY_REMINDERS_FILE.
+Each reminder can ring a sound first (reachy_sounds: "chime" by default, "timer", "alarm", any
+sound name, or "none"). An alarm repeats until stop_sound is called or ALARM_SECONDS pass; then
+the robot speaks. If sound playback isn't available (no GStreamer bindings), it just speaks.
+
+Settings: REACHY_APP_RPC_URL (default ws://127.0.0.1:7860/rpc), REACHY_REMINDERS_FILE,
+REACHY_ALARM_SECONDS (default 30).
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ STATE_FILE = Path(os.environ.get("REACHY_REMINDERS_FILE", Path(__file__).parent 
 RPC_URL = os.environ.get("REACHY_APP_RPC_URL", "ws://127.0.0.1:7860/rpc")
 LATE_GRACE = timedelta(hours=1)
 FIRE_PREFIX = "(Reminder due now"
+ALARM_SECONDS = float(os.environ.get("REACHY_ALARM_SECONDS", 30))
 
 
 def now() -> datetime:
@@ -146,9 +152,9 @@ class Scheduler:
                 self._thread = threading.Thread(target=self._run, name="reachy-scheduler", daemon=True)
                 self._thread.start()
 
-    def add(self, message: str, due: datetime) -> dict[str, Any]:
+    def add(self, message: str, due: datetime, sound: str = "chime") -> dict[str, Any]:
         item = {"id": uuid.uuid4().hex[:6], "message": message.strip(), "due": due.isoformat(),
-                "created": now().isoformat()}
+                "created": now().isoformat(), "sound": (sound or "none").strip().lower()}
         with self._lock:
             self._items.append(item)
             self._items.sort(key=lambda x: x["due"])
@@ -200,7 +206,23 @@ class Scheduler:
                 continue
             self._fire(nxt, late)
 
+    def _ring(self, sound: str) -> None:
+        """Play the reminder's sound and wait for it (an alarm rings until stopped or ALARM_SECONDS)."""
+        if sound in ("", "none"):
+            return
+        try:
+            import reachy_sounds  # needs GStreamer bindings; imported lazily so the scheduler works without them
+        except Exception as e:
+            logger.warning("No sound for reminders (%r); speaking only", e)
+            return
+        alarm = sound == "alarm"
+        result = reachy_sounds.PLAYER.play(sound, repeat=0 if alarm else 1,
+                                           max_seconds=ALARM_SECONDS if alarm else 60, wait=True)
+        if "error" in result:
+            logger.warning("Reminder sound %r: %s", sound, result["error"])
+
     def _fire(self, item: dict[str, Any], late: timedelta) -> None:
+        self._ring(item.get("sound", "chime"))
         due = datetime.fromisoformat(item["due"])
         when = f", it was due at {spoken_time(due)}" if late > timedelta(minutes=2) else ""
         text = f"{FIRE_PREFIX}{when}) {item['message']}"

@@ -6,6 +6,7 @@ Online tool, used only by the `local_reachy_web` profile. The query goes to Sear
 Settings: REACHY_SEARXNG_URL (default http://127.0.0.1:8888).
 """
 
+import asyncio
 import logging
 import os
 from typing import Any, Dict
@@ -47,9 +48,16 @@ class WebSearch(Tool):
         base = os.environ.get("REACHY_SEARXNG_URL", "http://127.0.0.1:8888").rstrip("/")
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(f"{base}/search", params={"q": query, "format": "json", "safesearch": 1})
-                r.raise_for_status()
-                data = r.json()
+                # SearXNG's upstream engines occasionally all time out at once; one retry fixes most of those.
+                for attempt in range(2):
+                    r = await client.get(f"{base}/search", params={"q": query, "format": "json", "safesearch": 1})
+                    r.raise_for_status()
+                    data = r.json()
+                    if data.get("results") or data.get("answers"):
+                        break
+                    if attempt == 0:
+                        logger.info("web_search: no results (unresponsive: %s); retrying once", data.get("unresponsive_engines"))
+                        await asyncio.sleep(1)
         except httpx.ConnectError:
             return {"error": "The search engine isn't running (start it with local_backend/start_searxng.sh)."}
         except (httpx.HTTPError, ValueError) as e:

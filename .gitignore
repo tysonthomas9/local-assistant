@@ -20,3 +20,6 @@ local_backend/searxng/
 
 # Runtime state (your reminders)
 local_backend/state/
+
+# Generated sound effects and your own custom sounds
+local_backend/sounds/
