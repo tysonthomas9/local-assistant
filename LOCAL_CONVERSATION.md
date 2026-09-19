@@ -773,3 +773,5 @@ A bare "Hey Reachy." was caught every time; the misses were all "Hey Reachy, <re
 **Tests:** `test_wake_phrase_hey_reachy` (engine routing, a phrase the model can't spell is rejected, "Hey Reachy ..." forwarded with pre-roll, "Hey Reggie" and "reaching"/"peachy" speech not forwarded). 36 offline tests pass.
 
 **First live try: it didn't wake** (11:07–11:10, no detections). Investigation below.
+
+**Switched to "Hey Marvin" (11:12).** The user chose openWakeWord's bundled `hey_marvin` over further "Hey Reachy" tuning, so it is now the `--wake` default. The sherpa-onnx phrase detector stays available with `REACHY_WAKE_WORD="hey reachy"`. Offline check (Piper, threshold 0.4): "Hey Marvin …" scored 1.0 on 12/12 clips; "Hey Martin" also triggers; "Marvelous…", "Hey Kevin" and "Hey Jarvis" (Piper) don't. In 5.6 min of other speech (book, robot reading, user recordings, Kannada) there was one detection: the user's own "Hey Jarvis, stop" in the AEC-experiment recording. The model answered "Hey Marvin." with "Yes?", and routed "… what time is it?" and "… stop reading." to the right tools (12/12). The profiles' wake rule now names "Hey Marvin".

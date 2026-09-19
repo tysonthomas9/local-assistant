@@ -1,13 +1,13 @@
-"""Wake-word gate: only send microphone audio to the speech server after "Hey Reachy" (or similar).
+"""Wake-word gate: only send microphone audio to the speech server after "Hey Marvin" (or similar).
 
 Enabled with REACHY_WAKE_WORD (start_conversation.sh --wake). run_app.py then calls install(), which
 replaces LocalStream.record_loop with a version that runs every mic frame through this gate:
 
   * A local detector listens all the time, including while muted (not when hard-muted). Two engines:
-      - any phrase ("hey reachy", the default): sherpa-onnx's open-vocabulary keyword spotter (a 3.3M-
+      - any phrase (e.g. "hey reachy"): sherpa-onnx's open-vocabulary keyword spotter (a 3.3M-
         parameter streaming zipformer trained on GigaSpeech; the phrase is given as text, no training).
         Model in local_backend/models/kws/ (cache_models.sh). ~1.4 % of one CPU core.
-      - a bundled openWakeWord model (hey_jarvis, hey_mycroft, hey_marvin, alexa) or a custom .onnx
+      - a bundled openWakeWord model (hey_marvin, the launcher default; hey_jarvis, hey_mycroft, alexa) or a custom .onnx
         path: openWakeWord 0.4.0 (ONNX, offline; ~1.5 ms of CPU per 80 ms frame).
   * Closed gate: frames are only kept in a 1.5 s ring buffer and never leave the process.
   * On detection: un-mute if muted, send the ring buffer (so the words right after the wake word
