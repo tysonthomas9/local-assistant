@@ -16,3 +16,4 @@ local_backend/logs/
 # Needed by the tests/benchmark; kept locally, not committed.
 local_backend/tests/fixtures/camera_frame.jpg
 local_backend/tests/fixtures/stt/
+local_backend/searxng/

@@ -1,0 +1,5 @@
+[
+  {"name": "Hacker News", "url": "https://news.ycombinator.com/rss"},
+  {"name": "Ars Technica", "url": "https://feeds.arstechnica.com/arstechnica/index"},
+  {"name": "The Verge", "url": "https://www.theverge.com/rss/index.xml"}
+]

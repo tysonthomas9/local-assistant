@@ -27,6 +27,9 @@ local_backend/cache_models.sh            # once, while online (face model + moti
 ./start_daemon.sh                         # terminal 1: offline, no dataset updates, signalling on localhost
 local_backend/start_local_backend.sh      # terminal 2: loads + keeps Ollama model, starts speech server
 ./start_conversation.sh --local --ui      # terminal 3: the app; UI at http://127.0.0.1:7860
+# or, with online tools (weather, web search, tech news):
+local_backend/start_searxng.sh            # local SearXNG search engine in Docker, 127.0.0.1:8888
+./start_conversation.sh --web --ui        # --web implies --local; profile local_reachy_web
 cd local_backend && ../third_party/speech-to-speech/.venv/bin/python -m pytest -v   # 28 checks
 ```
 
@@ -46,6 +49,7 @@ cd local_backend && ../third_party/speech-to-speech/.venv/bin/python -m pytest -
 | **Daemon: dataset preload/update** (emotions + dances) at start and every 24 h | Found by the audit; cached, and `--dataset-update-interval 0` |
 | Daemon: TURN credentials from HF | Only when an HF token is configured (none here) |
 | App web UI and daemon WebRTC signalling listened on 0.0.0.0 (LAN could change settings / request camera+mic) | Bound to 127.0.0.1 by `run_app.py` / `run_daemon.py` |
+| **Opt-in online tools** (`--web` only) | `get_weather` → Open-Meteo (place name + coordinates); `web_search` → local SearXNG, which queries public engines; `tech_news` → Hacker News, Ars Technica and The Verge RSS. Speech, the LLM, the camera and the conversation itself stay on this PC. The default `--local` profile has none of these. |
 
 ---
 
@@ -424,3 +428,29 @@ Going from 0.6 to 0.45 adds 0–41% detected speech per clip; going lower adds l
 **Trade-off:** it's now easier for TV and background speech to trigger a turn. Raise `REACHY_VAD_THRESH` again if that happens.
 
 **Another mistake:** I edited `start_local_backend.sh` while the old instance was still running. Bash reads scripts as it goes, so when its speech server exited it read the changed file and exited with code 127 ("command not found") mid-cleanup. No keep-alive loop was left behind. Don't edit launcher scripts while they're running.
+
+
+### Online tools: weather, web search, tech news (17:05–17:20)
+
+You asked for these after the fully local work, so they're **opt-in**. The offline `local_reachy` profile is unchanged. A new `local_reachy_web` profile adds the three tools and is selected by `./start_conversation.sh --web` (which implies `--local`). The design choices were yours: a separate profile, SearXNG for search, and tech news RSS.
+
+| Tool | File | Uses | Notes |
+| --- | --- | --- | --- |
+| `get_weather` | [`tools/get_weather.py`](local_backend/tools/get_weather.py) | Open-Meteo geocoding + forecast (free, no key) | Fahrenheit by default (`REACHY_WEATHER_UNITS=celsius` to switch); `REACHY_HOME_LOCATION` is used when no place is named; "City, State" picks the matching region |
+| `web_search` | [`tools/web_search.py`](local_backend/tools/web_search.py) | Local SearXNG on 127.0.0.1:8888 ([`start_searxng.sh`](local_backend/start_searxng.sh), Docker `searxng/searxng:latest`) | Top 5 results (title, snippet, source); a clear error if SearXNG isn't running |
+| `tech_news` | [`tools/tech_news.py`](local_backend/tools/tech_news.py) | RSS/Atom feeds in [`tech_news_feeds.json`](local_backend/tech_news_feeds.json) | Hacker News, Ars Technica, The Verge, fetched in parallel; optional `source` and `count`; parsed with the standard library |
+
+**SearXNG setup:**
+- The container is published on `127.0.0.1:8888` only, with JSON output enabled and the rate limiter off (it's private).
+- A random secret key is generated on first start into `local_backend/searxng/settings.yml`, which is git-ignored. The template is [`searxng.template.yml`](local_backend/searxng.template.yml).
+- No `--restart` policy, so it doesn't start at boot.
+- The container chowns its mounted config dir to its own uid 977. The first version kept the committed template inside that dir, which left it unwritable for you. I fixed the ownership once with a root `chown` inside the image, and moved the template outside the mounted dir.
+- First query: 28 results. DuckDuckGo answered with a CAPTCHA and Wikidata was suspended; the other engines covered it.
+
+**`start_conversation.sh` argument handling** was rewritten as a `case` loop, so `--web` works with or without `--local`. Dry-run: `--ui` → hosted; `--local --ui` → `local_reachy`; `--web --ui` and `--local --web --no-camera` → `local_reachy_web`, with the flags removed before the app sees them. With `--web`, it warns if SearXNG isn't answering.
+
+**Tested:**
+- **Tools called directly:** Paris 59°F overcast (high 77°F); "San Jose, California" → San Jose, California, US; no place / nonsense place → clear errors; the search returned Pollen's product page; news returned headlines from all three feeds, and The Verge alone when filtered.
+- **New tests** (8): the profile diff; the live tool check (`-m online`); and tool choice on 6 prompts × 8 runs with the web profile's prompt and all 20 tools. **All 8/8**: get_weather (Tokyo weather; rain in Seattle), web_search (last F1 winner; Raspberry Pi 5 price), tech_news (tech news today; Hacker News).
+- **The rest of the suite** (services not running, since the daemon and speech server were stopped at 17:05): 28 passed.
+- **Not yet tried live with the robot.**

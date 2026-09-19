@@ -260,6 +260,94 @@ def test_llm_describes_camera_image(llm):
     assert re.search(r"table|blanket|laptop|living room", msg.content or "", re.I), msg.content
 
 
+# --- Online tools (local_reachy_web profile: --web) ----------------------------------------
+
+WEB_TOOLS = ("get_weather", "web_search", "tech_news")
+OFFLINE_RULE = "You run entirely offline on this computer: you cannot search the web or check the weather. If asked, say so in one short sentence.\n"
+
+
+def web_profile_body() -> str:
+    text = (ROOT / "local_backend/profiles/local_reachy_web/profile.md").read_text()
+    return text.split("+++", 2)[2]
+
+
+def test_web_profile_adds_exactly_the_online_tools():
+    offline = (ROOT / "local_backend/profiles/local_reachy/profile.md").read_text()
+    web = (ROOT / "local_backend/profiles/local_reachy_web/profile.md").read_text()
+    for tool in WEB_TOOLS:
+        assert f'"{tool}"' in web and f'"{tool}"' not in offline
+    assert "pollen_robotics_" not in web
+    assert "entirely offline" not in web
+
+
+@pytest.fixture(scope="session")
+def web_request():
+    """The app's captured system prompt and tools, turned into the web profile's (same edit as the profile)."""
+    code = (
+        "import importlib.util, json;"
+        "specs = [];"
+        f"base = '{ROOT}/local_backend/tools/';"
+        "\nfor name, cls in (('get_weather','GetWeather'),('web_search','WebSearch'),('tech_news','TechNews')):"
+        "\n    spec = importlib.util.spec_from_file_location(name, base + name + '.py'); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)"
+        "\n    specs.append(getattr(m, cls)().spec())"
+        "\nprint(json.dumps(specs))"
+    )
+    out = subprocess.run([str(APP_PYTHON), "-c", code], capture_output=True, text=True, check=True).stdout
+    specs = json.loads(out.strip().splitlines()[-1])
+    tools = APP_REQUEST["tools"] + [{"type": "function", "function": {k: v for k, v in sp.items() if k != "type"}}
+                                    if "function" not in sp else sp for sp in specs]
+    body = web_profile_body()
+    web_rules = body[body.index("Use get_weather"):body.index("## SPEECH RULES")]
+    assert OFFLINE_RULE in APP_REQUEST["system"]
+    system = APP_REQUEST["system"].replace(OFFLINE_RULE, web_rules.strip() + "\n")
+    return {"system": system, "tools": tools}
+
+
+WEB_TOOL_CASES = [
+    ("What's the weather like in Tokyo right now?", "get_weather"),
+    ("Is it going to rain in Seattle today?", "get_weather"),
+    ("Can you look up who won the last Formula One race?", "web_search"),
+    ("Search the web for the price of a Raspberry Pi 5.", "web_search"),
+    ("Any tech news today?", "tech_news"),
+    ("What's on Hacker News right now?", "tech_news"),
+]
+
+
+@pytest.mark.parametrize("prompt,tool", WEB_TOOL_CASES, ids=[f"{t}-{i}" for i, (_, t) in enumerate(WEB_TOOL_CASES)])
+def test_web_llm_calls_the_right_tool(llm, web_request, prompt, tool):
+    hits = 0
+    for _ in range(TOOL_RUNS):
+        r = llm.chat.completions.create(model=MODEL, max_tokens=300, tools=web_request["tools"], tool_choice="auto",
+                                        messages=[{"role": "system", "content": web_request["system"]},
+                                                  {"role": "user", "content": prompt}],
+                                        extra_body={"reasoning_effort": "none"})
+        hits += tool in [tc.function.name for tc in (r.choices[0].message.tool_calls or [])]
+    record("web_tool_call", tool=tool, prompt=prompt, hits=hits, runs=TOOL_RUNS)
+    assert hits >= TOOL_MIN_HITS, f"{tool}: {hits}/{TOOL_RUNS} for {prompt!r}"
+
+
+@pytest.mark.online
+def test_web_tools_return_data():
+    """Calls the three tools for real (internet + local SearXNG)."""
+    code = (
+        "import asyncio, importlib.util, json;"
+        f"base = '{ROOT}/local_backend/tools/';"
+        "\ndef load(n, c):"
+        "\n    spec = importlib.util.spec_from_file_location(n, base + n + '.py'); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return getattr(m, c)()"
+        "\nasync def main():"
+        "\n    return [await load('get_weather','GetWeather')(None, place='Paris'),"
+        "\n            await load('web_search','WebSearch')(None, query='Reachy Mini robot'),"
+        "\n            await load('tech_news','TechNews')(None, count=2)]"
+        "\nprint(json.dumps(asyncio.run(main())))"
+    )
+    out = subprocess.run([str(APP_PYTHON), "-c", code], capture_output=True, text=True, check=True).stdout
+    weather, search, news = json.loads(out.strip().splitlines()[-1])
+    assert "Paris" in weather.get("place", ""), weather
+    assert re.search(r"-?\d+°[FC]", weather.get("now", "")), weather
+    assert search.get("results"), search
+    assert len(news.get("headlines", [])) >= 2, news
+
+
 # --- Realtime server (the path the conversation app uses) ----------------------------------
 
 async def realtime_turns():

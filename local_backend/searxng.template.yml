@@ -1,0 +1,15 @@
+# SearXNG for the Reachy robot's web_search tool. start_searxng.sh copies this to
+# local_backend/searxng/settings.yml (git-ignored) and fills in a random secret key on first run.
+use_default_settings: true
+general:
+  instance_name: "reachy-searxng"
+server:
+  secret_key: "__SECRET__"
+  limiter: false          # private instance on 127.0.0.1; no bot limiter needed
+  image_proxy: false
+  public_instance: false
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json                # the web_search tool reads /search?format=json
