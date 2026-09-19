@@ -1,10 +1,14 @@
-"""Wake-word gate: only send microphone audio to the speech server after "Hey Jarvis" (or similar).
+"""Wake-word gate: only send microphone audio to the speech server after "Hey Reachy" (or similar).
 
 Enabled with REACHY_WAKE_WORD (start_conversation.sh --wake). run_app.py then calls install(), which
 replaces LocalStream.record_loop with a version that runs every mic frame through this gate:
 
-  * A local openWakeWord detector (0.4.0, ONNX, models bundled in the package, offline; ~1.5 ms of CPU
-    per 80 ms frame) listens all the time, including while muted (not when hard-muted).
+  * A local detector listens all the time, including while muted (not when hard-muted). Two engines:
+      - any phrase ("hey reachy", the default): sherpa-onnx's open-vocabulary keyword spotter (a 3.3M-
+        parameter streaming zipformer trained on GigaSpeech; the phrase is given as text, no training).
+        Model in local_backend/models/kws/ (cache_models.sh). ~1.4 % of one CPU core.
+      - a bundled openWakeWord model (hey_jarvis, hey_mycroft, hey_marvin, alexa) or a custom .onnx
+        path: openWakeWord 0.4.0 (ONNX, offline; ~1.5 ms of CPU per 80 ms frame).
   * Closed gate: frames are only kept in a 1.5 s ring buffer and never leave the process.
   * On detection: un-mute if muted, send the ring buffer (so the words right after the wake word
     survive), and open a listening window.
@@ -15,11 +19,19 @@ replaces LocalStream.record_loop with a version that runs every mic frame throug
     so follow-ups and barge-in need no new wake word. Book reading (out-of-band passages) does NOT keep
     it open, so the robot can't hear its own reading; "Hey Jarvis, stop" still interrupts it.
 
-Near misses (scores between NEAR_MISS and the threshold) are logged, to tell "not heard" from
-"heard but under the threshold" when tuning.
+openWakeWord near misses (scores between NEAR_MISS and the threshold) are logged, to tell "not heard"
+from "heard but under the threshold" when tuning (the keyword spotter reports no scores).
 
-Settings: REACHY_WAKE_WORD (hey_jarvis | hey_mycroft | hey_marvin | alexa, or a path to a custom
-.onnx model), REACHY_WAKE_THRESHOLD (0.4; a clear "Hey Jarvis" scored 0.48 live), REACHY_WAKE_WINDOW_S (8), REACHY_WAKE_FOLLOWUP_S (10).
+Settings: REACHY_WAKE_WORD (a phrase such as "hey reachy", or hey_jarvis | hey_mycroft | hey_marvin |
+alexa | a path to a .onnx model), REACHY_WAKE_THRESHOLD (keyword spotter: trigger probability, 0.15;
+openWakeWord: score, 0.4 - a clear "Hey Jarvis" scored 0.48 live), REACHY_WAKE_WINDOW_S (8),
+REACHY_WAKE_FOLLOWUP_S (10).
+
+Keyword-spotter settings were chosen on synthetic clips (Piper, 7 "Hey Reachy ..." sentences x 3 speeds,
+14 near-miss sentences, 4.6 min of other speech incl. the robot reading and saying "reaching"):
+full-precision model, 8 active paths, boost 2.0, threshold 0.15 -> 18/21 detected clean, 17/21 with
+room noise at 10 dB SNR, 0 false alarms in the 4.6 min; "Hey Richie" also triggers. The int8 model
+with 4 paths missed a third of the "Hey Reachy, <request>" clips.
 """
 
 from __future__ import annotations
@@ -46,6 +58,11 @@ COOLDOWN_S = 2.0
 NEAR_MISS = 0.2
 
 
+KWS_MODEL = Path(__file__).parent / "models" / "kws" / "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
+KWS_SCORE = 2.0                    # per-token boost of the phrase in the beam search
+KWS_PATHS = 8
+
+
 def _model_path(word: str) -> str:
     if os.path.sep in word or word.endswith(".onnx"):
         return word
@@ -56,6 +73,17 @@ def _model_path(word: str) -> str:
         raise ValueError(f"No bundled wake-word model {word!r}; available: "
                          f"{sorted(p.name.rsplit('_v', 1)[0] for p in models.glob('*_v*.onnx'))}")
     return str(hits[-1])
+
+
+def uses_openwakeword(word: str) -> bool:
+    """A .onnx path or a bundled openWakeWord name (hey_jarvis, ...); anything else is a phrase."""
+    return os.path.sep in word or word.endswith(".onnx") or word in ("hey_jarvis", "hey_mycroft", "hey_marvin", "alexa")
+
+
+def make_detector(word: str, threshold: float | None = None) -> "Detector | PhraseDetector":
+    if uses_openwakeword(word):
+        return Detector(word, 0.4 if threshold is None else threshold)
+    return PhraseDetector(word, 0.15 if threshold is None else threshold)
 
 
 class Detector:
@@ -80,6 +108,47 @@ class Detector:
             elif NEAR_MISS <= score < self.threshold and now - self._last_near > 1.0:
                 self._last_near = now
                 logger.info("Wake word near miss: score %.2f (threshold %.2f)", score, self.threshold)
+        return hit
+
+
+class PhraseDetector:
+    """Open-vocabulary keyword spotter (sherpa-onnx): wakes on any phrase given as text, e.g. "hey reachy"."""
+
+    def __init__(self, phrase: str, threshold: float = 0.15, model_dir: Path = KWS_MODEL) -> None:
+        import tempfile
+        import sentencepiece as spm
+        import sherpa_onnx
+        self.word = " ".join(phrase.replace("_", " ").split()).lower()
+        self.threshold = threshold
+        pieces = spm.SentencePieceProcessor(model_file=str(model_dir / "bpe.model")).encode(self.word.upper(), out_type=str)
+        vocab = {line.split()[0] for line in (model_dir / "tokens.txt").read_text().splitlines() if line.strip()}
+        if not pieces or any(p not in vocab for p in pieces):
+            raise ValueError(f"Wake phrase {phrase!r} can't be spelled with the keyword model's tokens: {pieces}")
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", prefix="reachy_kws_", delete=False) as f:
+            f.write(f"{' '.join(pieces)} :{KWS_SCORE} #{threshold} @{self.word.replace(' ', '_')}\n")
+        try:
+            name = "epoch-12-avg-2-chunk-16-left-64.onnx"
+            self.kws = sherpa_onnx.KeywordSpotter(
+                tokens=str(model_dir / "tokens.txt"), encoder=str(model_dir / f"encoder-{name}"),
+                decoder=str(model_dir / f"decoder-{name}"), joiner=str(model_dir / f"joiner-{name}"),
+                keywords_file=f.name, num_threads=1, max_active_paths=KWS_PATHS,
+                keywords_score=KWS_SCORE, keywords_threshold=threshold)
+        finally:
+            os.unlink(f.name)
+        self.stream = self.kws.create_stream()
+        self._last = 0.0
+
+    def feed(self, mono16k_int16: np.ndarray) -> float | None:
+        """Add samples; returns 1.0 if the phrase was just detected (the spotter gives no score), else None."""
+        self.stream.accept_waveform(RATE, np.asarray(mono16k_int16, dtype=np.float32) / 32768.0)
+        hit = None
+        while self.kws.is_ready(self.stream):
+            self.kws.decode_stream(self.stream)
+            if self.kws.get_result(self.stream):
+                self.kws.reset_stream(self.stream)
+                now = time.monotonic()
+                if now - self._last > COOLDOWN_S:
+                    self._last, hit = now, 1.0
         return hit
 
 
@@ -171,7 +240,8 @@ def install() -> None:
     word = os.environ.get("REACHY_WAKE_WORD", "").strip()
     if not word:
         return
-    GATE = Gate(Detector(word, float(os.environ.get("REACHY_WAKE_THRESHOLD", 0.4))),
+    threshold = os.environ.get("REACHY_WAKE_THRESHOLD")
+    GATE = Gate(make_detector(word, float(threshold) if threshold else None),
                 window_s=float(os.environ.get("REACHY_WAKE_WINDOW_S", 8)),
                 followup_s=float(os.environ.get("REACHY_WAKE_FOLLOWUP_S", 10)))
     reachy_bridge.subscribe(GATE.on_activity)

@@ -790,6 +790,51 @@ print(json.dumps(out))
     assert r["reading_holds_open"] is False
 
 
+def test_wake_phrase_hey_reachy(tmp_path):
+    """sherpa-onnx keyword spotter with the phrase as text: "Hey Reachy ..." opens the gate (pre-roll included);
+    near misses and ordinary speech mentioning "reaching" don't. Routing between the two engines."""
+    import pytest as _pytest
+    kws = ROOT / "local_backend" / "models" / "kws" / "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
+    if not (kws / "tokens.txt").exists():
+        _pytest.skip("keyword model missing: run local_backend/cache_models.sh")
+    piper = ROOT / ".venv" / "bin" / "python"
+    clips = {"wake": "Hey Reachy, what time is it?", "short": "Hey Reachy.",
+             "reggie": "Hey Reggie, how are you?", "reaching": "I'm reaching out to him. Teach me something. That's peachy."}
+    code = ("import sys, wave; from piper import PiperVoice; v = PiperVoice.load(sys.argv[1])\n"
+            "for name, text in [a.split('=', 1) for a in sys.argv[3:]]:\n"
+            "    w = wave.open(sys.argv[2] + '/' + name + '.wav', 'wb'); v.synthesize_wav(text, w); w.close()")
+    subprocess.run([str(piper), "-c", code, str(ROOT / "voices/en_US-lessac-medium.onnx"), str(tmp_path),
+                    *[f"{k}={v}" for k, v in clips.items()]], check=True, capture_output=True)
+    r = _run_tools(r"""
+import time, types, wave, numpy as np
+from scipy.signal import resample_poly
+import reachy_bridge as b; b.install()
+import reachy_wake as rw
+d = sys.argv[2]
+def frames(name):
+    with wave.open(d + '/' + name + '.wav') as w:
+        a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768; sr = w.getframerate()
+    a = np.concatenate([np.zeros(8000), resample_poly(a, 16000, sr), np.zeros(16000)]).astype(np.float32)
+    st = np.stack([a, a], axis=1); return [st[i:i+512] for i in range(0, len(st) - 511, 512)]
+out = {'routing': [rw.uses_openwakeword(w) for w in ('hey reachy', 'hey_jarvis', 'alexa', '/x/custom.onnx', 'ok robot')]}
+det = rw.make_detector('hey reachy')
+out['engine'] = type(det).__name__
+try:
+    rw.PhraseDetector('hey reachy ééé')
+    out['bad_phrase'] = 'accepted'
+except ValueError:
+    out['bad_phrase'] = 'rejected'
+for name in ('reggie', 'reaching', 'wake', 'short'):
+    gate = rw.Gate(rw.make_detector('hey reachy'), window_s=1.0, followup_s=1.0)
+    out[name] = sum(len(x) for f in frames(name) for x in gate.process(f, 16000, False, False)) / 16000
+print(json.dumps(out))
+""".replace("sys.argv[2]", repr(str(tmp_path))))
+    assert r["routing"] == [False, True, True, True, False]
+    assert r["engine"] == "PhraseDetector" and r["bad_phrase"] == "rejected"
+    assert r["reggie"] == 0.0 and r["reaching"] == 0.0, "near misses must not open the gate"
+    assert r["wake"] > 1.5 and r["short"] > 0.5, "'Hey Reachy' (+ pre-roll) should be forwarded"
+
+
 def test_lists_removal_priority_and_names(tmp_path):
     r = _run_tools("""
 import reachy_lists as rl

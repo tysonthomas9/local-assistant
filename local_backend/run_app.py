@@ -37,12 +37,22 @@ reachy_bridge.install()
 
 # Optional wake-word gate (start_conversation.sh --wake / REACHY_WAKE_WORD).
 if os.environ.get("REACHY_WAKE_WORD"):
-    try:
-        import openwakeword  # noqa: F401
-    except ImportError:
-        sys.exit("--wake needs openWakeWord in the app venv: "
-                 "uv pip install --python reachy_mini_conversation_app/.venv/bin/python openwakeword")
     import reachy_wake  # noqa: E402
+
+    _install = "uv pip install --python reachy_mini_conversation_app/.venv/bin/python "
+    if reachy_wake.uses_openwakeword(os.environ["REACHY_WAKE_WORD"]):
+        try:
+            import openwakeword  # noqa: F401
+        except ImportError:
+            sys.exit("This wake word needs openWakeWord in the app venv: " + _install + "openwakeword")
+    else:
+        try:
+            import sentencepiece  # noqa: F401
+            import sherpa_onnx  # noqa: F401
+        except ImportError:
+            sys.exit("--wake needs sherpa-onnx in the app venv: " + _install + "sherpa-onnx sentencepiece")
+        if not (reachy_wake.KWS_MODEL / "tokens.txt").exists():
+            sys.exit(f"--wake needs the keyword-spotting model in {reachy_wake.KWS_MODEL}: run local_backend/cache_models.sh")
 
     reachy_wake.install()
 

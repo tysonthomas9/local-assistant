@@ -10,6 +10,7 @@ third_party/
 
 # Downloaded models and runtime output
 voices/
+local_backend/models/
 local_backend/logs/
 
 # Personal media recorded on this machine: a camera frame of the room and voice clips.
