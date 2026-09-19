@@ -257,6 +257,14 @@ TOOL_CASES = [
     ("Ring the alarm.", "play_sound"),
     ("Play a bell sound.", "play_sound"),
     ("Stop the alarm!", "stop_sound"),
+    ("What's 17 times 23?", "calculate"),
+    ("What's 15 percent of 240?", "calculate"),
+    ("How many milliliters are in 3 and a half cups?", "convert_units"),
+    ("Convert 72 Fahrenheit to Celsius.", "convert_units"),
+    ("Add milk and eggs to my shopping list.", "lists"),
+    ("What's on my to-do list?", "lists"),
+    ("Talk like a noir detective from now on.", "switch_persona"),
+    ("Can you be a Victorian butler?", "switch_persona"),
 ]
 
 
@@ -405,6 +413,136 @@ def test_sounds_library_and_timing():
     assert r["none_s"] < 0.2
 
 
+def _run_tools(code: str, **env):
+    """Run `code` (which prints one JSON line) under the app venv with local_backend on sys.path."""
+    full = "import asyncio, importlib.util, json, sys\nsys.path.insert(0, sys.argv[1])\n" + \
+           "def load(n, c):\n    spec = importlib.util.spec_from_file_location(n, sys.argv[1] + '/tools/' + n + '.py')\n" + \
+           "    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m, getattr(m, c)()\n" + code
+    out = subprocess.run([str(APP_PYTHON), "-c", full, str(ROOT / "local_backend")], capture_output=True, text=True,
+                         check=True, env={**os.environ, **env}).stdout
+    return json.loads(out.strip().splitlines()[-1])
+
+
+def test_calculator_and_unit_conversion():
+    r = _run_tools("""
+_, C = load('calculate', 'Calculate'); _, U = load('convert_units', 'ConvertUnits')
+exprs = ['17*23', '17 x 23', '15% of 80', '2^10', 'sqrt(2)*10', '(3+4)*5/2', '100 divided by 7', 'sin(30)', '12 plus 5 minus 3',
+         '5 squared', '1/0', '2**100000', "__import__('os')", '(1).__class__', "open('x')", 'a+b', '9'*400, '('*500 + '1' + ')'*500]
+convs = [(72, '°F', 'celsius'), (3.5, 'cups', 'ml'), (10, 'km', 'miles'), (1, 'lb', 'grams'), (2, 'tablespoons', 'teaspoons'),
+         (60, 'mph', 'km/h'), (3, 'kg', 'celsius'), (1, 'parsec', 'km')]
+async def main():
+    return [[await C(None, expression=e) for e in exprs], [await U(None, value=v, from_unit=a, to_unit=b) for v, a, b in convs]]
+print(json.dumps(asyncio.run(main())))
+""")
+    calc, conv = r
+    results = [c.get("result") for c in calc]
+    assert results[:10] == [391, 391, 12, 1024, pytest.approx(14.1421356), 17.5, pytest.approx(14.2857142), pytest.approx(0.5), 14, 25]
+    assert all("error" in c for c in calc[10:]), calc[10:]   # 1/0, huge power, code injection, names, huge inputs
+    assert [round(c["result"], 2) if "result" in c else "error" for c in conv] == [22.22, 828.06, 6.21, 453.59, 6.0, 96.56, "error", "error"]
+
+
+def test_lists_roundtrip(tmp_path):
+    f = str(tmp_path / "lists.json")
+    first = _run_tools("""
+_, L = load('lists', 'Lists')
+async def main():
+    return [await L(None, action='add', list_name='Shopping List', items=['milk', 'eggs', 'Bread']),
+            await L(None, action='add', list_name='groceries', items=['MILK', 'coffee']),
+            await L(None, action='add', list_name='to do', item='call the plumber'),
+            await L(None, action='remove', list_name='shopping', item='egg')]
+print(json.dumps(asyncio.run(main())))
+""", REACHY_LISTS_FILE=f)
+    assert first[1]["already_on_list"] == ["MILK"] and first[2]["list"] == "todo" and first[3]["removed"] == ["eggs"]
+    second = _run_tools("""
+_, L = load('lists', 'Lists')
+async def main():
+    return [await L(None, action='read', list_name='shopping'), await L(None, action='list_lists'),
+            await L(None, action='clear', list_name='todo'), await L(None, action='read', list_name='todo')]
+print(json.dumps(asyncio.run(main())))
+""", REACHY_LISTS_FILE=f)   # a new process: persisted?
+    assert second[0]["items"] == ["milk", "Bread", "coffee"]
+    assert second[1]["lists"] == {"shopping": 3, "todo": 1}
+    assert second[2]["cleared"] == 1 and second[3]["items"] == []
+
+
+@pytest.mark.online
+def test_currency_conversion():
+    r = _run_tools("""
+_, X = load('convert_currency', 'ConvertCurrency')
+async def main():
+    return [await X(None, amount=50, from_currency='euros', to_currency='dollars'),
+            await X(None, amount=5, from_currency='EUR', to_currency='zorkmids')]
+print(json.dumps(asyncio.run(main())))
+""")
+    assert r[0]["from"] == "EUR" and r[0]["to"] == "USD" and 30 < r[0]["result"] < 90, r[0]
+    assert "error" in r[1]
+
+
+def test_personas_generated_and_up_to_date():
+    import importlib.util as iu
+    spec = iu.spec_from_file_location("make_personas", ROOT / "local_backend/make_personas.py")
+    mp = iu.module_from_spec(spec); spec.loader.exec_module(mp)
+    expected = mp.generate(write=False)
+    assert len(expected) == 2 * len(mp.personas()) >= 20
+    for path, content in expected.items():
+        assert path.exists() and path.read_text() == content, f"{path.parent.name} is stale: run local_backend/make_personas.py"
+    for suffix, base in mp.BASES.items():
+        base_tools = mp.tool_names(mp.split_profile((ROOT / f"local_backend/profiles/{base}/profile.md").read_text())[0])
+        assert "switch_persona" in base_tools
+        for name in mp.personas():
+            front, body = mp.split_profile((ROOT / f"local_backend/profiles/local_{name}{suffix}/profile.md").read_text())
+            assert mp.tool_names(front) == base_tools, name
+            assert "## TOOL & MOVEMENT RULES" in body and "## SPEECH RULES" in body, name
+
+
+def test_persona_matching():
+    r = _run_tools("""
+m, _ = load('switch_persona', 'SwitchPersona')
+qs = ['be a Victorian butler', 'the noir detective please', 'talk like David Attenborough', 'be a chef', 'go back to normal',
+      'Mars rover', 'mad scientist', 'time traveller', 'a pirate']
+print(json.dumps([m.match(q) for q in qs]))
+""")
+    assert r == ["victorian_butler", "noir_detective", "nature_documentarian", "cosmic_kitchen", "", "mars_rover",
+                 "mad_scientist_assistant", "time_traveler", None]
+
+
+LIST_ARG_CASES = [
+    ("Add milk to my shopping list.", {"action": "add", "list": "shopping", "item": "milk"}),
+    ("Put call the dentist on my to-do list.", {"action": "add", "list": "todo", "item": "dentist"}),
+    ("Remove eggs from the shopping list.", {"action": "remove", "list": "shopping", "item": "egg"}),
+    ("What's on my shopping list?", {"action": "read", "list": "shopping"}),
+]
+
+
+@pytest.mark.parametrize("prompt,want", LIST_ARG_CASES, ids=[w["action"] + str(i) for i, (_, w) in enumerate(LIST_ARG_CASES)])
+def test_llm_lists_arguments(llm, prompt, want):
+    got, ok = [], 0
+    for _ in range(TOOL_RUNS):
+        msg, _ = chat(llm, prompt)
+        calls = [tc for tc in (msg.tool_calls or []) if tc.function.name == "lists"]
+        a = json.loads(calls[0].function.arguments) if calls else {}
+        got.append(a)
+        name = " ".join(str(a.get("list_name", "")).lower().replace("-", " ").split())
+        name = {"to do": "todo", "to do list": "todo", "shopping list": "shopping", "todos": "todo"}.get(name, name)
+        items = " ".join(map(str, a.get("items") or [])) + " " + str(a.get("item") or "")
+        ok += (a.get("action") == want["action"] and name == want["list"]
+               and ("item" not in want or want["item"] in items.lower()))
+    record("lists_args", prompt=prompt, hits=ok, runs=TOOL_RUNS)
+    assert ok >= TOOL_MIN_HITS, got
+
+
+@pytest.mark.parametrize("prompt,tool", [("What time is it?", "get_time"), ("Do a little dance.", "dance"),
+                                         ("Go back to being yourself.", "switch_persona"), ("What's 12 times 12?", "calculate")])
+def test_persona_keeps_tools(llm, prompt, tool):
+    """A generated persona must still use its tools (not just role-play)."""
+    hits = 0
+    for _ in range(TOOL_RUNS):
+        msg, _ = chat(llm, prompt, profile="local_victorian_butler")
+        hits += tool in [tc.function.name for tc in (msg.tool_calls or [])]
+    record("persona_tool", tool=tool, prompt=prompt, hits=hits, runs=TOOL_RUNS)
+    assert hits >= TOOL_MIN_HITS, f"{tool}: {hits}/{TOOL_RUNS}"
+
+
 # --- Online tools (local_reachy_web profile: --web) ----------------------------------------
 
 WEB_TOOLS = ("get_weather", "web_search", "tech_news", "play_radio", "stop_radio")
@@ -440,6 +578,7 @@ WEB_TOOL_CASES = [
     ("Put on BBC Radio 1.", "play_radio"),
     ("Stop the music, please.", "stop_radio"),
     ("Set a timer for 3 minutes.", "set_reminder"),
+    ("How much is 50 euros in dollars?", "convert_currency"),
 ]
 
 

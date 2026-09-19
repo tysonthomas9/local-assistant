@@ -534,3 +534,41 @@ You asked for these after the fully local work, so they're **opt-in**. The offli
 - **Fake SearXNG** with pages of 7/4 (one a duplicate in another spelling)/6/0 results. Tool pages come out as 0–4, 5–9, 10–14, [15] with `has_more=False`, then "No more results." Page 3 and a repeat of page 1 made no new SearXNG requests. No duplicates across pages.
 - **Real SearXNG:** page 1 has 5 results and `has_more`; page 2 shares nothing with it (`-m online`).
 - **Model follow-up:** after a search turn, "Can you show me more results?" → `web_search` with the same query and `page: 2`, **8/8**.
+
+### Batch 1 of FEATURE_PLAN.md: bridge, calculator, lists, personas (2026-09-19)
+
+**Bridge** ([`reachy_bridge.py`](local_backend/reachy_bridge.py), installed by `run_app.py`):
+- **What it wraps:** `LocalStream.__init__` (keeps the stream), `_dispatch_activity` (publishes activity reasons to subscribers) and `clear_audio_queue` (publishes `interrupted`).
+- **Helpers:** `wait_for(reasons, timeout)` from background threads, `run_in_app_loop`, and `mic_muted` / `set_mic_muted`.
+- **Why the activity hook survives persona switches:** the handler gets `self._dispatch_activity` as its observer on every rebuild.
+- **Unit-tested** against a real `LocalStream` with stub handler and robot.
+
+**Calculator:** `calculate` (both profiles).
+- An `ast` whitelist, no `eval`. It accepts "15% of 80", "x", "^", "plus/minus/times/divided by", "squared", and trig in degrees.
+- Numbers, exponents and results are capped. Found by the tests: a 400-digit literal wasn't capped and crashed while being formatted; it's now rejected.
+- Code injection, attribute access, unknown names, division by zero and 500 nested parentheses all return errors.
+
+**Unit conversion:** `convert_units` (both profiles), a hand-written table: length, mass, volume including US cooking measures, temperature, area, speed, data, time; with aliases and plurals. Examples: 72 °F → 22.22 °C; 3.5 cups → 828.1 ml; kg → celsius is an error.
+
+**Currency:** `convert_currency` (web only).
+- **Endpoint:** `https://api.frankfurter.dev/v1/latest` (ECB rates). `api.frankfurter.app`, the address in the plan, now answers 301.
+- **Behaviour:** cached for a day in `state/`; understands currency names ("euros", "yen", "rupees"). 50 EUR → 57.30 USD (rate of 2026-09-18).
+
+**Lists:** one `lists` tool (both profiles).
+- **Actions:** add (one or several items; case-insensitive duplicates reported), remove (by words), read, clear, list_lists.
+- **Names normalised:** "Shopping List" / "groceries" → shopping; "to do" → todo.
+- **Stored** in `state/lists.json`.
+
+**Personas:** [`make_personas.py`](local_backend/make_personas.py) generates `local_<name>` and `local_<name>_web` for the 12 visible upstream personas (24 files, committed; a test fails if they're stale). `default` is replaced by our base profiles, and hidden `tedai` is skipped.
+- **Each persona profile contains:** the persona's own text under a "## PERSONA" heading, our base profile's tool list, and its "TOOL & MOVEMENT … SPEECH RULES" sections. All 26 profiles load through the app's own parser, and every listed tool exists.
+- **Voices:** the GGUF header contains all 9 CustomVoice speakers (Aiden, Ryan, Dylan, Eric, Ono_Anna, Serena, Sohee, Uncle_Fu, Vivian). An unsupported voice would only log a warning and keep the current one (`qwen3_tts_handler.py` `_apply_session_voice_override`). The assignments are in `VOICES` in the generator.
+- **`switch_persona`** (all profiles): loose matching (a synonym table + difflib), and it keeps the offline/web mode. It returns at once; a background thread waits for `assistant_transcript_done` (8 s maximum), then calls `stream.apply_personality` on the app loop (the same call the UI's `personalities.apply` ends in). The session restarts, so conversation history is lost. "a pirate" returns "no match" with the list of options.
+
+**Tool counts:** 24 offline, 30 web, plus the app's 2 `task_*` tools.
+
+**Tests: 73 passed** (services not running). **Every tool-choice check was 8/8**, dance included (7/8 before):
+- new cases: 17×23, 15% of 240, cups → ml, °F → °C, shopping add, to-do read, detective, butler, 50 € → $;
+- the `lists` arguments: action, list name and item, 4 prompts;
+- a persona keeping its tools: in `local_victorian_butler` — time, dance, "go back to being yourself", 12×12.
+
+**Not yet tried live:** the persona switch (the session restart and greeting, and whether the voices sound right).

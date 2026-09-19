@@ -1,0 +1,121 @@
+"""In-process bridge between our tools and the conversation app's live LocalStream.
+
+Tools only receive `deps` (robot, movement manager, instance path), but muting, wake-word gating,
+book reading and persona switching need the live conversation stream. run_app.py calls
+`install()` before the app starts; it wraps three LocalStream methods (upstream code unchanged):
+
+  __init__            -> remember the stream (stream())
+  _dispatch_activity  -> publish activity reasons to subscribers (user_speech_started,
+                         response_created, assistant_transcript_done, ...)
+  clear_audio_queue   -> publish "interrupted" (barge-in, conversation.say/interrupt)
+
+This module is imported normally (not re-executed on profile reloads like tool files), so its
+state survives persona switches. Subscribers are called on the app's event loop and must be quick.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+from typing import Any, Callable, Coroutine
+
+logger = logging.getLogger("reachy_bridge")
+
+_stream: Any = None
+_subscribers: list[Callable[[str], None]] = []
+_sub_lock = threading.Lock()
+_installed = False
+
+
+def install() -> None:
+    """Patch LocalStream once. Safe to call twice."""
+    global _installed
+    if _installed:
+        return
+    from reachy_mini_conversation_app import console
+
+    cls = console.LocalStream
+    orig_init, orig_dispatch, orig_clear = cls.__init__, cls._dispatch_activity, cls.clear_audio_queue
+
+    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
+        global _stream
+        orig_init(self, *args, **kwargs)
+        _stream = self
+
+    def _dispatch_activity(self: Any, reason: str) -> None:
+        orig_dispatch(self, reason)
+        publish(reason)
+
+    def clear_audio_queue(self: Any) -> None:
+        orig_clear(self)
+        publish("interrupted")
+
+    cls.__init__, cls._dispatch_activity, cls.clear_audio_queue = __init__, _dispatch_activity, clear_audio_queue
+    _installed = True
+
+
+def stream() -> Any:
+    """The live LocalStream, or None if the app hasn't started (e.g. in tests)."""
+    return _stream
+
+
+def publish(reason: str) -> None:
+    with _sub_lock:
+        subs = list(_subscribers)
+    for cb in subs:
+        try:
+            cb(reason)
+        except Exception:
+            logger.exception("bridge subscriber failed on %r", reason)
+
+
+def subscribe(callback: Callable[[str], None]) -> Callable[[], None]:
+    """Call `callback(reason)` on every activity event; returns an unsubscribe function."""
+    with _sub_lock:
+        _subscribers.append(callback)
+
+    def unsubscribe() -> None:
+        with _sub_lock:
+            if callback in _subscribers:
+                _subscribers.remove(callback)
+    return unsubscribe
+
+
+def wait_for(reasons: set[str], timeout: float) -> str | None:
+    """Block (from a background thread) until one of `reasons` is published; returns it or None."""
+    hit: list[str] = []
+    done = threading.Event()
+
+    def cb(reason: str) -> None:
+        if reason in reasons and not hit:
+            hit.append(reason)
+            done.set()
+    unsubscribe = subscribe(cb)
+    try:
+        done.wait(timeout)
+        return hit[0] if hit else None
+    finally:
+        unsubscribe()
+
+
+def run_in_app_loop(factory: Callable[[], Coroutine[Any, Any, Any]], timeout: float = 10) -> Any:
+    """Run a coroutine on the app's event loop from another thread and return its result."""
+    s = _stream
+    loop = getattr(s, "_asyncio_loop", None)
+    if loop is None:
+        raise RuntimeError("conversation app is not running")
+    return asyncio.run_coroutine_threadsafe(factory(), loop).result(timeout)
+
+
+def mic_muted() -> bool | None:
+    return None if _stream is None else bool(_stream._mic_muted)
+
+
+def set_mic_muted(muted: bool) -> bool:
+    """Mute/unmute the microphone (frames are dropped before being sent). False if no stream."""
+    if _stream is None:
+        return False
+    _stream._mic_muted = bool(muted)
+    publish("mic_muted" if muted else "mic_unmuted")
+    return True
