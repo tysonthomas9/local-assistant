@@ -519,3 +519,18 @@ You asked for these after the fully local work, so they're **opt-in**. The offli
 **Also:** during the run, one `web_search` for "Reachy Mini robot" returned 0 results; a minute later the same query returned 27. SearXNG's upstream engines sometimes all time out at once (DuckDuckGo keeps answering with a CAPTCHA, and Wikidata times out). `web_search` now retries once when there are no results.
 
 **Not yet heard on the robot:** all sound tests used silent sinks.
+
+### web_search pagination (2026-09-19)
+
+**Before:** `web_search` fetched only SearXNG's first page and passed its top 5 results to the model. There was no page parameter, so "show me more" re-ran the same search.
+
+**Now:** an optional `page` argument (1, 2, 3…, up to 10), 5 results per page; each response carries `page` and `has_more`.
+- **Why not map pages directly:** SearXNG's own pages are uneven and overlap. For "reachy mini robot", pageno 1/2/3 had 27/39/36 results. So the tool fetches SearXNG pages in order, only as far as needed (at most 5 per query), drops repeated URLs (ignoring scheme, `www.` and a trailing slash), and keeps the merged list in a per-query cache for 5 minutes. The query key ignores case and extra spaces.
+- **What that gives:** page 2 continues exactly where page 1 stopped, and follow-up pages usually need no new search.
+- **Failures:** a later SearXNG page that fails returns what's already collected and is retried on the next call. The first page still retries once when all engines return nothing.
+- **Direct answers** (SearXNG `answers`) are only included on page 1.
+
+**Tests** (51 passed, services not running):
+- **Fake SearXNG** with pages of 7/4 (one a duplicate in another spelling)/6/0 results. Tool pages come out as 0–4, 5–9, 10–14, [15] with `has_more=False`, then "No more results." Page 3 and a repeat of page 1 made no new SearXNG requests. No duplicates across pages.
+- **Real SearXNG:** page 1 has 5 results and `has_more`; page 2 shares nothing with it (`-m online`).
+- **Model follow-up:** after a search turn, "Can you show me more results?" → `web_search` with the same query and `page: 2`, **8/8**.

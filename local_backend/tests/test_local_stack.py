@@ -456,6 +456,90 @@ def test_web_llm_calls_the_right_tool(llm, web_request, prompt, tool):
     assert hits >= TOOL_MIN_HITS, f"{tool}: {hits}/{TOOL_RUNS} for {prompt!r}"
 
 
+def test_web_search_pagination_with_fake_searxng():
+    """Uneven, overlapping SearXNG pages -> clean 5-result pages, has_more, cache, 'No more results'."""
+    code = r"""
+import asyncio, importlib.util, json, os, sys, threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+PAGES = {1: [f"https://site{i}.com/a" for i in range(7)],
+         2: ["http://www.site3.com/a/", "https://site7.com/a", "https://site8.com/a", "https://site9.com/a"],
+         3: [f"https://site{i}.com/a" for i in range(10, 16)], 4: []}
+hits = []
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        n = int(parse_qs(urlparse(self.path).query)["pageno"][0]); hits.append(n)
+        body = json.dumps({"results": [{"title": u, "content": "c", "url": u} for u in PAGES.get(n, [])]}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+srv = HTTPServer(("127.0.0.1", 0), H); threading.Thread(target=srv.serve_forever, daemon=True).start()
+os.environ["REACHY_SEARXNG_URL"] = f"http://127.0.0.1:{srv.server_address[1]}"
+spec = importlib.util.spec_from_file_location("web_search", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+W = m.WebSearch()
+async def main():
+    out = []
+    for q, pg in (("Test  Query", 1), ("test query", 2), ("test query", 3), ("test query", 4), ("test query", 5), ("TEST query", 1)):
+        before = len(hits); r = await W(None, query=q, page=pg)
+        out.append({"page": pg, "sites": [x["source"] for x in r["results"]], "has_more": r["has_more"],
+                    "note": r.get("note"), "requests": hits[before:]})
+    return out
+print(json.dumps(asyncio.run(main())))
+"""
+    out = subprocess.run([str(APP_PYTHON), "-c", code, str(ROOT / "local_backend/tools/web_search.py")],
+                         capture_output=True, text=True, check=True).stdout
+    p1, p2, p3, p4, p5, again = json.loads(out.strip().splitlines()[-1])
+    site = lambda u: re.sub(r"^https?://(www\.)?", "", u).split(".")[0]
+    assert [site(u) for u in p1["sites"]] == [f"site{i}" for i in range(5)] and p1["has_more"] and p1["requests"] == [1]
+    assert [site(u) for u in p2["sites"]] == [f"site{i}" for i in range(5, 10)], "page 2 must continue page 1, without the duplicate site3"
+    assert p3["requests"] == [], "page 3 should come from the cache"
+    assert [site(u) for u in p4["sites"]] == ["site15"] and p4["has_more"] is False
+    assert p5["sites"] == [] and p5["note"] == "No more results."
+    assert again["requests"] == [] and [site(u) for u in again["sites"]] == [f"site{i}" for i in range(5)], "same query, other spelling -> cache"
+    all_sites = p1["sites"] + p2["sites"] + p3["sites"] + p4["sites"]
+    assert len({site(u) for u in all_sites}) == len(all_sites), "duplicates across pages"
+
+
+@pytest.mark.online
+def test_web_search_pages_real():
+    code = r"""
+import asyncio, importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("web_search", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+W = m.WebSearch()
+async def main():
+    return [await W(None, query="Reachy Mini robot", page=p) for p in (1, 2)]
+print(json.dumps(asyncio.run(main())))
+"""
+    out = subprocess.run([str(APP_PYTHON), "-c", code, str(ROOT / "local_backend/tools/web_search.py")],
+                         capture_output=True, text=True, check=True).stdout
+    p1, p2 = json.loads(out.strip().splitlines()[-1])
+    assert len(p1["results"]) == 5 and p1["has_more"], p1
+    assert p2["results"] and not ({x["source"] for x in p1["results"]} & {x["source"] for x in p2["results"]}), "pages overlap"
+
+
+def test_web_llm_asks_for_next_page(llm, web_request):
+    """After a search, 'show me more' should call web_search again with the same query and page 2."""
+    first = {"query": "best robot vacuum 2026", "page": 1, "has_more": True, "results": [
+        {"title": f"Robot vacuum review {i}", "snippet": "…", "source": f"https://example{i}.com/review"} for i in range(5)]}
+    history = [
+        {"role": "user", "content": "Search the web for the best robot vacuum this year."},
+        {"role": "assistant", "content": "", "tool_calls": [{"type": "function", "id": "call_ws1", "function": {
+            "name": "web_search", "arguments": json.dumps({"query": "best robot vacuum 2026"})}}]},
+        {"role": "tool", "tool_call_id": "call_ws1", "content": json.dumps(first)},
+        {"role": "assistant", "content": "Reviewers mostly recommend a handful of mid-range models this year."},
+    ]
+    got = []
+    for _ in range(TOOL_RUNS):
+        r = llm.chat.completions.create(model=MODEL, max_tokens=300, tools=web_request["tools"], tool_choice="auto",
+                                        messages=[{"role": "system", "content": web_request["system"]}, *history,
+                                                  {"role": "user", "content": "Can you show me more results?"}],
+                                        extra_body={"reasoning_effort": "none"})
+        calls = [tc for tc in (r.choices[0].message.tool_calls or []) if tc.function.name == "web_search"]
+        got.append(json.loads(calls[0].function.arguments) if calls else None)
+    ok = sum(bool(g) and int(g.get("page") or 1) == 2 and "vacuum" in g.get("query", "").lower() for g in got)
+    record("web_next_page", hits=ok, runs=TOOL_RUNS, got=got)
+    assert ok >= TOOL_MIN_HITS, got
+
+
 @pytest.mark.online
 def test_web_tools_return_data():
     """Calls the three tools for real (internet + local SearXNG)."""
