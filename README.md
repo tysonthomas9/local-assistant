@@ -10,19 +10,55 @@ Every service listens on `127.0.0.1` only. Nothing in this repo patches upstream
 
 ## Architecture
 
+```text
+   REACHY MINI LITE (the robot)                YOUR PC  (everything talks over 127.0.0.1)
+  +-------------------------+       USB       +--------------------------------------------------------+
+  |                         |                 |                                                        |
+  |  Mic  ------------------+---------------->|  CONVERSATION APP  (Pollen's, unmodified)              |
+  |                         |                 |  web UI on :7860                                       |
+  |  Camera ----------------+---------------->|                                                        |
+  |                         |                 |   1. Wake gate:  "hey jarvis" or "hey marvin"?         |
+  |  Speaker <--------------+-----------------|   2. Router:     send to that assistant                |
+  |                         |                 |                  (own memory, own voice, own persona)  |
+  |                         |                 |              |                        ^                |
+  |                         |                 |              | your voice             | reply audio    |
+  |                         |                 |              v                        |                |
+  |                         |                 |  SPEECH SERVER  :8765                 |                |
+  |                         |                 |   3. Silero       -> are you talking? |                |
+  |                         |                 |   4. Parakeet     -> voice to text    |                |
+  |                         |                 |              |                        |                |
+  |                         |                 |              v                        |                |
+  |                         |                 |  OLLAMA  :11434                       |                |
+  |                         |                 |   5. gemma4       -> thinks, answers, |                |
+  |                         |                 |                      may call a tool  |                |
+  |                         |                 |              |                        |                |
+  |                         |                 |              v                        |                |
+  |                         |                 |   6. Qwen3-TTS    -> text to voice ---+                |
+  |                         |                 |                                                        |
+  |  Head + antenna motors <+-----------------|  DAEMON  :8000  (moves the head, reads the camera)     |
+  |                         |                 |                                                        |
+  +-------------------------+                 |  TOOLS (local): reminders, timers, sounds, lists,      |
+                                              |    calculator, unit convert, storyteller, mute ...     |
+                                              |                                                        |
+                                              |  TOOLS (only with --web): weather, radio, news, search |
+                                              |    currency, book download                             |
+                                              +---------------------------|----------------------------+
+                                                                          |
+                                                                          v
+                                                                      INTERNET
+                                                                (off by default)
 ```
-Robot mic ─USB─▶ conversation app ──ws://127.0.0.1:8765/v1/realtime──▶ speech-to-speech (GPU with most free memory)
-                 (run_app.py; UI on                                        Silero VAD → Parakeet TDT 0.6B v3 STT
-                  127.0.0.1:7860)                                                 │
-                                                                                  ▼
-                                                                Ollama 127.0.0.1:11434/v1: reachy-gemma4
-                                                                (gemma4:26b, 32k ctx, thinking off; kept
-                                                                 loaded by the backend launcher)
-                                                                                  │
-                                                                                  ▼
-Robot speaker ◀─USB─ conversation app ◀────── audio + tool calls ───────── Qwen3-TTS 1.7B (voice "Aiden")
-        daemon (run_daemon.py, 127.0.0.1:8000, signalling 127.0.0.1:8443) drives motors/camera over USB
-```
+
+One turn, in order:
+
+1. You say "hey jarvis, what time is it?"
+2. The wake gate hears "hey jarvis" and routes to Jarvis.
+3. Silero detects when you start and stop talking.
+4. Parakeet turns your voice into text.
+5. gemma4 reads it, calls `get_time`, and writes a reply.
+6. Qwen3-TTS speaks it in Jarvis's voice through the robot's speaker.
+
+Meanwhile the daemon moves the head. Nothing leaves the PC unless started with `--web`.
 
 | Port | Service |
 | --- | --- |
@@ -32,6 +68,63 @@ Robot speaker ◀─USB─ conversation app ◀────── audio + tool c
 | 7860 | Conversation app web UI (`--ui`) |
 | 11434 | Ollama |
 | 8888 | SearXNG (only with `--web`) |
+
+## Repo layout
+
+```text
+local-assistant/
+|
+|-- README.md                    <- start here
+|
+|-- Docs (the detailed write-ups)
+|   |-- REACHY_MINI_SETUP.md       connecting the robot over USB
+|   |-- CONVERSATION_APP.md        running Pollen's app (cloud version)
+|   |-- LOCAL_CONVERSATION.md      making it fully local + the privacy audit
+|   |-- FEATURE_PLAN.md            plan for the tools
+|   `-- MULTI_ASSISTANT_PLAN.md    plan for Jarvis / Marvin
+|
+|-- Launchers (what you actually run)
+|   |-- start_daemon.sh            terminal 1: the robot daemon
+|   |-- start_conversation.sh      terminal 3: the app  (--local --web --wake --assistants)
+|   `-- hello.py, say.py           tiny first tests: move / speak
+|
+`-- local_backend/               <- ALL the code this project adds
+    |
+    |-- start_local_backend.sh     terminal 2: Ollama + speech server
+    |-- start_searxng.sh           optional local search engine
+    |-- run_app.py, run_daemon.py  wrappers that lock things to 127.0.0.1
+    |-- cache_models.sh            download models once, then run offline
+    |
+    |-- reachy_*.py                the features' engines
+    |     wake, assistants, scheduler, sounds, radio,
+    |     reader, lists, listening (mute), bridge
+    |
+    |-- tools/                     19 tools the LLM can call
+    |     get_time, set/list/cancel_reminder, play/stop_sound,
+    |     play/stop_radio*, calculate, convert_units, convert_currency*,
+    |     lists, listening, read_book, switch_persona,
+    |     forget_conversation, get_weather*, web_search*, tech_news*
+    |                                                  (* = --web only)
+    |
+    |-- profiles/                  30 folders = 15 personalities x 2
+    |     local_jarvis, local_jarvis_web, local_marvin, ...
+    |
+    |-- assistants.json            Jarvis <-> "hey jarvis", voice Ryan
+    |                              Marvin <-> "hey marvin", voice Eric
+    |
+    |-- net_watch.py, netaudit/    proves nothing phones home
+    |-- gpu_monitor.py, stt_benchmark.py
+    `-- tests/                     pytest suite
+
+
+NOT in the repo (git-ignored, downloaded separately):
+    reachy_mini_conversation_app/   Pollen's app
+    third_party/speech-to-speech/   the speech server
+    third_party/gst-plugins-rs/     video plugin
+    .venv/  models/  voices/  logs/  sounds/  books/  state/
+```
+
+Pollen's app, daemon and speech server live next to this repo, unmodified. This repo adds `local_backend/` and plugs it in from the outside: environment variables point the app at `profiles/` and `tools/`, and `run_app.py` / `run_daemon.py` wrap the upstream start-up to bind `127.0.0.1`.
 
 ## Requirements
 
