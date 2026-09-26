@@ -199,6 +199,22 @@ How this repo plugs in (no third-party code is edited):
 - **reachy-mini daemon**: a pip package, not a clone; `run_daemon.py` wraps it and binds signalling to `127.0.0.1`.
 - **Ollama**: system install; this repo adds only `Modelfile.reachy-gemma4` (32k context); `start_local_backend.sh` turns thinking off per request.
 
+### Swapping the LLM server
+
+The speech server reaches the LLM only through an OpenAI-compatible `/v1` Chat Completions API (`--llm_backend chat-completions --responses_api_base_url ...`). So Ollama can be replaced by another OpenAI-compatible server, such as vLLM, llama.cpp's `llama-server` or LM Studio. The app, tools and profiles don't change.
+
+`start_local_backend.sh` is Ollama-specific today:
+- `OLLAMA=http://127.0.0.1:11434` is hardcoded (not an env var).
+- It runs `ollama create` from `Modelfile.<name>` if the model is missing.
+- It loads the model and keeps it warm with `keep_alive` pings to Ollama's `/api/generate`.
+
+To swap: start the other server yourself, point `--responses_api_base_url` at its `/v1`, set `REACHY_LLM` (passed as `--model_name`) to the model name that server serves, and skip the `ollama create` and keep-alive steps.
+
+Notes:
+- The model must support tool calling and, for camera questions, image input.
+- Thinking is turned off with `--responses_api_reasoning_effort none`. The `--responses_api_disable_thinking` default sends `chat_template_kwargs.enable_thinking=false`, which only works on vLLM.
+- vLLM's default port 8000 clashes with the robot daemon, so run it on another port (e.g. 8001).
+
 ## Requirements
 
 - **Robot:** Reachy Mini Lite on USB (motor controller on `/dev/ttyACM0`, plus the Reachy Mini camera and audio devices).
