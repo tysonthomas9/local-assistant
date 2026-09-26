@@ -126,6 +126,79 @@ NOT in the repo (git-ignored, downloaded separately):
 
 Pollen's app, daemon and speech server live next to this repo, unmodified. This repo adds `local_backend/` and plugs it in from the outside: environment variables point the app at `profiles/` and `tools/`, and `run_app.py` / `run_daemon.py` wrap the upstream start-up to bind `127.0.0.1`.
 
+## How the third-party code fits
+
+`░░ THIRD PARTY ░░` = downloaded code, not modified; `██ THIS REPO ██` = code in this repo.
+
+```text
+ ╔══════════════════════════════════════════════════════════════════════════════════════╗
+ ║ PROCESS 3: CONVERSATION APP   (terminal 3: ./start_conversation.sh)   UI :7860       ║
+ ║                                                                                      ║
+ ║  ░░ THIRD PARTY ░░  reachy_mini_conversation_app/   (Pollen, git clone)              ║
+ ║  ┌────────────────────────────────────────────────────────────────────────────────┐  ║
+ ║  │ main.py  console.py  huggingface_realtime.py  memory.py  moves.py              │  ║
+ ║  │ tools/core_tools.py  (the Tool base class)     profiles/  (Pollen's personas)  │  ║
+ ║  └───▲───────────────▲───────────────────▲──────────────────────▲─────────────────┘  ║
+ ║      │ wraps         │ subclass Tool     │ loaded via env var   │ hooks into         ║
+ ║      │ main()        │                   │ EXTERNAL_PROFILES_   │ console + realtime ║
+ ║      │               │                   │ DIRECTORY            │ client             ║
+ ║  ┌───┴──────────┐ ┌──┴──────────────┐ ┌──┴─────────────────┐ ┌──┴─────────────────┐  ║
+ ║  │██ run_app.py │ │██ tools/  (19)  │ │██ profiles/ (30)   │ │██ reachy_wake.py   │  ║
+ ║  │ binds UI to  │ │ loaded via env  │ │ generated from     │ │██ reachy_assistants│  ║
+ ║  │ 127.0.0.1    │ │ EXTERNAL_TOOLS_ │ │ Pollen's by        │ │██ reachy_bridge.py │  ║
+ ║  │              │ │ DIRECTORY       │ │ make_personas.py   │ │ wake word, Jarvis/ │  ║
+ ║  └──────────────┘ └─────────────────┘ └────────────────────┘ │ Marvin routing     │  ║
+ ║                                                              └────────────────────┘  ║
+ ╚═════════════╤════════════════════════════════════════════════════════════╤═══════════╝
+               │ realtime websocket  ws://127.0.0.1:8765                    │ robot SDK
+               ▼                                                            │ :8000
+ ╔════════════════════════════════════════════════════╗                     │
+ ║ PROCESS 2: SPEECH SERVER                           ║                     │
+ ║ (terminal 2: local_backend/start_local_backend.sh) ║                     │
+ ║                                                    ║                     │
+ ║  ░░ THIRD PARTY ░░  third_party/speech-to-speech/  ║                     │
+ ║  ┌──────────────────────────────────────────────┐  ║                     │
+ ║  │ Silero VAD → Parakeet STT → Qwen3-TTS        │  ║                     │
+ ║  └─────────▲─────────────────────┬──────────────┘  ║                     │
+ ║            │ run with our flags  │ HTTP :11434     ║                     │
+ ║  ┌─────────┴────────────────┐    │                 ║                     │
+ ║  │██ start_local_backend.sh │    │                 ║                     │
+ ║  │ offline, telemetry off,  │    │                 ║                     │
+ ║  │ picks GPU, VAD tuning    │    │                 ║                     │
+ ║  └──────────────────────────┘    ▼                 ║                     │
+ ║  ░░ THIRD PARTY ░░  Ollama (system install)        ║                     │
+ ║  ┌──────────────────────────────────────────────┐  ║                     │
+ ║  │ gemma4:26b   ◀── ██ Modelfile.reachy-gemma4  │  ║                     │
+ ║  │                   (32k context)              │  ║                     │
+ ║  └──────────────────────────────────────────────┘  ║                     │
+ ╚════════════════════════════════════════════════════╝                     │
+                                                                            ▼
+ ╔══════════════════════════════════════════════════════════════════════════════════════╗
+ ║ PROCESS 1: ROBOT DAEMON   (terminal 1: ./start_daemon.sh)   :8000, WebRTC :8443      ║
+ ║                                                                                      ║
+ ║  ░░ THIRD PARTY ░░  reachy-mini 1.10.0  (Pollen, pip install into .venv/)            ║
+ ║  ┌────────────────────────────────────────────────────────────────────────────────┐  ║
+ ║  │ daemon: motors, camera, mic, speaker          media server ──uses──┐           │  ║
+ ║  └───▲────────────────────────────────────────────────────────────────┼───────────┘  ║
+ ║      │ wraps daemon, binds signalling to 127.0.0.1                    ▼              ║
+ ║  ┌───┴─────────────────┐              ░░ THIRD PARTY ░░  webrtcsink plugin           ║
+ ║  │██ run_daemon.py     │              built once from third_party/gst-plugins-rs/,   ║
+ ║  └─────────────────────┘              found via GST_PLUGIN_PATH=                     ║
+ ║                                       ~/.local/gst-plugins-rs                        ║
+ ╚═══════════════════════════════════════════╤══════════════════════════════════════════╝
+                                             │ USB
+                                             ▼
+                                   Reachy Mini Lite robot
+```
+
+How this repo plugs in (no third-party code is edited):
+
+- **Conversation app**: `run_app.py` wraps Pollen's `main()` after binding the UI to `127.0.0.1`; two env vars (`REACHY_MINI_EXTERNAL_TOOLS_DIRECTORY`, `REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY`) make the app load this repo's `tools/` and `profiles/`; every tool subclasses Pollen's `Tool`, and the 30 profiles are generated from Pollen's personas by `make_personas.py`; the wake word and Jarvis/Marvin routing hook into the app's console and realtime client.
+- **speech-to-speech**: never imported; run as a separate server with this repo's flags (offline, telemetry off, GPU choice, VAD tuning); the app reaches it only over the websocket on `:8765`.
+- **gst-plugins-rs**: never run; compiled once to produce the `webrtcsink` plugin, which the daemon loads via `GST_PLUGIN_PATH` set by `start_daemon.sh`.
+- **reachy-mini daemon**: a pip package, not a clone; `run_daemon.py` wraps it and binds signalling to `127.0.0.1`.
+- **Ollama**: system install; this repo adds only `Modelfile.reachy-gemma4` (32k context); `start_local_backend.sh` turns thinking off per request.
+
 ## Requirements
 
 - **Robot:** Reachy Mini Lite on USB (motor controller on `/dev/ttyACM0`, plus the Reachy Mini camera and audio devices).
