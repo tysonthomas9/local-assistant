@@ -16,27 +16,27 @@ Every service listens on `127.0.0.1` only. Nothing in this repo patches upstream
   |                         |                 |                                                        |
   |  Mic  ------------------+---------------->|  CONVERSATION APP  (Pollen's, unmodified)              |
   |                         |                 |  web UI on :7860                                       |
-  |  Camera ----------------+---------------->|                                                        |
+  |                         |                 |                                                        |
   |                         |                 |   1. Wake gate:  "hey jarvis" or "hey marvin"?         |
   |  Speaker <--------------+-----------------|   2. Router:     send to that assistant                |
   |                         |                 |                  (own memory, own voice, own persona)  |
-  |                         |                 |              |                        ^                |
-  |                         |                 |              | your voice             | reply audio    |
-  |                         |                 |              v                        |                |
-  |                         |                 |  SPEECH SERVER  :8765                 |                |
-  |                         |                 |   3. Silero       -> are you talking? |                |
-  |                         |                 |   4. Parakeet     -> voice to text    |                |
-  |                         |                 |              |                        |                |
-  |                         |                 |              v                        |                |
-  |                         |                 |  OLLAMA  :11434                       |                |
-  |                         |                 |   5. gemma4       -> thinks, answers, |                |
-  |                         |                 |                      may call a tool  |                |
-  |                         |                 |              |                        |                |
-  |                         |                 |              v                        |                |
-  |                         |                 |   6. Qwen3-TTS    -> text to voice ---+                |
-  |                         |                 |                                                        |
-  |  Head + antenna motors <+-----------------|  DAEMON  :8000  (moves the head, reads the camera)     |
-  |                         |                 |                                                        |
+  |                         |                 |              |                        ^             ^  |
+  |                         |                 |              | your voice             | reply audio |  |
+  |                         |                 |              v                        |             |  |
+  |                         |                 |  SPEECH SERVER  :8765                 |             |  |
+  |                         |                 |   3. Silero       -> are you talking? |             |  |
+  |                         |                 |   4. Parakeet     -> voice to text    |             |  |
+  |                         |                 |              |                        |             |  |
+  |                         |                 |              v                        |             |  |
+  |                         |                 |  OLLAMA  :11434                       |             |  |
+  |                         |                 |   5. gemma4       -> thinks, answers, |             |  |
+  |                         |                 |                      may call a tool  |             |  |
+  |                         |                 |              |                        |             |  |
+  |                         |                 |              v                        |             |  |
+  |                         |                 |   6. Qwen3-TTS    -> text to voice ---+             |  |
+  |                         |                 |                                                     |  |
+  |  Head + antenna motors <+-----------------|  DAEMON  :8000  (moves the head, reads the camera)  |  |
+  |  Camera ----------------+---------------->|    camera frames to the app, via a local socket ----+  |
   +-------------------------+                 |  TOOLS (local): reminders, timers, sounds, lists,      |
                                               |    calculator, unit convert, storyteller, mute ...     |
                                               |                                                        |
