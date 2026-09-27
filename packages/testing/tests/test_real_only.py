@@ -70,3 +70,18 @@ def test_only_the_checkers_own_rule_strings_are_allowlisted(tmp_path: Path) -> N
     (pkg / "real_only.py").write_text(source + "\nimport unittest.mock\n")
     (violation,) = check(tmp_path)
     assert violation.rule == "imports unittest.mock"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'LABEL = "imports unittest.mock"  # import unittest.mock\n',
+        "# the rule label imports pytest_mock, mentioned in a comment\n",
+        'x = "uses monkeypatch" + "monkeypatch"\n',
+    ],
+)
+def test_allowlist_matches_exact_rule_literals_only(tmp_path: Path, line: str) -> None:
+    pkg = tmp_path / "packages/testing/src/assistant_testing"
+    pkg.mkdir(parents=True)
+    (pkg / "real_only.py").write_text(Path(real_only.__file__).read_text() + line)
+    assert len(check(tmp_path)) == 1

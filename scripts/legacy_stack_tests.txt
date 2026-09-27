@@ -7,8 +7,8 @@
 #   stack      the legacy stack is up: daemon on 127.0.0.1:8000 and speech server on 127.0.0.1:8765
 #   speech     the speech server (HF speech-to-speech Realtime) on 127.0.0.1:8765
 #   searxng    the local SearXNG on 127.0.0.1:8888 (local_backend/start_searxng.sh)
-#   root-venv  the legacy root .venv with piper; in a gate clone that path holds the uv workspace venv
-tests/test_local_stack.py::test_ui_and_signalling_not_exposed_to_lan  stack  inspects the app UI (:7860) and daemon signalling (:8443) listeners
+#   online     internet access (SearXNG forwards queries to public engines)
+# Join several needs with `+`; the test is deselected when any of them is missing.
 tests/test_local_stack.py::test_daemon_running_with_media  stack  queries the daemon status and media API on :8000
 tests/test_local_stack.py::test_no_external_connections  stack  inspects the sockets of the running stack processes
 tests/test_local_stack.py::test_gpu_placement_and_headroom  stack  checks GPU placement of the running stack's models and the headroom they leave
@@ -17,8 +17,5 @@ tests/test_local_stack.py::test_realtime_tool_turn  speech  opens a Realtime ses
 tests/test_local_stack.py::test_realtime_camera_tool_turn  speech  opens a Realtime session on :8765
 tests/test_local_stack.py::test_realtime_image_turn  speech  opens a Realtime session on :8765
 tests/test_local_stack.py::test_book_reader_reads_verbatim_paces_and_pauses  speech  reads a book through the speech server on :8765
-tests/test_local_stack.py::test_web_search_pages_real  searxng  searches through the local SearXNG
-tests/test_local_stack.py::test_web_tools_return_data  searxng  web tools query the local SearXNG
-tests/test_local_stack.py::test_wake_word_gate  root-venv  synthesizes wake clips with piper from the root .venv
-tests/test_local_stack.py::test_two_wake_words_report_which_fired  root-venv  synthesizes wake clips with piper from the root .venv
-tests/test_local_stack.py::test_wake_phrase_hey_reachy  root-venv  synthesizes wake clips with piper from the root .venv
+tests/test_local_stack.py::test_web_search_pages_real  searxng+online  searches the web through the local SearXNG
+tests/test_local_stack.py::test_web_tools_return_data  searxng+online  web tools query the web through the local SearXNG

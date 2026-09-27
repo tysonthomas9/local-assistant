@@ -58,17 +58,25 @@ def scanned_files(repo_root: Path) -> list[Path]:
     return files
 
 
-def _is_own_rule_string(line: str) -> bool:
-    return any(rule in line or pattern.pattern in line for rule, pattern in RULES)
+# The exact source literals of the rules above: `"<label>"` and `r"<pattern>"`.
+_RULE_LITERALS = tuple(
+    literal for rule, pattern in RULES for literal in (f'"{rule}"', f'r"{pattern.pattern}"')
+)
+
+
+def _without_rule_literals(line: str) -> str:
+    """Blank out this module's own rule-string literals; everything else is still checked."""
+    for literal in _RULE_LITERALS:
+        line = line.replace(literal, '""')
+    return line
 
 
 def check_file(path: Path, *, allow_rule_strings: bool = False) -> list[Violation]:
     found: list[Violation] = []
     for number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
-        if allow_rule_strings and _is_own_rule_string(line):
-            continue
+        checked = _without_rule_literals(line) if allow_rule_strings else line
         for rule, pattern in RULES:
-            if pattern.search(line):
+            if pattern.search(checked):
                 found.append(Violation(path, number, rule, line))
     return found
 

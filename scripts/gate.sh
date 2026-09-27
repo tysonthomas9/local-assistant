@@ -4,7 +4,8 @@
 #   scripts/gate.sh
 #
 # Stages:
-#   a  clone   git clone HEAD into a temp dir and `uv sync --locked` from scratch
+#   a  clone   git clone HEAD into a temp dir and `uv sync --locked` from scratch into
+#              .venv-assistant; FAILS if the sync changed the legacy root .venv
 #   b  lint    ruff (check + format), basedpyright, import-linter
 #   c  unit    the few unit tests (pure logic) plus the schema snapshot
 #   d  real    real-only check: no mocks, mocker, monkeypatching or Fake/Mock/Stub/Dummy
@@ -35,7 +36,10 @@ ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 MAIN_CHECKOUT="$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")"
 DAEMON_URL="http://127.0.0.1:8000"
 OLLAMA_URL="http://127.0.0.1:11434/v1/models"
-unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT || true
+unset VIRTUAL_ENV || true
+# The uv workspace lives in .venv-assistant; .venv is the legacy root venv (piper, reachy-mini
+# SDK and daemon) and the new stack must never touch it.
+export UV_PROJECT_ENVIRONMENT=.venv-assistant
 
 STATE_DIR="$(mktemp -d -t assistant-gate-state.XXXXXX)"
 CLONE_PARENT=""
@@ -120,8 +124,28 @@ stage_clone() {
         git -C "$CLONE_DIR" checkout -q --detach "$sha"
         cd "$CLONE_DIR"
         note "fresh clone of ${sha:0:10}"
+        provision_legacy
     fi
+    local before after
+    before="$(legacy_venv_fingerprint)"
     uv sync --locked
+    after="$(legacy_venv_fingerprint)"
+    if [[ "$before" != "$after" ]]; then
+        printf '%suv sync changed the legacy .venv (%s -> %s)%s\n' "$RED" "$before" "$after" "$RESET"
+        note "uv sync touched the legacy .venv"
+        return 1
+    fi
+    printf 'legacy .venv unchanged by uv sync (%s)\n' "$before"
+}
+
+# legacy_venv_fingerprint: hash of the legacy root venv's installed packages and mtimes.
+legacy_venv_fingerprint() {
+    if [[ ! -d .venv ]]; then
+        printf 'absent\n'
+        return 0
+    fi
+    { stat -L -c '%n %Y' .venv .venv/bin .venv/pyvenv.cfg .venv/lib/python*/site-packages
+      ls -1 .venv/lib/python*/site-packages; } 2>/dev/null | sha256sum | cut -c1-16
 }
 
 stage_lint() {
@@ -158,7 +182,7 @@ stage_core() { pytest_features core; }
 # Gitignored legacy resources a fresh clone lacks. They are symlinked into the clone from the
 # main checkout (found through `git rev-parse --git-common-dir`), where the legacy stack lives,
 # else from this checkout; nothing in the source checkouts is changed. LEGACY_APP_DIR overrides reachy_mini_conversation_app.
-LEGACY_LINKS=(reachy_mini_conversation_app third_party voices local_backend/models)
+LEGACY_LINKS=(.venv reachy_mini_conversation_app third_party voices local_backend/models)
 LEGACY_FIXTURES="local_backend/tests/fixtures"
 LEGACY_LIST="scripts/legacy_stack_tests.txt"
 
@@ -205,7 +229,7 @@ need_met() {
         stack) curl -s -o /dev/null -m 3 "$DAEMON_URL/" && port_open 8765 ;;
         speech) port_open 8765 ;;
         searxng) port_open 8888 ;;
-        root-venv) [[ -x .venv/bin/python ]] && .venv/bin/python -c 'import piper' 2>/dev/null ;;
+        online) curl -s -o /dev/null -m 5 https://www.wikipedia.org/ ;;
         *) printf 'unknown need %q in %s\n' "$1" "$LEGACY_LIST" >&2; return 2 ;;
     esac
 }
@@ -220,20 +244,23 @@ stage_legacy() {
     py="$(cd "$(dirname "$py")" && pwd)/$(basename "$py")"
     local node needs reason args=() summary="" rc
     declare -A met count
+    local need missing
     while read -r node needs reason; do
         [[ -z "$node" || "$node" == \#* ]] && continue
-        if [[ -z "${met[$needs]:-}" ]]; then
-            if need_met "$needs"; then met[$needs]=yes; else met[$needs]=no; fi
-        fi
-        if [[ "${met[$needs]}" == no ]]; then
+        missing=""
+        for need in ${needs//+/ }; do
+            if [[ -z "${met[$need]:-}" ]]; then
+                if need_met "$need"; then met[$need]=yes; else met[$need]=no; fi
+            fi
+            if [[ "${met[$need]}" == no ]]; then missing+="${missing:++}$need"; fi
+        done
+        if [[ -n "$missing" ]]; then
             args+=(--deselect "$node")
-            count[$needs]=$(( ${count[$needs]:-0} + 1 ))
-            printf 'deselect (%s missing): %s  -- %s\n' "$needs" "$node" "$reason"
+            count[$missing]=$(( ${count[$missing]:-0} + 1 ))
+            printf 'deselect (%s missing): %s  -- %s\n' "$missing" "$node" "$reason"
         fi
     done <"$LEGACY_LIST"
-    for needs in stack speech searxng root-venv; do
-        if [[ -n "${count[$needs]:-}" ]]; then summary+="${summary:+, }$needs ${count[$needs]}"; fi
-    done
+    for need in "${!count[@]}"; do summary+="${summary:+, }$need ${count[$need]}"; done
     local out="$STATE_DIR/legacy.log"
     set +e
     (cd local_backend && "$py" -m pytest -v -p no:cacheprovider -rfEs "${args[@]}") 2>&1 | tee "$out"

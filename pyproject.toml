@@ -70,7 +70,9 @@ select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC", "PT", "TID"]
 [tool.basedpyright]
 pythonVersion = "3.12"
 include = ["packages", "tests"]
-exclude = ["**/__pycache__", "**/.venv"]
+exclude = ["**/__pycache__", "**/.venv", "**/.venv-assistant"]
+venvPath = "."
+venv = ".venv-assistant"
 typeCheckingMode = "standard"
 reportUnnecessaryTypeIgnoreComment = "error"
 reportMissingModuleSource = "none"

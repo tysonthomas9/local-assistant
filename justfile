@@ -1,4 +1,9 @@
 # New assistant stack. Run `uv sync` first; `uv run just <recipe>` works without a global just.
+# The uv workspace venv is .venv-assistant; .venv stays the legacy root venv (docs/dev-setup.md).
+
+set export
+
+UV_PROJECT_ENVIRONMENT := ".venv-assistant"
 
 default:
     @just --list
