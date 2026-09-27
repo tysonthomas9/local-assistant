@@ -7,7 +7,6 @@ import structlog
 
 from assistant_core.clock import Clock, SystemClock
 from assistant_core.log import configure_logging, get_logger
-from assistant_testing import FakeClock
 
 pytestmark = pytest.mark.unit
 
@@ -27,29 +26,7 @@ def test_json_logs_carry_service_and_bound_context() -> None:
     structlog.contextvars.clear_contextvars()
 
 
-def test_clocks_share_one_shape() -> None:
+def test_system_clock_is_a_clock() -> None:
     assert isinstance(SystemClock(), Clock)
-    assert isinstance(FakeClock(), Clock)
     assert SystemClock().now().tzinfo is UTC
-
-
-async def test_fake_clock_wakes_sleepers_in_order() -> None:
-    import asyncio
-
-    clock = FakeClock()
-    woke: list[str] = []
-
-    async def sleeper(name: str, seconds: float) -> None:
-        await clock.sleep(seconds)
-        woke.append(name)
-
-    tasks = [asyncio.create_task(sleeper("b", 2)), asyncio.create_task(sleeper("a", 1))]
-    await asyncio.sleep(0)
-    start = clock.now()
-    await clock.advance(1.5)
-    assert woke == ["a"]
-    await clock.advance(1)
-    assert woke == ["a", "b"]
-    assert clock.monotonic_ns() == 2_500_000_000
-    assert (clock.now() - start).total_seconds() == 2.5
-    await asyncio.gather(*tasks)
+    assert SystemClock().monotonic_ns() > 0

@@ -1,9 +1,18 @@
 [project]
 name = "assistant-testing"
 version = "0.1.0"
-description = "Fakes and test helpers (never imported by production packages)"
+description = "Feature-file e2e runner, real-process launchers and test helpers (never imported by production packages)"
 requires-python = ">=3.12,<3.13"
-dependencies = ["assistant-contracts", "assistant-core"]
+dependencies = [
+    "assistant-contracts",
+    "assistant-core",
+    "pydantic>=2.9,<3",
+    "pytest>=8.3",
+    "pyyaml>=6.0",
+]
+
+[project.entry-points.pytest11]
+assistant_features = "assistant_testing.features.plugin"
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]

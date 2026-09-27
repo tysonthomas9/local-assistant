@@ -1,0 +1,45 @@
+feature: Workspace smoke
+tier: core
+description: >
+  Every package of the new stack imports from this checkout in a fresh Python process,
+  and the shipped config files load and validate.
+scenarios:
+  - name: every package imports
+    steps:
+      - import_packages
+
+  - name: base config points the LLM at vLLM
+    steps:
+      - load_config
+      - expect_config: {path: llm.impl, equals: openai}
+      - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:8773/v1"}
+      - expect_config: {path: llm.model, equals: gemma4-26b}
+      - expect_config: {path: llm.max_concurrency, equals: 8}
+      - expect_config: {path: llm.reserved_voice_slots, equals: 1}
+      - expect_config: {path: privacy.online_skills, equals: false}
+
+  - name: dev profile uses the fake LLM on loopback
+    steps:
+      - load_config: {profile: dev}
+      - expect_config: {path: llm.impl, equals: fake}
+      - expect_config: {path: llm.model, equals: gemma4-26b}
+      - expect_config: {path: net.edgelink_bind, equals: "127.0.0.1:8770"}
+
+  - name: ci profile uses the fake LLM on loopback
+    steps:
+      - load_config: {profile: ci}
+      - expect_config: {path: llm.impl, equals: fake}
+      - expect_config: {path: net.edgelink_bind, equals: "127.0.0.1:8770"}
+
+  - name: environment overrides the profile
+    steps:
+      - load_config:
+          profile: dev
+          env: {ASSISTANT__LLM__BASE_URL: "http://127.0.0.1:11434/v1", ASSISTANT__LLM__MODEL: "gemma4:26b"}
+      - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:11434/v1"}
+      - expect_config: {path: llm.model, equals: "gemma4:26b"}
+      - expect_config: {path: llm.impl, equals: fake}
+
+  - name: jarvis assistant loads
+    steps:
+      - load_assistant: jarvis

@@ -1,0 +1,85 @@
+feature: EdgeLink v1 codecs
+tier: core
+description: >
+  All 23 EdgeLink v1 JSON message types and all binary frame kinds round-trip through the
+  real codecs. Opus (0x05) is refused unless it was negotiated.
+scenarios:
+  - name: all 23 message types round-trip
+    steps:
+      - roundtrip_message:
+          type: hello
+          fields:
+            device_id: lite
+            sw_version: 0.1.0
+            body:
+              kind: reachy_mini
+              capabilities:
+                audio_in: {rate: 16000, aec: hw}
+                audio_out: {rates: [16000, 24000]}
+                wake: {engines: [openwakeword, sherpa_kws]}
+                motion: {expressions: [happy, sad], look_at: [user, doa, world], attention: true}
+                camera: {w: 1280, h: 720}
+                doa: true
+            last_seq: 17
+      - roundtrip_message:
+          type: welcome
+          fields:
+            session_id: s-1
+            wake_words: [{word: hey jarvis, model: hey_jarvis, threshold: 0.4}]
+            follow_up_max_s: 10
+            audio: {out_rate: 24000}
+            timers: [{id: t1, at_utc: "2026-09-26T10:00:00Z", sound: chime}]
+            mute: false
+      - roundtrip_message: {type: wake, fields: {word: hey jarvis, score: 0.83, doa: 12.5}}
+      - roundtrip_message: {type: wake.cancel, fields: {reason: lost_arbitration}}
+      - roundtrip_message: {type: vad, fields: {state: start, barge_in: true, stream_id: 2, played_ms: 640}}
+      - roundtrip_message: {type: mic.close, fields: {reason: turn complete}}
+      - roundtrip_message: {type: mic.follow_up, fields: {seconds: 8}}
+      - roundtrip_message: {type: text.input, fields: {text: what time is it}}
+      - roundtrip_message: {type: speak.begin, fields: {stream_id: 2, channel: speech, rate: 24000}}
+      - roundtrip_message: {type: speak.end, fields: {stream_id: 2, channel: speech}}
+      - roundtrip_message: {type: flush, fields: {stream_id: all}}
+      - roundtrip_message: {type: duck, fields: {channel: media, gain_db: -12}}
+      - roundtrip_message: {type: playback, fields: {stream_id: 2, played_ms: 400, state: progress}}
+      - roundtrip_message: {type: play_sound, fields: {sound_id: chime, channel: alert}}
+      - roundtrip_message: {type: attention, fields: {state: listening, assistant: jarvis}}
+      - roundtrip_message: {type: express, fields: {name: happy, intensity: 0.7}}
+      - roundtrip_message: {type: look_at, fields: {target: {kind: world, x: 0.5, y: 0.0, z: 0.2}}}
+      - roundtrip_message: {type: snapshot, fields: {slot: 1, max_side: 1024}}
+      - roundtrip_message: {type: result, fields: {re: m-e2e, ok: true, data: {bytes: 20480, chunks: 3}}}
+      - roundtrip_message: {type: privacy, fields: {muted: true, hard: false, until: "2026-09-26T11:00:00Z"}}
+      - roundtrip_message: {type: timer.sync, fields: {jobs: [{id: t1, at_utc: "2026-09-26T10:00:00Z", sound: alarm}]}}
+      - roundtrip_message: {type: event, fields: {kind: button, data: {pressed: true}}}
+      - roundtrip_message: {type: error, fields: {code: bad_request, message: unknown stream}}
+      - expect_all_message_types_covered
+
+  - name: look_at accepts every target kind
+    steps:
+      - roundtrip_message: {type: look_at, fields: {target: {kind: user}}}
+      - roundtrip_message: {type: look_at, fields: {target: {kind: doa, doa: -30}}}
+      - roundtrip_message: {type: look_at, fields: {target: {kind: image, u: 0.5, v: 0.25}}}
+
+  - name: invalid messages are refused
+    steps:
+      - expect_message_refused: {wire: {v: 2, type: wake, word: x, score: 0.5}}
+      - expect_message_refused: {wire: {v: 1, type: not_a_type}}
+      - expect_message_refused: {wire: {v: 1, type: express, name: not_an_intent}}
+      - expect_message_refused: {wire: {v: 1, type: speak.begin, stream_id: 256}}
+      - expect_message_refused: {wire: {v: 1, type: welcome}}
+
+  - name: all frame kinds round-trip
+    steps:
+      - roundtrip_frame: {kind: mic_pcm, payload_bytes: 640}
+      - roundtrip_frame: {kind: out_pcm, payload_bytes: 960, stream: 2}
+      - roundtrip_frame: {kind: jpeg_chunk, payload_bytes: 16384, stream: 1}
+      - roundtrip_frame: {kind: sound_clip, payload_bytes: 4410}
+      - roundtrip_frame: {kind: opus, payload_bytes: 80, opus_negotiated: true}
+      - expect_all_frame_kinds_covered
+
+  - name: Opus is refused unless negotiated
+    steps:
+      - expect_frame_refused: {kind: opus, reason: not_negotiated}
+
+  - name: odd-length PCM is refused
+    steps:
+      - expect_frame_refused: {kind: mic_pcm, reason: malformed, payload_bytes: 641}

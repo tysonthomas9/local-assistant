@@ -59,6 +59,10 @@ include = ["packages/**/*.py", "tests/**/*.py"]
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC", "PT", "TID"]
 
+[tool.ruff.lint.per-file-ignores]
+# Test steps and helpers may touch the filesystem briefly inside async code.
+"packages/testing/**" = ["ASYNC240"]
+
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "pipecat".msg = "Pipecat is not used (proposal amendment F)."
 
@@ -73,18 +77,26 @@ reportMissingModuleSource = "none"
 
 # ---------------------------------------------------------------- pytest
 [tool.pytest.ini_options]
-testpaths = ["packages", "tests"]
-addopts = ["--import-mode=importlib", "--strict-markers", "-m", "not (eval or e2e or bench or hw or locality or online)"]
+testpaths = ["packages", "tests", "e2e"]
+addopts = [
+    "--import-mode=importlib",
+    "--strict-markers",
+    "-p", "pytester",
+    "-m", "not (hw or models or eval or e2e or bench or locality or online)",
+]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
-    "unit: fast, no I/O beyond tmp files (the default layer)",
+    "unit: pure logic that is hard to reach end to end",
+    "feature: a scenario from a YAML feature file (e2e/features)",
+    "core: feature tier core: real code, no robot, GPU or network",
+    "models: feature tier models: needs the GPUs and model servers",
     "contract: JSON Schema snapshots, wire round trips, adapter conformance",
     "component: brain + skills + fakes wired together",
     "eval: LLM tool-selection and quality evals (brain PC only)",
     "e2e: real models end to end (brain PC only)",
     "bench: latency benchmarks (brain PC only)",
-    "hw: needs the robot attached",
+    "hw: needs the robot attached (also the feature tier hw)",
     "locality: network locality and GPU placement checks",
     "online: needs internet access (opt-in)",
 ]

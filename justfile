@@ -15,9 +15,17 @@ fmt:
     uv run ruff check --fix
     uv run ruff format
 
-# default test layers (unit, contract, component); pass pytest args, e.g. `just test -m contract`
+# unit tests + core features; pass pytest args, e.g. `just test e2e -m core`
 test *args:
     uv run pytest {{args}}
+
+# list the e2e feature files, scenarios and steps
+features:
+    uv run pytest e2e --list-features -q
+
+# the full merge gate (fresh clone, lint, unit, features core/hw/models, legacy suite)
+gate:
+    scripts/gate.sh
 
 # write the EdgeLink JSON Schema snapshot for a NEW protocol version (never overwrites)
 schema-snapshot:

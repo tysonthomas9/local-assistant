@@ -1,5 +1,9 @@
-"""Fakes and test helpers (never imported by production packages)."""
+"""E2E feature runner, real-process launchers and test helpers.
 
-from assistant_testing.clock import FakeClock
+Never imported by production packages. There are deliberately no fakes here: feature files
+drive real processes (brain, edge, daemon, model servers) and real codecs.
+"""
 
-__all__ = ["FakeClock"]
+from assistant_testing.processes import CompletedRun, ManagedProcess, ProcessGroup
+
+__all__ = ["CompletedRun", "ManagedProcess", "ProcessGroup"]
