@@ -155,9 +155,9 @@ stage_real_only() {
 
 stage_core() { pytest_features core; }
 
-# Gitignored legacy resources a fresh clone lacks. They are symlinked into the clone from this
-# checkout or the main checkout (found through `git rev-parse --git-common-dir`); nothing in the
-# source checkouts is changed. LEGACY_APP_DIR overrides reachy_mini_conversation_app.
+# Gitignored legacy resources a fresh clone lacks. They are symlinked into the clone from the
+# main checkout (found through `git rev-parse --git-common-dir`), where the legacy stack lives,
+# else from this checkout; nothing in the source checkouts is changed. LEGACY_APP_DIR overrides reachy_mini_conversation_app.
 LEGACY_LINKS=(reachy_mini_conversation_app third_party voices local_backend/models)
 LEGACY_FIXTURES="local_backend/tests/fixtures"
 LEGACY_LIST="scripts/legacy_stack_tests.txt"
@@ -168,7 +168,7 @@ legacy_source() {
         printf '%s\n' "$LEGACY_APP_DIR"
         return 0
     fi
-    for candidate in "$ROOT/$rel" "$MAIN_CHECKOUT/$rel"; do
+    for candidate in "$MAIN_CHECKOUT/$rel" "$ROOT/$rel"; do
         if [[ -e "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
     done
     return 1
