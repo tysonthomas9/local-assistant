@@ -9,6 +9,7 @@
 #   searxng    the local SearXNG on 127.0.0.1:8888 (local_backend/start_searxng.sh)
 #   online     internet access (SearXNG forwards queries to public engines)
 # Join several needs with `+`; the test is deselected when any of them is missing.
+tests/test_local_stack.py::test_ui_and_signalling_not_exposed_to_lan  stack  host port clash: another service (Incus) listens on *:8443 on the dev PC; the test treats any :8443 listener as the Reachy signalling server
 tests/test_local_stack.py::test_daemon_running_with_media  stack  queries the daemon status and media API on :8000
 tests/test_local_stack.py::test_no_external_connections  stack  inspects the sockets of the running stack processes
 tests/test_local_stack.py::test_gpu_placement_and_headroom  stack  checks GPU placement of the running stack's models and the headroom they leave
