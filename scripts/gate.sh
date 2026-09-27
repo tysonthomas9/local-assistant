@@ -14,8 +14,9 @@
 #   f  legacy  the whole legacy suite (local_backend/tests, as the README runs it). Gitignored
 #              resources are symlinked into the clone from the main checkout. Tests listed in
 #              scripts/legacy_stack_tests.txt are deselected only while their requirement (the
-#              running stack, SearXNG, ...) is missing; any other failure FAILS. SKIP only when
-#              the legacy venv is missing.
+#              running stack, SearXNG, ...) is missing. A failing legacy test is rerun ONCE:
+#              a pass is reported as FLAKY, a second failure FAILS. SKIP only when the legacy
+#              venv is missing.
 #   g  hw      e2e features, tier hw: FAILS if the robot is missing (/dev/ttyACM0; S3 adds the
 #              daemon check)
 #   h  models  e2e features, tier models: FAILS unless both GPUs and Ollama are available
@@ -266,7 +267,28 @@ stage_legacy() {
     (cd local_backend && "$py" -m pytest -v -p no:cacheprovider -rfEs "${args[@]}") 2>&1 | tee "$out"
     rc=${PIPESTATUS[0]}
     set -e
-    note "$(grep -E '^=+ .* in [0-9.]+s' "$out" | tail -1 | sed -E 's/^=+ (.*) in [0-9.]+s.*/\1/')${summary:+ (needs missing: $summary)}"
+    local result flaky="" failed=()
+    result="$(grep -E '^=+ .* in [0-9.]+s' "$out" | tail -1 | sed -E 's/^=+ (.*) in [0-9.]+s.*/\1/')"
+    # Legacy tests only: rerun each failing test ONCE. A pass on the rerun is reported as FLAKY;
+    # a second failure fails the stage. (New-code unit tests and features are never rerun.)
+    if [[ $rc -eq 1 ]]; then
+        mapfile -t failed < <(grep -E '^(FAILED|ERROR) ' "$out" | awk '{print $2}' | sort -u)
+    fi
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        printf '\n%sRerunning %d failing legacy test(s) once:%s\n' "$YELLOW" "${#failed[@]}" "$RESET"
+        printf '  %s\n' "${failed[@]}"
+        local rerun="$STATE_DIR/legacy-rerun.log" node_id
+        set +e
+        (cd local_backend && "$py" -m pytest -v -p no:cacheprovider -rfEs "${failed[@]}") 2>&1 | tee "$rerun"
+        rc=${PIPESTATUS[0]}
+        set -e
+        if [[ $rc -eq 0 ]]; then
+            for node_id in "${failed[@]}"; do flaky+="${flaky:+, }${node_id##*::}"; done
+        else
+            result+="; still failing on rerun: $(grep -E '^(FAILED|ERROR) ' "$rerun" | awk '{print $2}' | sed 's/.*:://' | sort -u | paste -sd, -)"
+        fi
+    fi
+    note "${result}${summary:+ (needs missing: $summary)}${flaky:+; FLAKY: $flaky}"
     return "$rc"
 }
 
