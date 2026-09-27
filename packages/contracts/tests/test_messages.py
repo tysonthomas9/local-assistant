@@ -65,7 +65,9 @@ def test_unknown_fields_are_ignored_for_minor_versions() -> None:
 
 
 def test_hello_defaults_to_our_protocol_version() -> None:
-    hello = Hello.model_validate({"device_id": "pi", "sw_version": "1", "body": {"kind": "null"}})
+    hello = Hello.model_validate(
+        {"device_id": "pi", "sw_version": "1", "body": {"kind": "console"}}
+    )
     assert hello.proto == PROTOCOL_VERSION
     assert is_compatible(hello.proto)
     assert not is_compatible("2.0")

@@ -1,4 +1,4 @@
-"""Injectable clock. Production code takes a `Clock`; tests pass a fake with the same shape."""
+"""Injectable clock. Production code takes a `Clock` instead of calling time directly."""
 
 import asyncio
 import time

@@ -1,13 +1,15 @@
-# Hosted CI: no GPU, robot, microphone or network. Everything runs on fakes over loopback.
+# The gate on the brain PC: loopback only, the local Ollama, JSON logs.
 
 [net]
 edgelink_bind = "127.0.0.1:8770"
 
 [llm]
-impl = "fake"
+impl = "openai"
+base_url = "http://127.0.0.1:11434/v1"
+model = "reachy-gemma4"
 
 [edge]
-body = "null"
+body = "console"
 
 [edge.audio]
 aec = "none"

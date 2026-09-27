@@ -92,7 +92,7 @@ markers = [
     "core: feature tier core: real code, no robot, GPU or network",
     "models: feature tier models: needs the GPUs and model servers",
     "contract: JSON Schema snapshots, wire round trips, adapter conformance",
-    "component: brain + skills + fakes wired together",
+    "component: brain + skills wired together in one process",
     "eval: LLM tool-selection and quality evals (brain PC only)",
     "e2e: real models end to end (brain PC only)",
     "bench: latency benchmarks (brain PC only)",

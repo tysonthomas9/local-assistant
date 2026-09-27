@@ -78,7 +78,7 @@ class Camera(Protocol):
 @runtime_checkable
 class Body(Protocol):
     kind: str
-    """"reachy_mini", "sounddevice", "null", ..."""
+    """"reachy" or "console"."""
     audio: AudioIO
     motion: Motion | None
     camera: Camera | None

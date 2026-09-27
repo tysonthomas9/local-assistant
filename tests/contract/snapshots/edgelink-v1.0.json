@@ -588,7 +588,7 @@
               "$ref": "#/$defs/Capabilities"
             },
             "kind": {
-              "description": "Body driver kind, e.g. \"reachy_mini\", \"sounddevice\", \"null\".",
+              "description": "Body driver kind: \"reachy\" or \"console\".",
               "title": "Kind",
               "type": "string"
             }
@@ -658,6 +658,11 @@
             "opus": {
               "default": false,
               "title": "Opus",
+              "type": "boolean"
+            },
+            "speak_text": {
+              "default": false,
+              "title": "Speak Text",
               "type": "boolean"
             },
             "wake": {
@@ -1637,6 +1642,18 @@
           "title": "Stream Id",
           "type": "integer"
         },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
         "traceparent": {
           "anyOf": [
             {
@@ -2273,6 +2290,11 @@
               "default": 24000,
               "title": "Out Rate",
               "type": "integer"
+            },
+            "speak_text": {
+              "default": false,
+              "title": "Speak Text",
+              "type": "boolean"
             }
           },
           "title": "WelcomeAudio",

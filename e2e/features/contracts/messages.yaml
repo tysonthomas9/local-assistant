@@ -12,7 +12,7 @@ scenarios:
             device_id: lite
             sw_version: 0.1.0
             body:
-              kind: reachy_mini
+              kind: reachy
               capabilities:
                 audio_in: {rate: 16000, aec: hw}
                 audio_out: {rates: [16000, 24000]}
@@ -20,6 +20,7 @@ scenarios:
                 motion: {expressions: [happy, sad], look_at: [user, doa, world], attention: true}
                 camera: {w: 1280, h: 720}
                 doa: true
+                speak_text: true
             last_seq: 17
       - roundtrip_message:
           type: welcome
@@ -27,7 +28,7 @@ scenarios:
             session_id: s-1
             wake_words: [{word: hey jarvis, model: hey_jarvis, threshold: 0.4}]
             follow_up_max_s: 10
-            audio: {out_rate: 24000}
+            audio: {out_rate: 24000, speak_text: true}
             timers: [{id: t1, at_utc: "2026-09-26T10:00:00Z", sound: chime}]
             mute: false
       - roundtrip_message: {type: wake, fields: {word: hey jarvis, score: 0.83, doa: 12.5}}
@@ -36,7 +37,7 @@ scenarios:
       - roundtrip_message: {type: mic.close, fields: {reason: turn complete}}
       - roundtrip_message: {type: mic.follow_up, fields: {seconds: 8}}
       - roundtrip_message: {type: text.input, fields: {text: what time is it}}
-      - roundtrip_message: {type: speak.begin, fields: {stream_id: 2, channel: speech, rate: 24000}}
+      - roundtrip_message: {type: speak.begin, fields: {stream_id: 2, channel: speech, rate: 24000, text: It is five past ten.}}
       - roundtrip_message: {type: speak.end, fields: {stream_id: 2, channel: speech}}
       - roundtrip_message: {type: flush, fields: {stream_id: all}}
       - roundtrip_message: {type: duck, fields: {channel: media, gain_db: -12}}
@@ -52,6 +53,11 @@ scenarios:
       - roundtrip_message: {type: event, fields: {kind: button, data: {pressed: true}}}
       - roundtrip_message: {type: error, fields: {code: bad_request, message: unknown stream}}
       - expect_all_message_types_covered
+
+  - name: speak.begin text is optional
+    steps:
+      - roundtrip_message: {type: speak.begin, fields: {stream_id: 3}}
+      - roundtrip_message: {type: speak.begin, fields: {stream_id: 3, text: "Timer done."}}
 
   - name: look_at accepts every target kind
     steps:

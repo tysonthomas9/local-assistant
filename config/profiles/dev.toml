@@ -1,14 +1,15 @@
-# Development on one machine: loopback only, FakeLLM, readable logs.
-# Point [llm] at a running vLLM or Ollama (or set ASSISTANT__LLM__IMPL=openai) for real replies.
+# Development on one machine: loopback only, the local Ollama, readable logs.
 
 [net]
 edgelink_bind = "127.0.0.1:8770"
 
 [llm]
-impl = "fake"
+impl = "openai"
+base_url = "http://127.0.0.1:11434/v1"   # Ollama until vLLM is up (phase 2)
+model = "reachy-gemma4"
 
 [edge]
-body = "null"
+body = "console"
 
 [edge.audio]
 aec = "none"

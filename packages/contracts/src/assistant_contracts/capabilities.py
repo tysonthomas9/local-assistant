@@ -44,6 +44,8 @@ class Capabilities(ContractModel):
     doa: bool = False
     opus: bool = False
     """The edge can send and receive 0x05 Opus frames (reserved in v1; off by default)."""
+    speak_text: bool = False
+    """The edge can use reply text sent in `speak.begin.text`."""
 
 
 BodyCapabilities = Capabilities

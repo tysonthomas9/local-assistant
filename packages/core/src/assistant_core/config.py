@@ -89,7 +89,8 @@ class LlmPriority(Section):
 class LlmConfig(Section):
     """Any OpenAI-compatible server: vLLM by default, Ollama or llama-server as fallback."""
 
-    impl: Literal["fake", "openai"] = "openai"
+    impl: Literal["openai"] = "openai"
+    """OpenAI-compatible HTTP; the only client there is."""
     base_url: str = "http://127.0.0.1:8773/v1"
     model: str = "gemma4-26b"
     ctx: int = Field(default=16384, gt=0)
@@ -137,7 +138,8 @@ class EdgeConfig(Section):
     room: str = "living"
     brain_url: str = "mdns"
     """`mdns` to discover the brain, or a static `wss://host:port/edge/v1` URL."""
-    body: str = "null"
+    body: Literal["reachy", "console"] = "console"
+    """Body driver: the Reachy Mini, or the console (mic and speaker of this machine)."""
     audio: EdgeAudioConfig = Field(default_factory=EdgeAudioConfig)
     wake: EdgeWakeConfig = Field(default_factory=EdgeWakeConfig)
 

@@ -57,7 +57,7 @@ class Envelope(ContractModel):
 
 
 class BodyInfo(ContractModel):
-    kind: str = Field(description='Body driver kind, e.g. "reachy_mini", "sounddevice", "null".')
+    kind: str = Field(description='Body driver kind: "reachy" or "console".')
     capabilities: Capabilities = Field(default_factory=Capabilities)
 
 
@@ -84,6 +84,8 @@ class WelcomeAudio(ContractModel):
     out_rate: int = 24000
     opus: bool = False
     """The brain accepts Opus; together with `hello` capabilities.opus this negotiates 0x05."""
+    speak_text: bool = False
+    """The brain may send reply text in `speak.begin.text` (the edge advertised `speak_text`)."""
 
 
 class TimerJob(ContractModel):
@@ -165,6 +167,8 @@ class SpeakBegin(Envelope):
     stream_id: StreamId
     channel: Channel = "speech"
     rate: int = Field(default=24000, gt=0)
+    text: str | None = None
+    """The reply text of this stream, if `speak_text` was negotiated (shown or logged)."""
 
 
 class SpeakEnd(Envelope):

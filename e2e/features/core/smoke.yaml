@@ -18,27 +18,30 @@ scenarios:
       - expect_config: {path: llm.reserved_voice_slots, equals: 1}
       - expect_config: {path: privacy.online_skills, equals: false}
 
-  - name: dev profile uses the fake LLM on loopback
+  - name: dev profile uses the local Ollama on loopback
     steps:
       - load_config: {profile: dev}
-      - expect_config: {path: llm.impl, equals: fake}
-      - expect_config: {path: llm.model, equals: gemma4-26b}
+      - expect_config: {path: llm.impl, equals: openai}
+      - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:11434/v1"}
+      - expect_config: {path: llm.model, equals: reachy-gemma4}
+      - expect_config: {path: edge.body, equals: console}
       - expect_config: {path: net.edgelink_bind, equals: "127.0.0.1:8770"}
 
-  - name: ci profile uses the fake LLM on loopback
+  - name: ci profile uses the local Ollama on loopback
     steps:
       - load_config: {profile: ci}
-      - expect_config: {path: llm.impl, equals: fake}
+      - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:11434/v1"}
+      - expect_config: {path: llm.model, equals: reachy-gemma4}
       - expect_config: {path: net.edgelink_bind, equals: "127.0.0.1:8770"}
 
   - name: environment overrides the profile
     steps:
       - load_config:
           profile: dev
-          env: {ASSISTANT__LLM__BASE_URL: "http://127.0.0.1:11434/v1", ASSISTANT__LLM__MODEL: "gemma4:26b"}
-      - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:11434/v1"}
-      - expect_config: {path: llm.model, equals: "gemma4:26b"}
-      - expect_config: {path: llm.impl, equals: fake}
+          env: {ASSISTANT__LLM__BASE_URL: "http://127.0.0.1:8773/v1", ASSISTANT__LLM__MODEL: gemma4-26b}
+      - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:8773/v1"}
+      - expect_config: {path: llm.model, equals: gemma4-26b}
+      - expect_config: {path: edge.body, equals: console}
 
   - name: jarvis assistant loads
     steps:

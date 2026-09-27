@@ -26,7 +26,7 @@ def config_dir(tmp_path: Path) -> Path:
         '[net]\nedgelink_bind = "0.0.0.0:8770"\n'
     )
     (tmp_path / "profiles" / "p.toml").write_text(
-        '[llm]\nimpl = "fake"\nbase_url = "http://profile/v1"\n'
+        '[llm]\nbase_url = "http://profile/v1"\n[edge]\nbody = "reachy"\n'
     )
     return tmp_path
 
@@ -50,7 +50,8 @@ def test_precedence_defaults_file_profile_env_cli(config_dir: Path) -> None:
     assert base.llm.ctx == 16384  # untouched default
 
     profiled = load_config(config_dir, profile="p", environ={})
-    assert (profiled.llm.impl, profiled.llm.base_url) == ("fake", "http://profile/v1")
+    assert profiled.llm.base_url == "http://profile/v1"
+    assert profiled.edge.body == "reachy"
     assert profiled.llm.model == "base-model"  # tables deep-merge
     assert profiled.net.edgelink_bind == "0.0.0.0:8770"
 
@@ -87,7 +88,10 @@ def test_repo_config_files() -> None:
     assert base.llm.priority.voice < base.llm.priority.proactive < base.llm.priority.background
     for profile in ("dev", "ci"):
         config = load_config(REPO_CONFIG, profile=profile, environ={})
-        assert config.llm.impl == "fake"
+        assert config.llm.impl == "openai"
+        assert config.llm.base_url == "http://127.0.0.1:11434/v1"
+        assert config.llm.model == "reachy-gemma4"
+        assert config.edge.body == "console"
         assert config.net.edgelink_bind.startswith("127.0.0.1:")
     jarvis = load_assistant(REPO_CONFIG, "jarvis")
     assert jarvis.wake_words[0].spoken == "hey jarvis"
@@ -102,6 +106,7 @@ def test_repo_config_files() -> None:
         {"max_concurrency": 4, "reserved_voice_slots": 4},
         {"reserved_voice_slots": -1},
         {"impl": "ollama"},
+        {"impl": "fake"},
     ],
 )
 def test_llm_validation(llm: dict[str, object]) -> None:

@@ -1,7 +1,7 @@
 """The step registry: `@step("name")` turns an async function into a feature-file step.
 
     @step("start_edge")
-    async def start_edge(ctx: ScenarioContext, name: str, body: str = "null") -> None: ...
+    async def start_edge(ctx: ScenarioContext, name: str, body: str = "console") -> None: ...
 
 The parameters after `ctx` become a pydantic model, so step arguments are type-checked when
 the feature file is collected. In YAML a step is a one-key mapping: `- start_edge: {name: desk}`.

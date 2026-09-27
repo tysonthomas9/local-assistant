@@ -79,7 +79,7 @@ class _NullAudio:
 
 
 class _NullBody:
-    kind = "null"
+    kind = "console"
     motion = None
     camera = None
 
