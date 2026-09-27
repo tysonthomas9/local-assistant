@@ -31,12 +31,6 @@ def test_header_is_14_bytes_little_endian() -> None:
     assert raw == bytes([0x01, 7, 0x04, 0x03, 0x02, 0x01]) + (0x1122).to_bytes(8, "little")
 
 
-@pytest.mark.parametrize("kind", V1_KINDS)
-def test_round_trip_each_v1_kind(kind: FrameKind) -> None:
-    frame = Frame(kind, stream=3, seq=42, capture_ts_us=123_456_789, payload=b"\x00\x01" * 320)
-    assert decode_frame(encode_frame(frame)) == frame
-
-
 @given(
     kind=st.sampled_from(V1_KINDS),
     stream=st.integers(0, 255),
@@ -53,16 +47,6 @@ def test_round_trip_property(
     assert len(raw) == HEADER_SIZE + len(payload)
     assert decode_frame(raw) == frame
     assert decode_frame(memoryview(raw)) == frame
-
-
-def test_opus_refused_unless_negotiated() -> None:
-    frame = Frame(FrameKind.OPUS, stream=1, seq=1, capture_ts_us=1, payload=b"\x01\x02\x03")
-    with pytest.raises(FrameKindNotNegotiated):
-        encode_frame(frame)
-    raw = struct.pack("<BBIQ", 0x05, 1, 1, 1) + b"\x01\x02\x03"
-    with pytest.raises(FrameKindNotNegotiated):
-        decode_frame(raw)
-    assert decode_frame(encode_frame(frame, opus=True), opus=True) == frame
 
 
 def test_codec_follows_capability_negotiation() -> None:

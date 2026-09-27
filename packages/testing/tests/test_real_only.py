@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from assistant_testing import real_only
 from assistant_testing.real_only import check, main
 
 pytestmark = pytest.mark.unit
@@ -18,6 +19,7 @@ DOUBLE = "Fa" + "keLLM"  # built from pieces so this file itself stays out of th
         ("from unittest import mock\n", "imports unittest.mock"),
         ("import pytest_mock\n", "imports pytest_mock"),
         ("def test(monkeypatch): ...\n", "uses monkeypatch"),
+        ("def test_x(mocker): ...\n", "uses the pytest-mock mocker fixture"),
         (f"llm = {DOUBLE}()\n", "test-double identifier"),
         ("class " + "Stu" + "bBody: ...\n", "test-double identifier"),
         ("- start_edge: {body: " + "Dum" + "myBody}\n", "test-double identifier"),
@@ -40,6 +42,31 @@ def test_plain_words_pass(tmp_path: Path) -> None:
     assert main([str(tmp_path)]) == 0
 
 
-def test_this_checkout_is_clean() -> None:
-    root = Path(__file__).resolve().parents[3]
-    assert check(root) == [], "\n".join(str(v) for v in check(root))
+def test_mocker_fixture_under_e2e_fails(tmp_path: Path) -> None:
+    target = tmp_path / "e2e" / "test_x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def test_x(mocker):\n    pass\n")
+    (violation,) = check(tmp_path)
+    assert (violation.path, violation.line) == (target, 1)
+    assert main([str(tmp_path)]) == 1
+
+
+def test_whole_testing_package_is_scanned(tmp_path: Path) -> None:
+    pkg = tmp_path / "packages/testing/src/assistant_testing"
+    pkg.mkdir(parents=True)
+    target = pkg / "processes.py"
+    target.write_text("import asyncio\nfrom unittest.mock import patch\n")
+    (violation,) = check(tmp_path)
+    assert (violation.path, violation.line, violation.rule) == (target, 2, "imports unittest.mock")
+    assert main([str(tmp_path)]) == 1
+
+
+def test_only_the_checkers_own_rule_strings_are_allowlisted(tmp_path: Path) -> None:
+    pkg = tmp_path / "packages/testing/src/assistant_testing"
+    pkg.mkdir(parents=True)
+    source = Path(real_only.__file__).read_text()
+    (pkg / "real_only.py").write_text(source)
+    assert check(tmp_path) == []
+    (pkg / "real_only.py").write_text(source + "\nimport unittest.mock\n")
+    (violation,) = check(tmp_path)
+    assert violation.rule == "imports unittest.mock"

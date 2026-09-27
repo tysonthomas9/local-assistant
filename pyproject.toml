@@ -82,21 +82,16 @@ addopts = [
     "--import-mode=importlib",
     "--strict-markers",
     "-p", "pytester",
-    "-m", "not (hw or models or eval or e2e or bench or locality or online)",
+    "-m", "not (hw or models or bench or locality or online)",
 ]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
-    "unit: pure logic that is hard to reach end to end",
-    "feature: a scenario from a YAML feature file (e2e/features)",
+    "unit: pure logic that is hard to reach end to end (runs in the gate's unit stage)",
     "core: feature tier core: real code, no robot, GPU or network",
-    "models: feature tier models: needs the GPUs and model servers",
-    "contract: JSON Schema snapshots, wire round trips, adapter conformance",
-    "component: brain + skills wired together in one process",
-    "eval: LLM tool-selection and quality evals (brain PC only)",
-    "e2e: real models end to end (brain PC only)",
+    "hw: feature tier hw: needs the robot attached",
+    "models: feature tier models: needs both GPUs and the model servers",
     "bench: latency benchmarks (brain PC only)",
-    "hw: needs the robot attached (also the feature tier hw)",
     "locality: network locality and GPU placement checks",
     "online: needs internet access (opt-in)",
 ]

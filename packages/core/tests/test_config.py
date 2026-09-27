@@ -8,14 +8,11 @@ from assistant_core.config import (
     ConfigError,
     LlmConfig,
     deep_merge,
-    load_assistant,
     load_config,
     parse_cli_overrides,
 )
 
 pytestmark = pytest.mark.unit
-
-REPO_CONFIG = Path(__file__).resolve().parents[3] / "config"
 
 
 @pytest.fixture
@@ -78,24 +75,6 @@ def test_env_is_read_from_os_environ_by_default(
     config = load_config(config_dir)
     assert config.llm.base_url == "http://os-env/v1"
     assert config.privacy.online_skills is True
-
-
-def test_repo_config_files() -> None:
-    base = load_config(REPO_CONFIG, environ={})
-    assert base.llm.impl == "openai"
-    assert base.llm.base_url == "http://127.0.0.1:8773/v1"  # vLLM is the default
-    assert base.llm.model == "gemma4-26b"
-    assert base.llm.priority.voice < base.llm.priority.proactive < base.llm.priority.background
-    for profile in ("dev", "ci"):
-        config = load_config(REPO_CONFIG, profile=profile, environ={})
-        assert config.llm.impl == "openai"
-        assert config.llm.base_url == "http://127.0.0.1:11434/v1"
-        assert config.llm.model == "reachy-gemma4"
-        assert config.edge.body == "console"
-        assert config.net.edgelink_bind.startswith("127.0.0.1:")
-    jarvis = load_assistant(REPO_CONFIG, "jarvis")
-    assert jarvis.wake_words[0].spoken == "hey jarvis"
-    assert jarvis.voice.speaker == "Ryan"
 
 
 @pytest.mark.parametrize(

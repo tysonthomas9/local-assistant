@@ -57,6 +57,7 @@ The parameters after `ctx` are the step's arguments.
 | `load_config` | `profile: str?`, `env: {NAME: value}?` | Loads `config/` (+ profile). Only `env` is used as the environment |
 | `expect_config` | `path: str`, `equals: any` | Compares a dotted path, e.g. `llm.impl`, of the last loaded config |
 | `load_assistant` | `id: str` | Loads and validates `config/assistants/<id>.toml` |
+| `expect_assistant` | `id: str`, `path: str`, `equals: any` | Compares a dotted path, e.g. `wake_words.0.spoken`, of a loaded assistant |
 | `real_only_check` | none | Runs the real-only check over this checkout in a subprocess |
 
 ### EdgeLink contracts (`steps/contracts.py`)
@@ -66,6 +67,7 @@ The parameters after `ctx` are the step's arguments.
 | `roundtrip_message` | `type: str`, `fields: map?` | JSON-encodes a message with a full envelope, decodes it through the union, and checks nothing changed |
 | `expect_message_refused` | `wire: map` | Decoding this JSON must fail validation |
 | `expect_all_message_types_covered` | none | All 23 message types were round-tripped in this scenario |
+| `expect_message_type_order` | `names: list[str]` | The union defines exactly these types, in this order |
 | `roundtrip_frame` | `kind: str` (`mic_pcm`, `out_pcm`, `jpeg_chunk`, `sound_clip`, `opus`), `payload_bytes: int = 640`, `stream`, `seq`, `capture_ts_us`, `opus_negotiated: bool = false` | Encodes and decodes a binary frame |
 | `expect_frame_refused` | `kind: str`, `reason: not_negotiated \| malformed`, `payload_bytes: int = 4` | Encoding and decoding the frame must both fail |
 | `expect_all_frame_kinds_covered` | none | Kinds 0x01-0x05 were all round-tripped in this scenario |

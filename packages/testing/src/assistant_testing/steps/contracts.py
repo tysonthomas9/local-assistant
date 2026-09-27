@@ -71,6 +71,13 @@ async def expect_all_message_types_covered(ctx: ScenarioContext) -> None:
     assert len(all_types) == 23
 
 
+@step("expect_message_type_order")
+async def expect_message_type_order(ctx: ScenarioContext, names: list[str]) -> None:
+    """The union defines exactly these message types, in this (spec) order."""
+    actual = [message_type_name(m) for m in MESSAGE_TYPES]
+    assert actual == names, f"message types are {actual}"
+
+
 def _kind(name: str) -> FrameKind:
     try:
         return FrameKind[name.upper()]

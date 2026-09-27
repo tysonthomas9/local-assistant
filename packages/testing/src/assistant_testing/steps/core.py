@@ -61,12 +61,20 @@ async def load_config_step(
 async def expect_config(ctx: ScenarioContext, path: str, equals: Any) -> None:
     """Compare a dotted config path (e.g. `llm.impl`) of the last loaded config."""
     assert "config" in ctx.state, "no config loaded yet; use load_config first"
-    value: Any = ctx.state["config"]
-    for part in path.split("."):
-        value = value[part] if isinstance(value, dict) else getattr(value, part)
-    if isinstance(value, Path):
-        value = str(value)
+    value = _lookup(ctx.state["config"], path)
     assert value == equals, f"{path} is {value!r}, expected {equals!r}"
+
+
+def _lookup(value: Any, path: str) -> Any:
+    """Follow a dotted path through models, dicts and lists (`wake_words.0.spoken`)."""
+    for part in path.split("."):
+        if isinstance(value, dict):
+            value = value[part]
+        elif isinstance(value, list | tuple):
+            value = value[int(part)]
+        else:
+            value = getattr(value, part)
+    return str(value) if isinstance(value, Path) else value
 
 
 @step("load_assistant")
@@ -74,6 +82,15 @@ async def load_assistant_step(ctx: ScenarioContext, id: str) -> None:
     """Load config/assistants/<id>.toml and check it validates."""
     assistant = load_assistant(ctx.repo_root / "config", id)
     ctx.state.setdefault("assistants", {})[id] = assistant
+
+
+@step("expect_assistant")
+async def expect_assistant(ctx: ScenarioContext, id: str, path: str, equals: Any) -> None:
+    """Compare a dotted path (e.g. `wake_words.0.spoken`) of an assistant loaded earlier."""
+    assistants = ctx.state.get("assistants", {})
+    assert id in assistants, f"assistant {id!r} not loaded yet; use load_assistant first"
+    value = _lookup(assistants[id], path)
+    assert value == equals, f"{id}.{path} is {value!r}, expected {equals!r}"
 
 
 @step("real_only_check")

@@ -18,6 +18,7 @@ import pytest
 import assistant_testing.steps  # noqa: F401  (registers the built-in steps)
 from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.loader import Feature, FeatureError, Scenario, load_feature
+from assistant_testing.fixtures import reachy_daemon  # noqa: F401  (registers the fixture)
 
 PASS = "✓"
 FAIL = "✗"

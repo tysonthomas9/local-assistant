@@ -15,7 +15,7 @@ from assistant_contracts.messages import MESSAGE_TYPES
 from assistant_contracts.schema import edgelink_schemas, edgelink_schemas_json
 from assistant_contracts.version import PROTOCOL_VERSION
 
-pytestmark = pytest.mark.contract
+pytestmark = pytest.mark.unit
 
 SNAPSHOTS = Path(__file__).parent / "snapshots"
 SNAPSHOT = SNAPSHOTS / f"edgelink-v{PROTOCOL_VERSION}.json"

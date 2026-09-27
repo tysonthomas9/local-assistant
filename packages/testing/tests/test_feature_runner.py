@@ -157,3 +157,10 @@ def test_failed_step_still_stops_processes(pytester: pytest.Pytester, tmp_path: 
     pid = int(pidfile.read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+def test_reachy_daemon_placeholder_fails_with_a_clear_message(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile("def test_robot(reachy_daemon):\n    assert reachy_daemon\n")
+    result = pytester.runpytest("-p", "no:cacheprovider", "-p", "no:asyncio")
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*NotImplementedError: reachy_daemon is a placeholder*S3*"])

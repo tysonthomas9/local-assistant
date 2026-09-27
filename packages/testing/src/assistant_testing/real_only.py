@@ -1,9 +1,10 @@
-"""The real-only check: e2e code and feature files may not use test doubles.
+"""The real-only check: e2e code and the whole testing package may not use test doubles.
 
-E2E uses only real devices and the real stack. This scans `e2e/` and the feature-runner and
-step modules of this package, and reports every line that imports `unittest.mock` or
-`pytest_mock`, uses `monkeypatch`, or defines/references an identifier like `FakeX`, `MockX`,
-`StubX` or `DummyX`.
+E2E uses only real devices and the real stack. This scans `e2e/` and the entire
+`assistant_testing` source tree, and reports every line that imports the standard-library mock
+module or the pytest-mock plugin, takes that plugin's mock fixture, uses pytest's monkey-patching
+fixture, or defines/references an identifier made of Fake, Mock, Stub or Dummy followed by a
+capital letter. The only allowlisted lines are this module's own rule strings.
 
     python -m assistant_testing.real_only [repo_root]     # exit 1 and file:line on violations
 """
@@ -15,9 +16,10 @@ from pathlib import Path
 
 SCANNED = (
     "e2e",
-    "packages/testing/src/assistant_testing/features",
-    "packages/testing/src/assistant_testing/steps",
+    "packages/testing/src/assistant_testing",
 )
+SELF = Path("packages/testing/src/assistant_testing/real_only.py")
+"""This module, relative to the repo root; only its rule strings are allowlisted."""
 SUFFIXES = {".py", ".yaml", ".yml", ".md", ".toml", ".json", ".txt"}
 
 RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -27,6 +29,7 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("imports pytest_mock", re.compile(r"\bpytest_mock\b")),
     ("uses monkeypatch", re.compile(r"\bmonkeypatch\b")),
+    ("uses the pytest-mock mocker fixture", re.compile(r"\bmocker\b")),
     ("test-double identifier", re.compile(r"\b(?:Fake|Mock|Stub|Dummy)[A-Z]\w*")),
 )
 
@@ -55,24 +58,34 @@ def scanned_files(repo_root: Path) -> list[Path]:
     return files
 
 
-def check_file(path: Path) -> list[Violation]:
+def _is_own_rule_string(line: str) -> bool:
+    return any(rule in line or pattern.pattern in line for rule, pattern in RULES)
+
+
+def check_file(path: Path, *, allow_rule_strings: bool = False) -> list[Violation]:
     found: list[Violation] = []
     for number, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+        if allow_rule_strings and _is_own_rule_string(line):
+            continue
         for rule, pattern in RULES:
             if pattern.search(line):
                 found.append(Violation(path, number, rule, line))
     return found
 
 
+def check_path(repo_root: Path, path: Path) -> list[Violation]:
+    return check_file(path, allow_rule_strings=path == repo_root / SELF)
+
+
 def check(repo_root: Path) -> list[Violation]:
-    return [v for path in scanned_files(repo_root) for v in check_file(path)]
+    return [v for path in scanned_files(repo_root) for v in check_path(repo_root, path)]
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     root = Path(args[0] if args else ".").resolve()
     files = scanned_files(root)
-    violations = [v for path in files for v in check_file(path)]
+    violations = [v for path in files for v in check_path(root, path)]
     for violation in violations:
         print(
             f"{violation.path.relative_to(root)}:{violation.line}: {violation.rule}: "

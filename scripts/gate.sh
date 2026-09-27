@@ -7,32 +7,34 @@
 #   a  clone   git clone HEAD into a temp dir and `uv sync --locked` from scratch
 #   b  lint    ruff (check + format), basedpyright, import-linter
 #   c  unit    the few unit tests (pure logic) plus the schema snapshot
-#   d  real    real-only check: no mocks, monkeypatching or Fake/Mock/Stub/Dummy identifiers
-#              in e2e/ or the feature-runner and step modules (prints file:line)
+#   d  real    real-only check: no mocks, mocker, monkeypatching or Fake/Mock/Stub/Dummy
+#              identifiers in e2e/ or anywhere in assistant_testing (prints file:line)
 #   e  core    e2e features, tier core
-#   f  legacy  the legacy suite as the README "Tests" section runs it (skipped with a reason
-#              when its venv, fixtures or running stack are unavailable; legacy files are
-#              never modified)
-#   g  hw      e2e features, tier hw: FAILS if the robot is missing (/dev/ttyACM0 or the
-#              daemon at 127.0.0.1:8000)
-#   h  models  e2e features, tier models: FAILS if the GPUs or an LLM server are missing
-#   i  summary PASS/FAIL per stage; exits non-zero on any failure
+#   f  legacy  the whole legacy suite (local_backend/tests, as the README runs it). Gitignored
+#              resources are symlinked into the clone from the main checkout. Tests listed in
+#              scripts/legacy_stack_tests.txt are deselected only while their requirement (the
+#              running stack, SearXNG, ...) is missing; any other failure FAILS. SKIP only when
+#              the legacy venv is missing.
+#   g  hw      e2e features, tier hw: FAILS if the robot is missing (/dev/ttyACM0; S3 adds the
+#              daemon check)
+#   h  models  e2e features, tier models: FAILS unless both GPUs and Ollama are available
+#   i  summary PASS/FAIL per stage. Exit 0 = PASS, 1 = FAIL, 3 = INCOMPLETE (a stage opted out)
 #
 # E2E uses only real devices and the real stack (see e2e/features/README.md).
 #
 # Environment:
 #   GATE_FAST=1       test the working tree in place instead of a fresh clone (uncommitted
 #                     changes are then included)
-#   GATE_NO_HW=1      skip stage g   } prints a loud WARNING: the gate is not complete
+#   GATE_NO_HW=1      skip stage g   } prints a loud WARNING and exits 3 (incomplete)
 #   GATE_NO_MODELS=1  skip stage h   }
-#   LEGACY_PYTHON     python for the legacy suite (default: third_party/speech-to-speech/.venv
-#                     in this checkout or in the main checkout of this repository)
+#   LEGACY_PYTHON     python for the legacy suite (default: third_party/speech-to-speech/.venv)
+#   LEGACY_APP_DIR    reachy_mini_conversation_app to link (default: from the main checkout)
 set -euo pipefail
 
 ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 MAIN_CHECKOUT="$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")"
 DAEMON_URL="http://127.0.0.1:8000"
-LLM_URLS=("http://127.0.0.1:8773/v1/models" "http://127.0.0.1:11434/v1/models")
+OLLAMA_URL="http://127.0.0.1:11434/v1/models"
 unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT || true
 
 STATE_DIR="$(mktemp -d -t assistant-gate-state.XXXXXX)"
@@ -153,83 +155,121 @@ stage_real_only() {
 
 stage_core() { pytest_features core; }
 
-find_legacy_python() {
-    local candidate
-    for candidate in \
-        "${LEGACY_PYTHON:-}" \
-        "$ROOT/third_party/speech-to-speech/.venv/bin/python" \
-        "$MAIN_CHECKOUT/third_party/speech-to-speech/.venv/bin/python"; do
-        if [[ -n "$candidate" && -x "$candidate" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
+# Gitignored legacy resources a fresh clone lacks. They are symlinked into the clone from this
+# checkout or the main checkout (found through `git rev-parse --git-common-dir`); nothing in the
+# source checkouts is changed. LEGACY_APP_DIR overrides reachy_mini_conversation_app.
+LEGACY_LINKS=(reachy_mini_conversation_app third_party voices local_backend/models)
+LEGACY_FIXTURES="local_backend/tests/fixtures"
+LEGACY_LIST="scripts/legacy_stack_tests.txt"
+
+legacy_source() {
+    local rel="$1" candidate
+    if [[ "$rel" == reachy_mini_conversation_app && -n "${LEGACY_APP_DIR:-}" ]]; then
+        printf '%s\n' "$LEGACY_APP_DIR"
+        return 0
+    fi
+    for candidate in "$ROOT/$rel" "$MAIN_CHECKOUT/$rel"; do
+        if [[ -e "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
     done
     return 1
 }
 
-stage_legacy() {
-    local py fixtures="local_backend/tests/fixtures" source_dir
-    if ! py="$(find_legacy_python)"; then
-        note "legacy venv (third_party/speech-to-speech/.venv) not found; set LEGACY_PYTHON"
-        return 77
-    fi
-    # Personal fixtures (a camera frame, voice clips) are gitignored. A fresh clone gets a
-    # copy from a checkout that has them; nothing in the source checkouts is changed.
-    if [[ ! -f "$fixtures/camera_frame.jpg" ]]; then
-        source_dir=""
-        for candidate in "$ROOT/$fixtures" "$MAIN_CHECKOUT/$fixtures"; do
-            if [[ -f "$candidate/camera_frame.jpg" ]]; then source_dir="$candidate"; break; fi
-        done
-        if [[ -z "$source_dir" || "$WORK" == "$ROOT" ]]; then
-            note "legacy fixtures (gitignored camera_frame.jpg, stt/) not available here"
-            return 77
+provision_legacy() {
+    local rel src
+    for rel in "${LEGACY_LINKS[@]}"; do
+        if [[ -e "$rel" ]]; then continue; fi
+        if [[ "$WORK" == "$ROOT" ]]; then
+            printf 'missing here (GATE_FAST does not provision): %s\n' "$rel"
+            continue
         fi
-        cp -r --update=none "$source_dir/." "$fixtures/"
+        if src="$(legacy_source "$rel")"; then
+            ln -s "$src" "$rel"
+            printf 'linked %s\n' "$rel"
+        else
+            printf 'not found in any checkout: %s\n' "$rel"
+        fi
+    done
+    # Personal fixtures (a camera frame, voice clips) are gitignored; the clone gets a copy.
+    if [[ ! -f "$LEGACY_FIXTURES/camera_frame.jpg" && "$WORK" != "$ROOT" ]] \
+        && src="$(legacy_source "$LEGACY_FIXTURES/camera_frame.jpg")"; then
+        cp -r --update=none "$(dirname "$src")/." "$LEGACY_FIXTURES/"
+        printf 'copied %s\n' "$LEGACY_FIXTURES"
     fi
-    # The legacy suite talks to the running legacy stack and fails, not skips, without it.
-    if ! curl -s -o /dev/null -m 3 "$DAEMON_URL/" || ! (exec 3<>/dev/tcp/127.0.0.1/8765) 2>/dev/null; then
-        note "legacy stack not running (needs the daemon on :8000 and the speech server on :8765; start_daemon.sh, start_local_backend.sh, start_conversation.sh)"
+}
+
+port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# need_met <needs>: is the requirement of a listed legacy test available right now?
+need_met() {
+    case "$1" in
+        stack) curl -s -o /dev/null -m 3 "$DAEMON_URL/" && port_open 8765 ;;
+        speech) port_open 8765 ;;
+        searxng) port_open 8888 ;;
+        root-venv) [[ -x .venv/bin/python ]] && .venv/bin/python -c 'import piper' 2>/dev/null ;;
+        *) printf 'unknown need %q in %s\n' "$1" "$LEGACY_LIST" >&2; return 2 ;;
+    esac
+}
+
+stage_legacy() {
+    local py="${LEGACY_PYTHON:-third_party/speech-to-speech/.venv/bin/python}"
+    provision_legacy
+    if [[ ! -x "$py" ]]; then
+        note "legacy venv not found ($py); set LEGACY_PYTHON"
         return 77
     fi
-    cd local_backend
+    py="$(cd "$(dirname "$py")" && pwd)/$(basename "$py")"
+    local node needs reason args=() summary="" rc
+    declare -A met count
+    while read -r node needs reason; do
+        [[ -z "$node" || "$node" == \#* ]] && continue
+        if [[ -z "${met[$needs]:-}" ]]; then
+            if need_met "$needs"; then met[$needs]=yes; else met[$needs]=no; fi
+        fi
+        if [[ "${met[$needs]}" == no ]]; then
+            args+=(--deselect "$node")
+            count[$needs]=$(( ${count[$needs]:-0} + 1 ))
+            printf 'deselect (%s missing): %s  -- %s\n' "$needs" "$node" "$reason"
+        fi
+    done <"$LEGACY_LIST"
+    for needs in stack speech searxng root-venv; do
+        if [[ -n "${count[$needs]:-}" ]]; then summary+="${summary:+, }$needs ${count[$needs]}"; fi
+    done
     local out="$STATE_DIR/legacy.log"
-    "$py" -m pytest -v -p no:cacheprovider 2>&1 | tee "$out"
-    note "$(grep -Eo '[0-9]+ passed.*' "$out" | tail -1)"
+    set +e
+    (cd local_backend && "$py" -m pytest -v -p no:cacheprovider -rfEs "${args[@]}") 2>&1 | tee "$out"
+    rc=${PIPESTATUS[0]}
+    set -e
+    note "$(grep -E '^=+ .* in [0-9.]+s' "$out" | tail -1 | sed -E 's/^=+ (.*) in [0-9.]+s.*/\1/')${summary:+ (needs missing: $summary)}"
+    return "$rc"
 }
 
 robot_present() {
+    # S1: the robot counts as present when its USB serial device exists. S3 adds the daemon check.
     if [[ -e /dev/ttyACM0 ]]; then
-        printf 'robot: /dev/ttyACM0 present\n'
+        printf 'robot: /dev/ttyACM0 present (daemon check arrives with S3)\n'
         return 0
     fi
-    if curl -s -o /dev/null -m 3 "$DAEMON_URL/"; then
-        printf 'robot: daemon answering at %s\n' "$DAEMON_URL"
-        return 0
-    fi
+    printf 'robot: /dev/ttyACM0 missing\n'
     return 1
 }
 
 models_present() {
-    local gpus url
+    local gpus ok=0
     gpus="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)"
-    if [[ "${gpus:-0}" -lt 1 ]]; then
-        printf 'no GPUs found (nvidia-smi -L)\n'
-        return 1
+    printf 'GPUs: %s (need 2)\n' "${gpus:-0}"
+    if [[ "${gpus:-0}" -lt 2 ]]; then ok=1; fi
+    if curl -sf -o /dev/null -m 3 "$OLLAMA_URL"; then
+        printf 'Ollama: %s answering\n' "$OLLAMA_URL"
+    else
+        printf 'Ollama: %s not answering\n' "$OLLAMA_URL"
+        ok=1
     fi
-    printf 'GPUs: %s\n' "$gpus"
-    for url in "${LLM_URLS[@]}"; do
-        if curl -sf -o /dev/null -m 3 "$url"; then
-            printf 'LLM server: %s\n' "$url"
-            return 0
-        fi
-    done
-    printf 'no LLM server answering (%s)\n' "${LLM_URLS[*]}"
-    return 1
+    return "$ok"
 }
 
 stage_hw() {
     if ! robot_present; then
-        note "robot not found: no /dev/ttyACM0 and no daemon at $DAEMON_URL (GATE_NO_HW=1 to skip)"
+        note "robot not found: no /dev/ttyACM0 (GATE_NO_HW=1 to skip)"
         return 1
     fi
     pytest_features hw
@@ -237,7 +277,7 @@ stage_hw() {
 
 stage_models() {
     if ! models_present; then
-        note "GPUs or model servers missing (GATE_NO_MODELS=1 to skip)"
+        note "needs both GPUs and Ollama at $OLLAMA_URL (GATE_NO_MODELS=1 to skip)"
         return 1
     fi
     pytest_features models
@@ -301,7 +341,8 @@ if [[ $failed -ne 0 ]]; then
     exit 1
 fi
 if [[ ${#INCOMPLETE[@]} -gt 0 ]]; then
-    printf '\n%s%sGATE: PASS (INCOMPLETE: %s not run)%s\n' "$YELLOW" "$BOLD" "${INCOMPLETE[*]}" "$RESET"
+    printf '\n%s%sGATE: INCOMPLETE (%s not run; exit 3)%s\n' "$YELLOW" "$BOLD" "${INCOMPLETE[*]}" "$RESET"
+    exit 3
 else
     printf '\n%s%sGATE: PASS%s\n' "$GREEN" "$BOLD" "$RESET"
 fi

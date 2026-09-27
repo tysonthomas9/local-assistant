@@ -53,6 +53,10 @@ scenarios:
       - roundtrip_message: {type: event, fields: {kind: button, data: {pressed: true}}}
       - roundtrip_message: {type: error, fields: {code: bad_request, message: unknown stream}}
       - expect_all_message_types_covered
+      - expect_message_type_order:
+          names: [hello, welcome, wake, wake.cancel, vad, mic.close, mic.follow_up, text.input,
+                  speak.begin, speak.end, flush, duck, playback, play_sound, attention, express,
+                  look_at, snapshot, result, privacy, timer.sync, event, error]
 
   - name: speak.begin text is optional
     steps:
@@ -72,6 +76,10 @@ scenarios:
       - expect_message_refused: {wire: {v: 1, type: express, name: not_an_intent}}
       - expect_message_refused: {wire: {v: 1, type: speak.begin, stream_id: 256}}
       - expect_message_refused: {wire: {v: 1, type: welcome}}
+      - expect_message_refused: {wire: {v: 1, type: wake, word: x, score: 1.5}}
+      - expect_message_refused: {wire: {v: 1, type: look_at, target: {kind: image, u: 2, v: 0}}}
+      - expect_message_refused: {wire: {v: 1, type: mic.follow_up, seconds: 0}}
+      - expect_message_refused: {wire: {v: 1, type: duck, channel: media, gain_db: 3}}
 
   - name: all frame kinds round-trip
     steps:
@@ -79,6 +87,7 @@ scenarios:
       - roundtrip_frame: {kind: out_pcm, payload_bytes: 960, stream: 2}
       - roundtrip_frame: {kind: jpeg_chunk, payload_bytes: 16384, stream: 1}
       - roundtrip_frame: {kind: sound_clip, payload_bytes: 4410}
+      - roundtrip_frame: {kind: mic_pcm, payload_bytes: 640, stream: 3, seq: 42, capture_ts_us: 123456789}
       - roundtrip_frame: {kind: opus, payload_bytes: 80, opus_negotiated: true}
       - expect_all_frame_kinds_covered
 
