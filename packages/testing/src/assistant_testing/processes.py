@@ -9,7 +9,7 @@ import contextlib
 import os
 import re
 import signal
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,6 +29,8 @@ class ManagedProcess:
     name: str
     argv: tuple[str, ...]
     proc: asyncio.subprocess.Process
+    env: dict[str, str] | None = None
+    cwd: Path | None = None
     lines: list[str] = field(default_factory=list)
     _new_line: asyncio.Event = field(default_factory=asyncio.Event)
     _reader: asyncio.Task[None] | None = None
@@ -85,6 +87,57 @@ class ManagedProcess:
                 f"{self.name} did not print /{pattern}/ within {timeout_s}s; output:\n{self.output}"
             ) from None
 
+    async def wait_for_output(
+        self,
+        match: Callable[[str], bool],
+        timeout_s: float,
+        *,
+        skip: Callable[[int], bool] = lambda index: False,
+        what: str = "a matching line",
+    ) -> tuple[int, str]:
+        """Wait for an output line (not rejected by `skip(index)`) that `match` accepts.
+
+        Returns (index, line). Unlike `wait_for_line`, it keeps waiting after the process
+        exits only until its output is fully read, then fails with the output so far.
+        """
+
+        async def scan() -> tuple[int, str]:
+            seen = 0
+            while True:
+                while seen < len(self.lines):
+                    index, line = seen, self.lines[seen]
+                    seen += 1
+                    if not skip(index) and match(line):
+                        return index, line
+                if not self.running and self._reader is not None and self._reader.done():
+                    raise RuntimeError(
+                        f"{self.name} exited ({self.proc.returncode}) before printing "
+                        f"{what}; output:\n{self.output}"
+                    )
+                self._new_line.clear()
+                await self._new_line.wait()
+
+        try:
+            return await asyncio.wait_for(scan(), timeout_s)
+        except TimeoutError:
+            raise TimeoutError(
+                f"{self.name} did not print {what} within {timeout_s}s; output:\n{self.output}"
+            ) from None
+
+    async def write_line(self, text: str) -> None:
+        """Write one line to the process's stdin (it must have been started with stdin=True)."""
+        stream = self.proc.stdin
+        if stream is None:
+            raise RuntimeError(f"{self.name} was started without stdin")
+        if not self.running:
+            raise RuntimeError(f"{self.name} is not running; output:\n{self.output}")
+        stream.write(text.encode() + b"\n")
+        await stream.drain()
+
+    def send_signal(self, sig: signal.Signals) -> None:
+        """Send a real signal to the process group (SIGKILL, SIGSTOP, SIGCONT, ...)."""
+        os.killpg(self.proc.pid, sig)
+
     async def wait(self, timeout_s: float) -> int:
         code = await asyncio.wait_for(self.proc.wait(), timeout_s)
         if self._reader is not None:
@@ -96,6 +149,7 @@ class ManagedProcess:
         if self.running:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(self.proc.pid, signal.SIGTERM)
+                os.killpg(self.proc.pid, signal.SIGCONT)  # a frozen (SIGSTOP) process too
             try:
                 await asyncio.wait_for(self.proc.wait(), grace_s)
             except TimeoutError:
@@ -126,17 +180,25 @@ class ProcessGroup:
         cwd: Path | None = None,
         ready_line: str | None = None,
         ready_timeout: float = 30.0,
+        stdin: bool = False,
     ) -> ManagedProcess:
+        """Start a process. With `stdin=True` steps can type into it (`write_line`)."""
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
             cwd=cwd or self.cwd,
             env={**self.env, **(env or {})},
             start_new_session=True,
         )
-        managed = ManagedProcess(name=name, argv=tuple(argv), proc=proc)
+        managed = ManagedProcess(
+            name=name,
+            argv=tuple(argv),
+            proc=proc,
+            env=dict(env) if env is not None else None,
+            cwd=cwd,
+        )
         managed.start_reader()
         self.processes.append(managed)
         if ready_line is not None:
@@ -160,6 +222,26 @@ class ProcessGroup:
             await managed.stop()
             raise TimeoutError(f"{name} did not finish within {timeout_s}s") from None
         return CompletedRun(name=name, argv=tuple(argv), returncode=code, output=managed.output)
+
+    async def restart(
+        self, name: str, *, ready_line: str | None = None, ready_timeout: float = 30.0
+    ) -> ManagedProcess:
+        """Start a new process with the same argv, env and cwd as the last one named `name`.
+
+        The old one must have exited (e.g. it was killed); `get(name)` returns the new one.
+        """
+        old = self.get(name)
+        if old.running:
+            raise RuntimeError(f"{name} is still running (pid {old.pid}); kill or stop it first")
+        return await self.start(
+            name,
+            old.argv,
+            env=old.env,
+            cwd=old.cwd,
+            ready_line=ready_line,
+            ready_timeout=ready_timeout,
+            stdin=old.proc.stdin is not None,
+        )
 
     def get(self, name: str) -> ManagedProcess:
         for managed in reversed(self.processes):

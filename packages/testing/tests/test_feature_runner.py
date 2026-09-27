@@ -164,3 +164,57 @@ def test_reachy_daemon_placeholder_fails_with_a_clear_message(pytester: pytest.P
     result = pytester.runpytest("-p", "no:cacheprovider", "-p", "no:asyncio")
     result.assert_outcomes(errors=1)
     result.stdout.fnmatch_lines(["*NotImplementedError: reachy_daemon is a placeholder*S3*"])
+
+
+@step("_test_echo")
+async def _echo(ctx: ScenarioContext, value: object, label: str = "") -> None:
+    del ctx, value, label
+
+
+def test_outline_expands_examples(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """\
+        feature: x
+        tier: core
+        description: d
+        scenarios:
+          - name: "send <type>"
+            examples:
+              - {type: wake, fields: {word: hi, score: 0.5}}
+              - {type: flush, fields: {stream_id: all}}
+            steps:
+              - _test_echo: {value: <fields>, label: "type <type> ok"}
+        """,
+    )
+    feature = load_feature(path)
+    assert [s.name for s in feature.scenarios] == ["send wake", "send flush"]
+    first = feature.scenarios[0].steps[0].kwargs
+    assert first == {"value": {"word": "hi", "score": 0.5}, "label": "type wake ok"}
+    assert feature.scenarios[1].steps[0].kwargs["value"] == {"stream_id": "all"}
+
+
+@pytest.mark.parametrize(
+    ("examples", "text"),
+    [
+        ("[{type: wake}]", "no value for placeholder.*fields"),
+        ("[{type: wake, fields: 1}, {type: wake, fields: 2}]", "duplicate scenario 'send wake'"),
+        ("[]", "examples"),
+    ],
+)
+def test_outline_errors(tmp_path: Path, examples: str, text: str) -> None:
+    path = _write(
+        tmp_path,
+        f"""\
+        feature: x
+        tier: core
+        description: d
+        scenarios:
+          - name: "send <type>"
+            examples: {examples}
+            steps:
+              - _test_echo: {{value: <fields>}}
+        """,
+    )
+    with pytest.raises(FeatureError, match=text):
+        load_feature(path)

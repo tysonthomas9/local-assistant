@@ -1,0 +1,72 @@
+feature: EdgeLink binary frames over a real link
+tier: core
+description: >
+  Binary frame kinds 0x01-0x04 travel between a real link server process and a real client
+  process in their proposal section 5.1 directions, and the receiver's payload CRC matches
+  the sender's. Opus (0x05) is refused unless both ends negotiated it (the edge advertises
+  `opus` and the brain accepts it in welcome); once negotiated it travels both ways.
+scenarios:
+  - name: mic PCM and JPEG chunks travel edge -> brain
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - client_sends_frame: {client: desk, kind: mic_pcm, bytes: 640, stream: 0, seq: 1}
+      - server_receives_frame: {client: desk, kind: mic_pcm, bytes: 640}
+      - client_sends_frame: {client: desk, kind: "0x01", bytes: 640, stream: 0, seq: 2}
+      - server_receives_frame: {client: desk, kind: mic_pcm, bytes: 640}
+      - client_sends_frame: {client: desk, kind: jpeg_chunk, bytes: 16384, stream: 1}
+      - server_receives_frame: {client: desk, kind: jpeg_chunk, bytes: 16384}
+
+  - name: output PCM and sound clips travel brain -> edge
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - server_sends_frame: {client: desk, kind: out_pcm, bytes: 960, stream: 2}
+      - client_receives_frame: {client: desk, kind: out_pcm, bytes: 960}
+      - server_sends_frame: {client: desk, kind: sound_clip, bytes: 4410, stream: 0}
+      - client_receives_frame: {client: desk, kind: sound_clip, bytes: 4410}
+
+  - name: Opus is refused when the brain does not accept it
+    steps:
+      - start_link_server
+      - start_link_client: {id: desk, opus: true}
+      - capability_negotiated: {client: desk, capability: opus, negotiated: false}
+      - client_sends_frame: {client: desk, kind: opus, bytes: 80, expect: refused_locally}
+      - server_sends_frame: {client: desk, kind: opus, bytes: 80, expect: refused_locally}
+      # forced onto the wire anyway: the receiving link refuses it
+      - client_sends_frame: {client: desk, kind: opus, bytes: 80, unchecked: true}
+      - server_refuses: {client: desk, code: frame_refused}
+      - client_receives: {client: desk, type: error, fields: {code: frame_refused}}
+      - server_sends_frame: {client: desk, kind: opus, bytes: 80, unchecked: true}
+      - client_refuses: {client: desk, code: frame_refused}
+
+  - name: Opus is refused when the edge does not advertise it
+    steps:
+      - start_link_server: {accept_opus: true}
+      - start_link_client: desk
+      - capability_negotiated: {client: desk, capability: opus, negotiated: false}
+      - client_sends_frame: {client: desk, kind: opus, bytes: 80, expect: refused_locally}
+      - client_sends_frame: {client: desk, kind: opus, bytes: 80, unchecked: true}
+      - server_refuses: {client: desk, code: frame_refused}
+
+  - name: Opus travels both ways once negotiated
+    steps:
+      - start_link_server: {accept_opus: true}
+      - start_link_client: {id: desk, opus: true}
+      - capability_negotiated: {client: desk, capability: opus}
+      - client_sends_frame: {client: desk, kind: opus, bytes: 80}
+      - server_receives_frame: {client: desk, kind: opus, bytes: 80}
+      - server_sends_frame: {client: desk, kind: opus, bytes: 120, stream: 2}
+      - client_receives_frame: {client: desk, kind: opus, bytes: 120}
+
+  - name: frames in the wrong direction are refused
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - client_sends_frame: {client: desk, kind: out_pcm, bytes: 640, expect: refused_locally}
+      - client_sends_frame: {client: desk, kind: out_pcm, bytes: 640, unchecked: true}
+      - server_refuses: {client: desk, code: wrong_direction}
+      - server_sends_frame: {client: desk, kind: mic_pcm, bytes: 640, unchecked: true}
+      - client_refuses: {client: desk, code: wrong_direction}
+      - client_sends_frame: {client: desk, kind: mic_pcm, bytes: 640}
+      - server_receives_frame: {client: desk, kind: mic_pcm, bytes: 640}

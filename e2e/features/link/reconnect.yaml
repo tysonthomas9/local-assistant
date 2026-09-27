@@ -1,0 +1,43 @@
+feature: EdgeLink reconnect and heartbeat
+tier: core
+description: >
+  Real faults on real processes. The link server process is killed with SIGKILL and started
+  again on the same port; the client reconnects on its own with backoff (0.5 s doubling to
+  10 s, with jitter) and gets a new session. A frozen client (SIGSTOP) is declared dead by
+  the server's heartbeat (ping every 5 s, dead after 15 s without a reply) and reconnects
+  once it is thawed (SIGCONT).
+scenarios:
+  - name: the server is killed and restarted; the client reconnects within 3 s
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - kill_process: {process: server}
+      - restart_process: {process: server}
+      - client_reconnects_within: {client: desk, seconds: 3}
+      - client_retries_with_backoff: {client: desk, min_retries: 1}
+      - client_sends: {client: desk, type: wake, fields: {word: hey jarvis, score: 0.9}}
+      - server_receives: {client: desk, type: wake}
+
+  - name: the server stays down; the client backs off and reconnects within the window
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - kill_process: {process: server}
+      - wait: {seconds: 6}
+      - restart_process: {process: server}
+      - client_reconnects_within: {client: desk, seconds: 10}
+      - client_retries_with_backoff: {client: desk, min_retries: 4}
+      - server_sends: {client: desk, type: attention, fields: {state: idle}}
+      - client_receives: {client: desk, type: attention, fields: {state: idle}}
+
+  - name: a frozen client is dropped by the heartbeat and reconnects when thawed
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - kill_process: {process: desk, signal_name: STOP}
+      # dead between 10 s (ping right away) and 17 s (ping after 5 s) plus a 2 s close timeout
+      - server_disconnects: {client: desk, within_s: 20, not_before_s: 10}
+      - kill_process: {process: desk, signal_name: CONT}
+      - client_reconnects_within: {client: desk, seconds: 12}
+      - client_sends: {client: desk, type: text.input, fields: {text: back again}}
+      - server_receives: {client: desk, type: text.input, fields: {text: back again}}

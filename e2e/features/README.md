@@ -31,6 +31,23 @@ A step is a one-key mapping: the step name and its arguments, given as a mapping
 scalar, or nothing. Step arguments are type-checked when the file is collected. Errors name
 the file and line.
 
+**Scenario outlines.** A scenario with `examples:` runs once per example. Every `<key>` in
+its name and steps is replaced by that example's value; a string that is exactly `<key>`
+takes the raw value (a mapping or list), so one outline can send different message fields.
+The expanded names must be unique.
+
+```yaml
+  - name: "edge -> brain: <type>"
+    examples:
+      - {type: wake, fields: {word: hey jarvis, score: 0.8}}
+      - {type: text.input, fields: {text: what time is it}}
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - client_sends: {client: desk, type: <type>, fields: <fields>}
+      - server_receives: {client: desk, type: <type>, fields: <fields>}
+```
+
 ## Running
 
 ```bash
@@ -71,5 +88,39 @@ The parameters after `ctx` are the step's arguments.
 | `roundtrip_frame` | `kind: str` (`mic_pcm`, `out_pcm`, `jpeg_chunk`, `sound_clip`, `opus`), `payload_bytes: int = 640`, `stream`, `seq`, `capture_ts_us`, `opus_negotiated: bool = false` | Encodes and decodes a binary frame |
 | `expect_frame_refused` | `kind: str`, `reason: not_negotiated \| malformed`, `payload_bytes: int = 4` | Encoding and decoding the frame must both fail |
 | `expect_all_frame_kinds_covered` | none | Kinds 0x01-0x05 were all round-tripped in this scenario |
+
+### EdgeLink over a real link (`steps/link.py`)
+
+A real link server console (`python -m assistant_link.server --console`) and real client
+consoles (`python -m assistant_link.client --console`) on a free 127.0.0.1 port, one process
+each. Steps type commands into their stdin and read their output. Every expectation
+consumes the output line it matched. `client` is a device id; `process` is `server` or a
+device id. Messages are checked by containment: the listed `fields` must be in the message.
+
+| Step | Arguments | Does |
+|---|---|---|
+| `start_link_server` | `accept_opus: bool = false`, `token: str` | "start the link server console" |
+| `start_link_client` | `id: str`, `token: str?`, `proto: str?`, `opus: bool = false`, `speak_text: bool = false`, `wait: bool = true` | "start a link client "<id>" [with token] [with proto]"; waits for its welcome unless `wait: false` |
+| `server_connected` | `client: str`, `fields: map?`, `within_s = 5` | The server accepted the client's hello (containing `fields`) |
+| `client_sends` | `client`, `type`, `fields: map?` | "client "<id>" sends <type> <fields>" |
+| `server_receives` | `type`, `client: str?`, `fields: map?`, `within_s = 5` | "the server receives <type>" |
+| `server_sends` | `client`, `type`, `fields: map?` | "the server sends <type> <fields>" |
+| `client_receives` | `client`, `type`, `fields: map?`, `within_s = 5` | "client "<id>" receives <type>" (`welcome` too) |
+| `client_sends_raw` / `server_sends_raw` | `client`, `message: map?` or `text: str` | Puts unchecked text on the wire (tests the receiver's checks) |
+| `sender_refuses_locally` | `client`, `sender: edge \| brain`, `type`, `fields: map?` | The sender's own link refuses a wrong-direction type |
+| `server_refuses` | `code: str`, `client: str?`, `within_s = 5` | The server refused a connection or item (`auth`, `version_mismatch`, `wrong_direction`, `frame_refused`, `bad_message`) |
+| `client_refuses` | `client`, `code: str`, `within_s = 5` | The client refused an item the server sent |
+| `client_sends_frame` | `client`, `kind`, `bytes = 640`, `stream = 1`, `seq = 1`, `unchecked = false`, `expect: sent \| refused_locally` | "client "<id>" sends frame <kind>" (`kind`: `mic_pcm`, `out_pcm`, `jpeg_chunk`, `sound_clip`, `opus` or `"0x01"`) |
+| `server_receives_frame` | `client`, `kind`, `bytes: int?`, `within_s = 5` | "the server receives frame <kind>", with the payload CRC the client sent |
+| `server_sends_frame` | `client`, `kind`, ... as `client_sends_frame` | The server sends a frame to the client |
+| `client_receives_frame` | `client`, `kind`, `bytes: int?`, `within_s = 5` | The client received the frame, with the payload CRC the server sent |
+| `capability_negotiated` | `client`, `capability: opus \| speak_text`, `negotiated: bool = true` | "capability "<cap>" is negotiated" (both ends agree for `opus`) |
+| `connection_closed_with_code` | `client`, `code: int`, `within_s = 5` | "the connection is closed with code <n>"; for 4001/4003 the client also gives up and exits 2 |
+| `server_disconnects` | `client`, `within_s = 5`, `code: int?`, `not_before_s = 0` | The server dropped the client's session |
+| `kill_process` | `process`, `signal_name: KILL \| STOP \| CONT = KILL` | "kill the <process>" with a real signal (kill -9, freeze, thaw) |
+| `restart_process` | `process` | "restart the <process>" with the same command line (the server keeps its port) |
+| `client_reconnects_within` | `client`, `seconds: float` | "client "<id>" reconnects within <s> s": a new welcome and a new server session |
+| `client_retries_with_backoff` | `client`, `min_retries = 1` | Every printed retry delay is 0.5 s doubling to 10 s, within ±20 % jitter |
+| `wait` | `seconds: float` | Lets real time pass |
 
 Later tasks add `start` (brain), `start_edge`, `expect_message` and the robot and model steps.
