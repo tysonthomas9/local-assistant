@@ -123,6 +123,7 @@ stage_lint() {
     uv run --locked ruff format --check
     uv run --locked basedpyright
     uv run --locked lint-imports
+    note "ruff, basedpyright and import-linter clean"
 }
 
 stage_unit() {
@@ -164,7 +165,7 @@ stage_legacy() {
             note "legacy fixtures (gitignored camera_frame.jpg, stt/) not available here"
             return 77
         fi
-        cp -rn "$source_dir/." "$fixtures/"
+        cp -r --update=none "$source_dir/." "$fixtures/"
     fi
     # The legacy suite talks to the running legacy stack and fails, not skips, without it.
     if ! curl -s -o /dev/null -m 3 "$DAEMON_URL/" || ! (exec 3<>/dev/tcp/127.0.0.1/8765) 2>/dev/null; then
@@ -279,4 +280,8 @@ if [[ $failed -ne 0 ]]; then
     printf '\n%s%sGATE: FAIL%s\n' "$RED" "$BOLD" "$RESET"
     exit 1
 fi
-printf '\n%s%sGATE: PASS%s\n' "$GREEN" "$BOLD" "$RESET"
+if [[ ${#INCOMPLETE[@]} -gt 0 ]]; then
+    printf '\n%s%sGATE: PASS (INCOMPLETE: %s not run)%s\n' "$YELLOW" "$BOLD" "${INCOMPLETE[*]}" "$RESET"
+else
+    printf '\n%s%sGATE: PASS%s\n' "$GREEN" "$BOLD" "$RESET"
+fi
