@@ -24,6 +24,11 @@ async def _fail(ctx: ScenarioContext, message: str = "boom") -> None:
     raise AssertionError(message)
 
 
+@step("_test_edge")
+async def _edge(ctx: ScenarioContext, name: str, body: str) -> None:
+    del ctx, name, body
+
+
 def _write(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "features" / "f.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -92,6 +97,32 @@ def test_errors_name_file_and_line(tmp_path: Path, body: str, line: int, text: s
         load_feature(path)
     assert str(info.value).startswith(f"{path}:{line}:")
     assert text in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("body", "ok"),
+    [("reachy", True), ("console", True), ("null", False), ("simulator", False)],
+)
+def test_only_real_bodies(tmp_path: Path, body: str, ok: bool) -> None:
+    path = _write(
+        tmp_path,
+        f"""\
+        feature: x
+        tier: core
+        description: d
+        scenarios:
+          - name: s
+            steps:
+              - _test_edge:
+                  name: desk
+                  body: {body}
+        """,
+    )
+    if ok:
+        assert load_feature(path).scenarios[0].steps[0].kwargs == {"name": "desk", "body": body}
+        return
+    with pytest.raises(FeatureError, match=r"f\.yaml:9: .*not a real body type"):
+        load_feature(path)
 
 
 def test_failed_step_still_stops_processes(pytester: pytest.Pytester, tmp_path: Path) -> None:

@@ -74,3 +74,15 @@ async def load_assistant_step(ctx: ScenarioContext, id: str) -> None:
     """Load config/assistants/<id>.toml and check it validates."""
     assistant = load_assistant(ctx.repo_root / "config", id)
     ctx.state.setdefault("assistants", {})[id] = assistant
+
+
+@step("real_only_check")
+async def real_only_check(ctx: ScenarioContext) -> None:
+    """Run the real-only check (python -m assistant_testing.real_only) over this checkout."""
+    run = await ctx.processes.run(
+        "real-only",
+        [sys.executable, "-m", "assistant_testing.real_only", str(ctx.repo_root)],
+        timeout_s=60,
+    )
+    assert run.returncode == 0, run.output
+    assert "real-only check passed" in run.output, run.output

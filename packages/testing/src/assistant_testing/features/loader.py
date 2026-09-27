@@ -12,6 +12,12 @@ from assistant_testing.features.registry import REGISTRY, StepDef, describe
 
 Tier = Literal["core", "hw", "models"]
 
+REAL_BODIES = ("reachy", "console")
+"""The only body types e2e may use (E2E uses only real devices and the real stack)."""
+
+RealBody = Literal["reachy", "console"]
+"""Type for step parameters that take a body."""
+
 
 class FeatureError(Exception):
     """A feature file is invalid. The message starts with `path:line:`."""
@@ -81,6 +87,22 @@ def _line_of(node: yaml.Node | None, loc: Sequence[int | str]) -> int:
     return line
 
 
+def _bad_bodies(value: Any, loc: list[int | str]) -> list[tuple[list[int | str], Any]]:
+    """Every `body:` value anywhere in a step's arguments that is not a real body type."""
+    found: list[tuple[list[int | str], Any]] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "body" and not isinstance(child, dict | list):
+                if child not in REAL_BODIES:
+                    found.append(([*loc, "body"], child))
+            else:
+                found.extend(_bad_bodies(child, [*loc, str(key)]))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found.extend(_bad_bodies(child, [*loc, index]))
+    return found
+
+
 def load_feature(path: Path) -> Feature:
     text = path.read_text()
     try:
@@ -117,6 +139,12 @@ def load_feature(path: Path) -> Feature:
                 ((name, raw_args),) = raw_step.items()
             else:
                 raise fail(loc, "a step is a name, or a mapping with exactly one key (the name)")
+            for body_loc, body in _bad_bodies(raw_args, [*loc, name]):
+                raise fail(
+                    body_loc,
+                    f"step {name!r}: body {body!r} is not a real body type "
+                    f"(allowed: {', '.join(REAL_BODIES)}); e2e uses only real devices",
+                )
             definition = REGISTRY.get(name)
             if definition is None:
                 known = ", ".join(sorted(REGISTRY))

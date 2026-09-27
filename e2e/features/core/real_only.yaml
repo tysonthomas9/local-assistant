@@ -1,0 +1,9 @@
+feature: Real-only rule
+tier: core
+description: >
+  E2E uses only real devices and the real stack. The e2e files and the feature-runner and
+  step modules contain no test doubles, mocks or monkeypatching.
+scenarios:
+  - name: e2e code uses no test doubles
+    steps:
+      - real_only_check

@@ -7,20 +7,24 @@
 #   a  clone   git clone HEAD into a temp dir and `uv sync --locked` from scratch
 #   b  lint    ruff (check + format), basedpyright, import-linter
 #   c  unit    the few unit tests (pure logic) plus the schema snapshot
-#   d  core    e2e features, tier core
-#   e  legacy  the legacy suite as the README "Tests" section runs it (skipped with a reason
+#   d  real    real-only check: no mocks, monkeypatching or Fake/Mock/Stub/Dummy identifiers
+#              in e2e/ or the feature-runner and step modules (prints file:line)
+#   e  core    e2e features, tier core
+#   f  legacy  the legacy suite as the README "Tests" section runs it (skipped with a reason
 #              when its venv, fixtures or running stack are unavailable; legacy files are
 #              never modified)
-#   f  hw      e2e features, tier hw: FAILS if the robot is missing (/dev/ttyACM0 or the
+#   g  hw      e2e features, tier hw: FAILS if the robot is missing (/dev/ttyACM0 or the
 #              daemon at 127.0.0.1:8000)
-#   g  models  e2e features, tier models: FAILS if the GPUs or an LLM server are missing
-#   h  summary PASS/FAIL per stage; exits non-zero on any failure
+#   h  models  e2e features, tier models: FAILS if the GPUs or an LLM server are missing
+#   i  summary PASS/FAIL per stage; exits non-zero on any failure
+#
+# E2E uses only real devices and the real stack (see e2e/features/README.md).
 #
 # Environment:
 #   GATE_FAST=1       test the working tree in place instead of a fresh clone (uncommitted
 #                     changes are then included)
-#   GATE_NO_HW=1      skip stage f   } prints a loud WARNING: the gate is not complete
-#   GATE_NO_MODELS=1  skip stage g   }
+#   GATE_NO_HW=1      skip stage g   } prints a loud WARNING: the gate is not complete
+#   GATE_NO_MODELS=1  skip stage h   }
 #   LEGACY_PYTHON     python for the legacy suite (default: third_party/speech-to-speech/.venv
 #                     in this checkout or in the main checkout of this repository)
 set -euo pipefail
@@ -93,8 +97,8 @@ pytest_features() {
         note "0 features"
         return 0
     fi
-    passed="$(grep -Eo '[0-9]+ passed' "$out" | tail -1 || true)"
-    note "${passed:-no scenarios passed}"
+    passed="$(grep -E '^=+ .* in [0-9.]+s' "$out" | tail -1 | sed -E 's/^=+ (.*) in [0-9.]+s.*/\1/' || true)"
+    note "${passed:-no pytest summary}"
     return "$rc"
 }
 
@@ -128,8 +132,23 @@ stage_lint() {
 
 stage_unit() {
     local out="$STATE_DIR/unit.log"
+    local rc
+    set +e
     uv run --locked pytest packages tests -q -p no:cacheprovider 2>&1 | tee "$out"
-    note "$(grep -Eo '[0-9]+ passed' "$out" | tail -1)"
+    rc=${PIPESTATUS[0]}
+    set -e
+    note "$(grep -E '(passed|failed|error)' "$out" | tail -1)"
+    return "$rc"
+}
+
+stage_real_only() {
+    local out="$STATE_DIR/real-only.log" rc
+    set +e
+    uv run --locked python -m assistant_testing.real_only . 2>&1 | tee "$out"
+    rc=${PIPESTATUS[0]}
+    set -e
+    note "$(tail -1 "$out")"
+    return "$rc"
 }
 
 stage_core() { pytest_features core; }
@@ -237,32 +256,33 @@ fi
 
 run_stage a "fresh clone + uv sync" stage_clone
 if [[ "${RESULT[a]}" != "PASS" ]]; then
-    for id in b c d e f g; do STAGES+=("$id"); RESULT[$id]="NOT RUN"; NOTE[$id]="stage a failed"; done
+    for id in b c d e f g h; do STAGES+=("$id"); RESULT[$id]="NOT RUN"; NOTE[$id]="stage a failed"; done
 else
     run_stage b "lint: ruff, basedpyright, import-linter" stage_lint
     run_stage c "unit tests" stage_unit
-    run_stage d "e2e features, tier core" stage_core
-    run_stage e "legacy tests (local_backend)" stage_legacy
+    run_stage d "real-only check" stage_real_only
+    run_stage e "e2e features, tier core" stage_core
+    run_stage f "legacy tests (local_backend)" stage_legacy
     if [[ "${GATE_NO_HW:-}" == "1" ]]; then
         warn_loud "GATE_NO_HW=1: the robot (hw) features were NOT run."
         INCOMPLETE+=("hw")
-        run_stage f "e2e features, tier hw" stage_skipped_hw
+        run_stage g "e2e features, tier hw" stage_skipped_hw
     else
-        run_stage f "e2e features, tier hw" stage_hw
+        run_stage g "e2e features, tier hw" stage_hw
     fi
     if [[ "${GATE_NO_MODELS:-}" == "1" ]]; then
         warn_loud "GATE_NO_MODELS=1: the GPU/model-server (models) features were NOT run."
         INCOMPLETE+=("models")
-        run_stage g "e2e features, tier models" stage_skipped_models
+        run_stage h "e2e features, tier models" stage_skipped_models
     else
-        run_stage g "e2e features, tier models" stage_models
+        run_stage h "e2e features, tier models" stage_models
     fi
 fi
 
-banner "h) summary"
+banner "i) summary"
 declare -A TITLE=(
-    [a]="clone + uv sync" [b]="lint" [c]="unit" [d]="features: core"
-    [e]="legacy tests" [f]="features: hw" [g]="features: models"
+    [a]="clone + uv sync" [b]="lint" [c]="unit" [d]="real-only check" [e]="features: core"
+    [f]="legacy tests" [g]="features: hw" [h]="features: models"
 )
 failed=0
 for id in "${STAGES[@]}"; do

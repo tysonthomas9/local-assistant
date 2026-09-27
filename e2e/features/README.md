@@ -1,9 +1,19 @@
+E2E uses only real devices and the real stack: the real Reachy Mini, real brain and edge processes over real EdgeLink, and real models. No fakes, mocks, stubs, simulators, recorded replies or monkeypatching. Faults are injected for real.
+
 # E2E feature files
 
 Each YAML file here is one feature. Every scenario in it becomes one pytest item, run by the
 plugin in `packages/testing` (`assistant_testing.features`). Scenarios drive **real** code
-and processes. There are no fakes: a scenario that needs the robot is tier `hw`, and one
-that needs the GPUs and model servers is tier `models`.
+and processes. A scenario that needs the robot is tier `hw`, and one that needs the GPUs and
+model servers is tier `models`.
+
+The rule is enforced. `scripts/gate.sh` runs a "real-only check"
+(`python -m assistant_testing.real_only`) before the e2e stages, and the feature
+`core/real_only.yaml` runs the same check. It fails on imports of the mock libraries, on
+monkeypatching, and on any identifier that starts with Fake, Mock, Stub or Dummy followed by a
+capital letter. It prints the offending file and line. It scans `e2e/` and the runner and step
+modules; the exact rules are in `packages/testing/src/assistant_testing/real_only.py`.
+Wherever a step takes a `body` argument, it must be a real body type: `reachy` or `console`.
 
 ```yaml
 feature: EdgeLink handshake          # short name
@@ -47,6 +57,7 @@ The parameters after `ctx` are the step's arguments.
 | `load_config` | `profile: str?`, `env: {NAME: value}?` | Loads `config/` (+ profile). Only `env` is used as the environment |
 | `expect_config` | `path: str`, `equals: any` | Compares a dotted path, e.g. `llm.impl`, of the last loaded config |
 | `load_assistant` | `id: str` | Loads and validates `config/assistants/<id>.toml` |
+| `real_only_check` | none | Runs the real-only check over this checkout in a subprocess |
 
 ### EdgeLink contracts (`steps/contracts.py`)
 
