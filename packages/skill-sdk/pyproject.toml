@@ -1,0 +1,13 @@
+[project]
+name = "assistant-skill-sdk"
+version = "0.1.0"
+description = "Skill SDK: Skill, @tool, @on_event, SkillContext, manifest"
+requires-python = ">=3.12,<3.13"
+dependencies = ["assistant-contracts"]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+assistant-contracts = { workspace = true }

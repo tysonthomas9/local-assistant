@@ -1,0 +1,2372 @@
+{
+  "messages": {
+    "attention": {
+      "properties": {
+        "assistant": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Assistant"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "state": {
+          "enum": [
+            "idle",
+            "listening",
+            "thinking",
+            "speaking",
+            "muted",
+            "sleeping"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "attention",
+          "default": "attention",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "title": "Attention",
+      "type": "object"
+    },
+    "duck": {
+      "properties": {
+        "channel": {
+          "enum": [
+            "speech",
+            "alert",
+            "media"
+          ],
+          "title": "Channel",
+          "type": "string"
+        },
+        "gain_db": {
+          "description": "0 restores the channel; negative ducks it.",
+          "maximum": 0.0,
+          "title": "Gain Db",
+          "type": "number"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "duck",
+          "default": "duck",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "channel",
+        "gain_db"
+      ],
+      "title": "Duck",
+      "type": "object"
+    },
+    "error": {
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "error",
+          "default": "error",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "Error",
+      "type": "object"
+    },
+    "event": {
+      "$defs": {
+        "JsonValue": {}
+      },
+      "properties": {
+        "data": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Data",
+          "type": "object"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "button",
+            "touch",
+            "imu_tap"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "event",
+          "default": "event",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "EdgeEvent",
+      "type": "object"
+    },
+    "express": {
+      "$defs": {
+        "ExpressName": {
+          "description": "Semantic expression intents the brain may send in `express`.",
+          "enum": [
+            "random",
+            "happy",
+            "excited",
+            "loving",
+            "grateful",
+            "success",
+            "thinking",
+            "attentive",
+            "confused",
+            "uncertain",
+            "sad",
+            "downcast",
+            "lonely",
+            "angry",
+            "irritated",
+            "displeased",
+            "disgusted",
+            "scared",
+            "anxious",
+            "surprised",
+            "amazed",
+            "calming",
+            "relief",
+            "impatient",
+            "embarrassed",
+            "bored",
+            "tired",
+            "sleepy",
+            "yes",
+            "yes_understanding",
+            "no",
+            "no_sad",
+            "no_excited",
+            "no_firm",
+            "welcoming",
+            "greeting",
+            "goodbye",
+            "go_away",
+            "helpful",
+            "dance",
+            "electric",
+            "dying"
+          ],
+          "title": "ExpressName",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "intensity": {
+          "default": 1.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Intensity",
+          "type": "number"
+        },
+        "name": {
+          "$ref": "#/$defs/ExpressName"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "express",
+          "default": "express",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Express",
+      "type": "object"
+    },
+    "flush": {
+      "description": "Stop and drop queued audio for one stream, or for all.",
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "stream_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "const": "all",
+              "type": "string"
+            }
+          ],
+          "title": "Stream Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "flush",
+          "default": "flush",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream_id"
+      ],
+      "title": "Flush",
+      "type": "object"
+    },
+    "hello": {
+      "$defs": {
+        "AudioInCaps": {
+          "properties": {
+            "aec": {
+              "default": "none",
+              "enum": [
+                "hw",
+                "sw",
+                "none"
+              ],
+              "title": "Aec",
+              "type": "string"
+            },
+            "rate": {
+              "default": 16000,
+              "title": "Rate",
+              "type": "integer"
+            }
+          },
+          "title": "AudioInCaps",
+          "type": "object"
+        },
+        "AudioOutCaps": {
+          "properties": {
+            "rates": {
+              "items": {
+                "type": "integer"
+              },
+              "title": "Rates",
+              "type": "array"
+            }
+          },
+          "title": "AudioOutCaps",
+          "type": "object"
+        },
+        "BodyInfo": {
+          "properties": {
+            "capabilities": {
+              "$ref": "#/$defs/Capabilities"
+            },
+            "kind": {
+              "description": "Body driver kind, e.g. \"reachy_mini\", \"sounddevice\", \"null\".",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "BodyInfo",
+          "type": "object"
+        },
+        "CameraCaps": {
+          "properties": {
+            "h": {
+              "exclusiveMinimum": 0,
+              "title": "H",
+              "type": "integer"
+            },
+            "w": {
+              "exclusiveMinimum": 0,
+              "title": "W",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "w",
+            "h"
+          ],
+          "title": "CameraCaps",
+          "type": "object"
+        },
+        "Capabilities": {
+          "description": "What an edge (and its body) can do. Optional parts are None when absent.",
+          "properties": {
+            "audio_in": {
+              "$ref": "#/$defs/AudioInCaps"
+            },
+            "audio_out": {
+              "$ref": "#/$defs/AudioOutCaps"
+            },
+            "camera": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CameraCaps"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "doa": {
+              "default": false,
+              "title": "Doa",
+              "type": "boolean"
+            },
+            "motion": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MotionCaps"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "opus": {
+              "default": false,
+              "title": "Opus",
+              "type": "boolean"
+            },
+            "wake": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WakeCaps"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "title": "Capabilities",
+          "type": "object"
+        },
+        "MotionCaps": {
+          "properties": {
+            "attention": {
+              "default": false,
+              "title": "Attention",
+              "type": "boolean"
+            },
+            "expressions": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Expressions",
+              "type": "array"
+            },
+            "look_at": {
+              "items": {
+                "enum": [
+                  "user",
+                  "doa",
+                  "world",
+                  "image"
+                ],
+                "type": "string"
+              },
+              "title": "Look At",
+              "type": "array"
+            },
+            "sequence": {
+              "default": false,
+              "title": "Sequence",
+              "type": "boolean"
+            }
+          },
+          "title": "MotionCaps",
+          "type": "object"
+        },
+        "WakeCaps": {
+          "properties": {
+            "engines": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Engines",
+              "type": "array"
+            }
+          },
+          "title": "WakeCaps",
+          "type": "object"
+        }
+      },
+      "description": "First message on a connection.",
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/BodyInfo"
+        },
+        "device_id": {
+          "minLength": 1,
+          "title": "Device Id",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "last_seq": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Seq"
+        },
+        "proto": {
+          "default": "1.0",
+          "pattern": "^\\d+\\.\\d+$",
+          "title": "Proto",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "sw_version": {
+          "title": "Sw Version",
+          "type": "string"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "hello",
+          "default": "hello",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "device_id",
+        "sw_version",
+        "body"
+      ],
+      "title": "Hello",
+      "type": "object"
+    },
+    "look_at": {
+      "$defs": {
+        "LookAtDoa": {
+          "properties": {
+            "doa": {
+              "description": "Direction of arrival in degrees, 0 = straight ahead.",
+              "title": "Doa",
+              "type": "number"
+            },
+            "kind": {
+              "const": "doa",
+              "default": "doa",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "required": [
+            "doa"
+          ],
+          "title": "LookAtDoa",
+          "type": "object"
+        },
+        "LookAtImage": {
+          "properties": {
+            "kind": {
+              "const": "image",
+              "default": "image",
+              "title": "Kind",
+              "type": "string"
+            },
+            "u": {
+              "description": "Horizontal position, 0 = left edge.",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "U",
+              "type": "number"
+            },
+            "v": {
+              "description": "Vertical position, 0 = top edge.",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "V",
+              "type": "number"
+            }
+          },
+          "required": [
+            "u",
+            "v"
+          ],
+          "title": "LookAtImage",
+          "type": "object"
+        },
+        "LookAtUser": {
+          "properties": {
+            "kind": {
+              "const": "user",
+              "default": "user",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "title": "LookAtUser",
+          "type": "object"
+        },
+        "LookAtWorld": {
+          "properties": {
+            "kind": {
+              "const": "world",
+              "default": "world",
+              "title": "Kind",
+              "type": "string"
+            },
+            "x": {
+              "title": "X",
+              "type": "number"
+            },
+            "y": {
+              "title": "Y",
+              "type": "number"
+            },
+            "z": {
+              "title": "Z",
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y",
+            "z"
+          ],
+          "title": "LookAtWorld",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "target": {
+          "discriminator": {
+            "mapping": {
+              "doa": "#/$defs/LookAtDoa",
+              "image": "#/$defs/LookAtImage",
+              "user": "#/$defs/LookAtUser",
+              "world": "#/$defs/LookAtWorld"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/LookAtUser"
+            },
+            {
+              "$ref": "#/$defs/LookAtDoa"
+            },
+            {
+              "$ref": "#/$defs/LookAtWorld"
+            },
+            {
+              "$ref": "#/$defs/LookAtImage"
+            }
+          ],
+          "title": "Target"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "look_at",
+          "default": "look_at",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "LookAt",
+      "type": "object"
+    },
+    "mic.close": {
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "mic.close",
+          "default": "mic.close",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "MicClose",
+      "type": "object"
+    },
+    "mic.follow_up": {
+      "description": "Reopen the mic without a wake word. The edge caps it at 15 s and refuses while muted.",
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Seconds",
+          "type": "number"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "mic.follow_up",
+          "default": "mic.follow_up",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seconds"
+      ],
+      "title": "MicFollowUp",
+      "type": "object"
+    },
+    "play_sound": {
+      "description": "Play a cached clip; the brain pushes missing clips as binary 0x04.",
+      "properties": {
+        "channel": {
+          "default": "alert",
+          "enum": [
+            "speech",
+            "alert",
+            "media"
+          ],
+          "title": "Channel",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "sound_id": {
+          "title": "Sound Id",
+          "type": "string"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "play_sound",
+          "default": "play_sound",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sound_id"
+      ],
+      "title": "PlaySound",
+      "type": "object"
+    },
+    "playback": {
+      "description": "The edge playback clock: started, progress every 200 ms, then done or flushed.",
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "played_ms": {
+          "minimum": 0,
+          "title": "Played Ms",
+          "type": "integer"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "state": {
+          "enum": [
+            "started",
+            "progress",
+            "done",
+            "flushed"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "stream_id": {
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Stream Id",
+          "type": "integer"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "playback",
+          "default": "playback",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream_id",
+        "played_ms",
+        "state"
+      ],
+      "title": "Playback",
+      "type": "object"
+    },
+    "privacy": {
+      "description": "edge->brain: the authoritative mute state. brain->edge: a request only.",
+      "properties": {
+        "hard": {
+          "default": false,
+          "title": "Hard",
+          "type": "boolean"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "muted": {
+          "title": "Muted",
+          "type": "boolean"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "privacy",
+          "default": "privacy",
+          "title": "Type",
+          "type": "string"
+        },
+        "until": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Until"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "muted"
+      ],
+      "title": "Privacy",
+      "type": "object"
+    },
+    "result": {
+      "$defs": {
+        "JsonValue": {}
+      },
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/JsonValue",
+          "default": null
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "re": {
+          "description": "The id of the request this answers.",
+          "minLength": 1,
+          "title": "Re",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "result",
+          "default": "result",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "re",
+        "ok"
+      ],
+      "title": "Result",
+      "type": "object"
+    },
+    "snapshot": {
+      "description": "Camera request. The edge answers with `result` (re = this id) and 0x03 frames on `slot`.",
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "max_side": {
+          "default": 1024,
+          "exclusiveMinimum": 0,
+          "title": "Max Side",
+          "type": "integer"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "slot": {
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "snapshot",
+          "default": "snapshot",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slot"
+      ],
+      "title": "Snapshot",
+      "type": "object"
+    },
+    "speak.begin": {
+      "description": "Binary 0x02 frames with `stream == stream_id` follow until `speak.end`.",
+      "properties": {
+        "channel": {
+          "default": "speech",
+          "enum": [
+            "speech",
+            "alert",
+            "media"
+          ],
+          "title": "Channel",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "rate": {
+          "default": 24000,
+          "exclusiveMinimum": 0,
+          "title": "Rate",
+          "type": "integer"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "stream_id": {
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Stream Id",
+          "type": "integer"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "speak.begin",
+          "default": "speak.begin",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream_id"
+      ],
+      "title": "SpeakBegin",
+      "type": "object"
+    },
+    "speak.end": {
+      "properties": {
+        "channel": {
+          "default": "speech",
+          "enum": [
+            "speech",
+            "alert",
+            "media"
+          ],
+          "title": "Channel",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "stream_id": {
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Stream Id",
+          "type": "integer"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "speak.end",
+          "default": "speak.end",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream_id"
+      ],
+      "title": "SpeakEnd",
+      "type": "object"
+    },
+    "text.input": {
+      "description": "Typed input (dev and typing clients only).",
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "text.input",
+          "default": "text.input",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "TextInput",
+      "type": "object"
+    },
+    "timer.sync": {
+      "$defs": {
+        "TimerJob": {
+          "properties": {
+            "at_utc": {
+              "format": "date-time",
+              "title": "At Utc",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "sound": {
+              "title": "Sound",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "at_utc",
+            "sound"
+          ],
+          "title": "TimerJob",
+          "type": "object"
+        }
+      },
+      "description": "Idempotent mirror of the device's timers, so they ring even while offline.",
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "jobs": {
+          "items": {
+            "$ref": "#/$defs/TimerJob"
+          },
+          "title": "Jobs",
+          "type": "array"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "timer.sync",
+          "default": "timer.sync",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "title": "TimerSync",
+      "type": "object"
+    },
+    "vad": {
+      "properties": {
+        "barge_in": {
+          "default": false,
+          "title": "Barge In",
+          "type": "boolean"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "played_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Played Ms"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "state": {
+          "enum": [
+            "start",
+            "end"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "stream_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stream Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "vad",
+          "default": "vad",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "title": "Vad",
+      "type": "object"
+    },
+    "wake": {
+      "properties": {
+        "doa": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doa"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "wake",
+          "default": "wake",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        },
+        "word": {
+          "title": "Word",
+          "type": "string"
+        }
+      },
+      "required": [
+        "word",
+        "score"
+      ],
+      "title": "Wake",
+      "type": "object"
+    },
+    "wake.cancel": {
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "reason": {
+          "enum": [
+            "lost_arbitration",
+            "not_allowed"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "wake.cancel",
+          "default": "wake.cancel",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "WakeCancel",
+      "type": "object"
+    },
+    "welcome": {
+      "$defs": {
+        "TimerJob": {
+          "properties": {
+            "at_utc": {
+              "format": "date-time",
+              "title": "At Utc",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "sound": {
+              "title": "Sound",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "at_utc",
+            "sound"
+          ],
+          "title": "TimerJob",
+          "type": "object"
+        },
+        "WakeWord": {
+          "properties": {
+            "model": {
+              "title": "Model",
+              "type": "string"
+            },
+            "threshold": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Threshold",
+              "type": "number"
+            },
+            "word": {
+              "title": "Word",
+              "type": "string"
+            }
+          },
+          "required": [
+            "word",
+            "model",
+            "threshold"
+          ],
+          "title": "WakeWord",
+          "type": "object"
+        },
+        "WelcomeAudio": {
+          "properties": {
+            "opus": {
+              "default": false,
+              "title": "Opus",
+              "type": "boolean"
+            },
+            "out_rate": {
+              "default": 24000,
+              "title": "Out Rate",
+              "type": "integer"
+            }
+          },
+          "title": "WelcomeAudio",
+          "type": "object"
+        }
+      },
+      "description": "Reply to `hello`; also re-sent state after a reconnect.",
+      "properties": {
+        "audio": {
+          "$ref": "#/$defs/WelcomeAudio"
+        },
+        "follow_up_max_s": {
+          "default": 10.0,
+          "minimum": 0,
+          "title": "Follow Up Max S",
+          "type": "number"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "mute": {
+          "default": false,
+          "title": "Mute",
+          "type": "boolean"
+        },
+        "session_id": {
+          "minLength": 1,
+          "title": "Session Id",
+          "type": "string"
+        },
+        "timers": {
+          "items": {
+            "$ref": "#/$defs/TimerJob"
+          },
+          "title": "Timers",
+          "type": "array"
+        },
+        "traceparent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Traceparent"
+        },
+        "ts_mono_ns": {
+          "minimum": 0,
+          "title": "Ts Mono Ns",
+          "type": "integer"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "welcome",
+          "default": "welcome",
+          "title": "Type",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "default": 1,
+          "title": "V",
+          "type": "integer"
+        },
+        "wake_words": {
+          "items": {
+            "$ref": "#/$defs/WakeWord"
+          },
+          "title": "Wake Words",
+          "type": "array"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "Welcome",
+      "type": "object"
+    }
+  },
+  "protocol_version": "1.0"
+}

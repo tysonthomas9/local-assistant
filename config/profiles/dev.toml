@@ -1,0 +1,18 @@
+# Development on one machine: loopback only, FakeLLM, readable logs.
+# Point [llm] at a running vLLM or Ollama (or set ASSISTANT__LLM__IMPL=openai) for real replies.
+
+[net]
+edgelink_bind = "127.0.0.1:8770"
+
+[llm]
+impl = "fake"
+
+[edge]
+body = "null"
+
+[edge.audio]
+aec = "none"
+
+[observability]
+log_level = "debug"
+log_format = "console"

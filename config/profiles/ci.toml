@@ -1,0 +1,17 @@
+# Hosted CI: no GPU, robot, microphone or network. Everything runs on fakes over loopback.
+
+[net]
+edgelink_bind = "127.0.0.1:8770"
+
+[llm]
+impl = "fake"
+
+[edge]
+body = "null"
+
+[edge.audio]
+aec = "none"
+
+[observability]
+log_level = "warning"
+log_format = "json"

@@ -1,0 +1,15 @@
+[project]
+name = "assistant-edge"
+version = "0.1.0"
+description = "Edge agent: audio, wake, VAD, earcons, bodies"
+requires-python = ">=3.12,<3.13"
+dependencies = ["assistant-contracts", "assistant-core", "assistant-link"]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+assistant-contracts = { workspace = true }
+assistant-core = { workspace = true }
+assistant-link = { workspace = true }

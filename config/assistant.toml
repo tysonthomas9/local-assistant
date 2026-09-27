@@ -1,0 +1,71 @@
+# Base config for the new assistant stack (proposal section 5.5).
+# Precedence: code defaults < this file < config/profiles/<profile>.toml
+#             < env ASSISTANT__SECTION__KEY < CLI overrides.
+
+[net]
+edgelink_bind = "0.0.0.0:8770"     # EdgeLink is the only LAN-facing port; the dev profile keeps it on loopback
+admin_bind = "127.0.0.1:8771"
+# tls_cert = "data/tls/brain.crt"  # set both to enable wss:// (task S7 creates a dev cert)
+# tls_key = "data/tls/brain.key"
+
+[privacy]
+online_skills = false              # online skills stay hidden unless enabled here
+hard_mute_button = true
+
+[brain]
+data_dir = "~/.local/share/assistant"
+default_assistant = "jarvis"
+wake_arbitration_ms = 200
+follow_up_s = 10
+announce_devices = ["lite"]
+
+[engine]
+impl = "basic"                     # "realtime" (HF speech-to-speech) becomes the default in phase 2
+vad_stop_s = 0.2
+smart_turn = true
+
+[llm]
+# vLLM is the default server (GPU0, OpenAI-compatible API).
+impl = "openai"
+base_url = "http://127.0.0.1:8773/v1"
+model = "gemma4-26b"
+# Ollama fallback: same API, only these two lines change.
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "gemma4:26b"
+ctx = 16384
+max_concurrency = 8                # priority gate: requests in flight across all sessions
+reserved_voice_slots = 1           # always keep one slot free for a voice turn
+send_priority = true               # needs vLLM --scheduling-policy priority
+priority = { voice = 0, proactive = 5, background = 10 }
+
+[stt]
+base_url = "http://127.0.0.1:8772"
+model = "parakeet-tdt-0.6b-v3"
+
+[tts]
+base_url = "http://127.0.0.1:8772"
+backend = "qwen3-ggml"
+
+[edge]
+device_id = "lite"
+room = "living"
+brain_url = "mdns"
+body = "reachy"
+
+[edge.audio]
+input = "default"
+output = "default"
+aec = "hw"
+
+[edge.wake]
+engine = "openwakeword"
+max_window_s = 15
+
+[body.reachy]
+connection = "localhost_only"
+expressions = "config/bodies/reachy.toml"
+
+[observability]
+otlp = ""
+log_level = "info"
+capture_content = false
