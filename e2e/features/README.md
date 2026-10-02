@@ -64,8 +64,9 @@ scenario starts is stopped in teardown, even when a step fails.
 
 ### The models tier
 
-`models` features use the real models on this PC: Ollama with `reachy-gemma4` (the system
-service at 127.0.0.1:11434) and the speech server `servers/speech` (Parakeet TDT 0.6B v3 STT and
+`models` features use the real models on this PC, each on its own GPU: our LLM server
+(`scripts/llm_server.sh`: `ollama serve` with `reachy-gemma4` on GPU0, see `docs/dev-setup.md`,
+"The LLM server"; the system Ollama service is never used) and the speech server `servers/speech` (Parakeet TDT 0.6B v3 STT and
 Qwen3-TTS 1.7B CustomVoice, about 7 GB on GPU1). Once:
 
 ```bash
@@ -75,13 +76,14 @@ uv sync --locked --project servers/speech          # its own venv, servers/speec
 The model weights come from the Hugging Face cache (`~/.cache/huggingface/hub`:
 `models--nvidia--parakeet-tdt-0.6b-v3` and `models--Serveurperso--Qwen3-TTS-GGUF`); the server
 runs offline, so download them once with `--online` (see `servers/speech/README.md`). A feature
-uses the speech server already serving on 127.0.0.1:8772 (the gate starts one there) or starts
-one of its own on GPU1 for the scenario. No GPU, a busy GPU1 (less than 8 GB free), missing
-weights, no Ollama or an Ollama not pinned to GPU0 (the one-time setting in
-`docs/dev-setup.md`, "Ollama on GPU0": else it spreads `reachy-gemma4` over both GPUs) fail the
-features; they are never skipped. To share one server across a run, start it first:
+uses the servers already serving on 127.0.0.1:8773 (LLM) and 127.0.0.1:8772 (speech), as the
+gate starts them, or starts its own for the scenario (the LLM on GPU0, the speech server on
+GPU1). No GPU, a busy GPU1 (less than 8 GB free), the LLM not entirely on GPU0, missing weights
+or models fail the features; they are never skipped. To share both servers across a run, start
+them first:
 
 ```bash
+scripts/llm_server.sh &
 CUDA_VISIBLE_DEVICES=1 CUDA_DEVICE_ORDER=PCI_BUS_ID servers/speech/.venv/bin/python -m assistant_speech --port 8772
 uv run pytest e2e -m models
 ```
@@ -236,14 +238,15 @@ server}`, `restart_process`, `client_reconnects_within`, ...). The brain does no
 `RECV` lines; what it did is read from its event lines (`assistant_brain.console`) and its
 loopback admin endpoint (turn log, LLM priority gate, LLM request log). The `echo` engine
 needs no models (tier core); the `basic` engine asks the real Ollama with `reachy-gemma4`
-(tier models): the system service at 127.0.0.1:11434, or a real `ollama serve` of the
-scenario's own (`llm: test`) that a scenario may kill without touching the system service.
+(tier models) through the stack's LLM server on GPU0 (127.0.0.1:8773, else the scenario's
+own), or a separate one of the scenario's own (`llm: test`) that a scenario may kill without
+touching the stack's server.
 The edge only gets `attention` if its body advertises `motion.attention` (the console and
 reachy bodies do; the link client console does not, so use `brain_state_is` with it).
 
 | Step | Arguments | Does |
 |---|---|---|
-| `start_brain` | `engine: echo \| basic = echo`, `llm: system \| test = system`, `follow_up_s: float?`, `speech = false`, `set: map?` (config overrides, e.g. `{llm.max_concurrency: 3}`) | Starts the brain on free loopback ports (EdgeLink and admin) and waits for LISTENING. `speech: true` (basic engine): voice turns go through the scenario's speech server's STT and replies are spoken by its TTS (`speech_server_running` or `start_speech_server` first); otherwise replies are speak text |
+| `start_brain` | `engine: echo \| basic = echo`, `llm: stack \| test = stack`, `follow_up_s: float?`, `speech = false`, `set: map?` (config overrides, e.g. `{llm.max_concurrency: 3}`) | Starts the brain on free loopback ports (EdgeLink and admin) and waits for LISTENING. `engine: basic` uses the stack's LLM server (`llm: stack`: the one on 127.0.0.1:8773, else the scenario's own, with `reachy-gemma4` checked to be entirely on the GPU) or the scenario's own killable one (`llm: test`). `speech: true` (basic engine): voice turns go through the scenario's speech server's STT and replies are spoken by its TTS (`speech_server_running` or `start_speech_server` first); otherwise replies are speak text |
 | `brain_output_clean` | none | No traceback, bus handler failure, BRAIN-ERROR or error log line from the brain |
 | `edge_shows_reply` | `client`, `text: str?`, `containing: str?`, `within_s = 60` | The next reply the edge shows (SAY, from `speak.begin.text`): exactly `text`, or containing `containing` (case-insensitive) |
 | `attention_sequence_is` | `client`, `states: list[str]`, `within_s = 30` | The edge received exactly these `attention` states next, in order |
@@ -258,7 +261,7 @@ reachy bodies do; the link client console does not, so use `brain_state_is` with
 | `llm_gate_never_exceeded` | `max_in_flight` | From the gate's event log: never more requests at once |
 | `voice_request_admitted_first` | none | From the gate's event log: the voice request was admitted before every background request already waiting (and some were) |
 | `llm_request_log` | `priority: bool`, `classes: map?` | Every request carries `priority` (with this value per class), or none does |
-| `start_llm_server` / `kill_llm_server` / `restart_llm_server` | `within_s = 30` | A real `ollama serve` of the scenario's own on a free loopback port (the system model store), on GPU0 only; killed for real with SIGKILL (runners included), restarted on the same port |
+| `start_llm_server` / `kill_llm_server` / `restart_llm_server` | `within_s = 30` | A real LLM server of the scenario's own (`scripts/llm_server.sh`: `ollama serve` on GPU0, the system model store) on a free loopback port; it unloads `reachy-gemma4` from the stack's server first; killed for real with SIGKILL (runners included), restarted on the same port |
 | `robot_pose_follows` | `client`, `text`, `states: list[str]`, `tolerance_deg = 6`, `max_head_deg = 10` | Types `text`; the body's MOTION lines follow the attention `states`; a sampler on the robot's machine checks each pose within `tolerance_deg` of neutral turned by the state's roll/pitch, and no more than `max_head_deg` from neutral (remembers the start pose for `robot_back_at_rest`) |
 
 ### Speech (`steps/speech.py`)
@@ -273,7 +276,7 @@ punctuation.
 |---|---|---|
 | `speech_server_running` | none | Uses the speech server serving on 127.0.0.1:8772, else starts one of the scenario's own on GPU1 (fails if GPU1 has less than 8 GB free); checks it runs on a GPU |
 | `start_speech_server` / `stop_speech_server` / `kill_speech_server` / `restart_speech_server` | none | A speech server of the scenario's own on a free loopback port; stopped (SIGTERM) or killed for real (SIGKILL), then restarted on the same port; it must stop or start answering |
-| `ollama_serves` | `model = reachy-gemma4` | The system Ollama answers, has the model and is pinned to GPU0 |
+| `ollama_serves` | `model = reachy-gemma4` | The stack's LLM server (127.0.0.1:8773, else the scenario's own) answers, has the model and holds it entirely on GPU0 |
 | `transcribe_golden_wav` | `name` | The speech server transcribes `tests/fixtures/audio/<name>.wav` (STT time recorded) |
 | `transcript_matches` | `text: str?`, `max_wer = 0.2` | The last transcript matches `text` (default: what the golden WAV or the TTS said) with at most this word error rate |
 | `tts_gives_audio` | `text`, `voice = ryan`, `min_s = 0.5`, `max_s = 30`, `min_voiced = 0.4` | The TTS streams `min_s` to `max_s` seconds of audio, first audio before the end, with at least `min_voiced` of its 20 ms frames above -45 dBFS (first-audio time recorded) |

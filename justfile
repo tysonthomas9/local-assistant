@@ -36,6 +36,10 @@ gate:
 schema-snapshot:
     UPDATE_SCHEMA_SNAPSHOT=1 uv run pytest tests/contract/test_edgelink_schema.py
 
+# our LLM server: ollama serve on 127.0.0.1:8773, GPU0 only (docs/dev-setup.md)
+llm:
+    scripts/llm_server.sh
+
 # brain + edge dev runner (task S6)
 dev:
     @echo "just dev: not implemented yet (skeleton task S6 adds process-compose)"

@@ -37,7 +37,7 @@ from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.registry import step
 from assistant_testing.processes import RemoteProcess
 from assistant_testing.steps import edge_host as edge_host_steps
-from assistant_testing.steps.brain import LLM_MODEL, SYSTEM_LLM, admin, system_ollama_unpinned
+from assistant_testing.steps.brain import LLM_MODEL, admin, ensure_llm_server
 from assistant_testing.steps.link import SERVER, _client_name, _expect, _free_port, _get_lines
 
 SPEECH = "speech"
@@ -225,11 +225,9 @@ async def _start_own(ctx: ScenarioContext) -> dict[str, Any]:
     assert free is not None, f"nvidia-smi cannot read GPU{SPEECH_GPU}: the speech server needs it"
     print(f"GPU{SPEECH_GPU}: {free} MiB free")
     if free < MIN_FREE_GPU_MIB:
-        unpinned = system_ollama_unpinned()
         raise AssertionError(
             f"GPU{SPEECH_GPU} has only {free} MiB free (the speech server needs "
             f"{MIN_FREE_GPU_MIB}); on it: {_gpu_apps(SPEECH_GPU) or 'unknown'}"
-            + (f"; {unpinned}" if unpinned else "")
         )
     root = ctx.repo_root
     venv = root / "servers/speech/.venv"
@@ -323,19 +321,18 @@ async def restart_speech_server(ctx: ScenarioContext) -> None:
 
 @step("ollama_serves")
 async def ollama_serves(ctx: ScenarioContext, model: str = LLM_MODEL) -> None:
-    """The system Ollama answers, has `model` (default reachy-gemma4) and is pinned to GPU0
-    (so the speech server always fits on GPU1, see `brain.system_ollama_unpinned`)."""
-    del ctx
-    unpinned = await asyncio.to_thread(system_ollama_unpinned)
-    assert unpinned is None, unpinned
+    """The stack's LLM server (`brain.ensure_llm_server`: the one on 127.0.0.1:8773, else the
+    scenario's own) answers, has `model` (default reachy-gemma4) and holds it entirely on GPU0
+    (so GPU1 stays the speech server's)."""
+    url = await ensure_llm_server(ctx)
     try:
-        data, _ = await asyncio.to_thread(_request, "GET", f"{SYSTEM_LLM}/api/tags", None)
+        data, _ = await asyncio.to_thread(_request, "GET", f"{url}/api/tags", None)
     except OSError as exc:
-        raise AssertionError(f"Ollama at {SYSTEM_LLM} does not answer: {exc}") from exc
+        raise AssertionError(f"the LLM server at {url} does not answer: {exc}") from exc
     names = [m.get("name", "") for m in json.loads(data).get("models", [])]
     found = [n for n in names if n == model or n.split(":")[0] == model]
-    assert found, f"Ollama at {SYSTEM_LLM} has no {model!r} (it has {names})"
-    print(f"Ollama at {SYSTEM_LLM} serves {found[0]}")
+    assert found, f"the LLM server at {url} has no {model!r} (it has {names})"
+    print(f"the LLM server at {url} serves {found[0]}")
 
 
 # ---------------------------------------------------------------- STT and TTS directly

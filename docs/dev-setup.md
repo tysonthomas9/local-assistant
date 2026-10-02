@@ -42,32 +42,36 @@ the script). Gitignored legacy resources (`.venv`, `reachy_mini_conversation_app
 checkout, so the legacy suite runs against the real legacy environment. Exit codes: 0 pass,
 1 fail, 3 incomplete (`GATE_NO_HW=1` or `GATE_NO_MODELS=1`).
 
-Before the robot (hw) and models stages the gate checks the models: Ollama with
-`reachy-gemma4`, and the speech server (`servers/speech`, see its README) on 127.0.0.1:8772.
-If none is serving there it syncs the speech server's venv and starts one on GPU1, and stops
-it again at the end; a server it did not start is left alone. No GPU, a busy GPU1, no
-Ollama or an Ollama not pinned to GPU0 (below) fail those stages. Timings of the spoken turns
-are kept in `artifacts/` of the checkout the gate was run from. See "The models tier" in
+Before the robot (hw) and models stages the gate stops the old assistant if it runs (the
+legacy stack holds the GPUs and the robot) and brings up the models, each on its own GPU:
+
+- the LLM: our own LLM server (below) on 127.0.0.1:8773, on GPU0;
+- the speech server (`servers/speech`, see its README) on 127.0.0.1:8772, on GPU1: the gate
+  syncs its venv and starts it.
+
+A server already serving on its port is used and left alone; the gate stops only what it
+started, after the models stage. No GPU, a busy GPU, a model not entirely on its GPU or a
+server that does not start fail those stages. Timings of the spoken turns are kept in
+`artifacts/` of the checkout the gate was run from. See "The models tier" in
 `e2e/features/README.md` to run the models features by hand.
 
-### Ollama on GPU0 (one-time setting)
+### The LLM server
 
-The LLM runs on GPU0 and the speech server on GPU1. Left alone, the system Ollama spreads
-`reachy-gemma4` (about 22 GB at its 32k context) over both GPUs, and then the speech server
-(about 7 GB) no longer fits on GPU1, or the reverse, depending on which loads first. Pin the
-service to GPU0 once. Ollama also drives the GPUs through Vulkan, which ignores
-`CUDA_VISIBLE_DEVICES`, so Vulkan is turned off:
+The stack runs its own LLM server, `scripts/llm_server.sh` (`[llm] base_url` defaults to it;
+vLLM takes the same port later):
 
 ```bash
-sudo mkdir -p /etc/systemd/system/ollama.service.d
-printf '[Service]\nEnvironment="CUDA_VISIBLE_DEVICES=0" "CUDA_DEVICE_ORDER=PCI_BUS_ID" "OLLAMA_VULKAN=0"\n' \
-  | sudo tee /etc/systemd/system/ollama.service.d/gpu0.conf
-sudo systemctl daemon-reload && sudo systemctl restart ollama
+scripts/llm_server.sh            # ollama serve on 127.0.0.1:8773 until Ctrl-C; or `uv run just llm`
 ```
 
-The gate and the models features check this setting (`systemctl show ollama`) and fail,
-naming it, while it is missing. An `ollama serve` that a feature starts itself gets the same
-environment.
+It is `ollama serve` on GPU0 only (`CUDA_VISIBLE_DEVICES=0`, `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
+and `OLLAMA_VULKAN=0`, since Ollama's Vulkan backend ignores `CUDA_VISIBLE_DEVICES`), so GPU1
+always stays free for the speech server, whichever loads first. It reads the models of the
+system Ollama (`/usr/share/ollama/.ollama/models`, read-only, never pruned; no downloads), runs
+`OLLAMA_NUM_PARALLEL=2` (reachy-gemma4 at its 32k context then takes about 20 GB of GPU0) and
+keeps the model loaded 30 minutes after the last request. Before serving it unloads
+reachy-gemma4 from the system Ollama service (through its API, `keep_alive` 0) so the same model
+is never loaded twice; the system service itself is not used or changed.
 
 The hw stage uses the robot wherever it is plugged in. If it is attached to another machine
 (e.g. a Mac), see [Running robot tests with the robot on another machine](robot-on-another-machine.md).

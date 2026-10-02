@@ -7,10 +7,12 @@ console), so the link and edge steps work against it unchanged (`start_edge_agen
 lines (`assistant_brain.console`) and from its loopback admin endpoint: the turn log, the LLM
 priority gate and the LLM request log.
 
-LLM features use the real Ollama with `reachy-gemma4`: the system service on 127.0.0.1:11434
-(`llm: system`), or a separate real `ollama serve` the scenario starts on a free loopback port
-and may kill (`llm: test`, see `start_llm_server`), so a fault never touches the system
-service.
+LLM features use the real Ollama with `reachy-gemma4`, always the stack's own server
+(`scripts/llm_server.sh`: `ollama serve` on GPU0 only, the system model store read-only; the
+system Ollama service is never used). `llm: stack` (the default) uses the one serving on
+127.0.0.1:8773 (the gate starts it there) or else starts one of the scenario's own on a free
+port; `llm: test` uses a separate one the scenario starts and may kill (`start_llm_server`).
+Either way the model must sit entirely on the GPU (`/api/ps`), else the step fails.
 """
 
 import asyncio
@@ -18,14 +20,11 @@ import contextlib
 import json
 import math
 import os
-import shutil
 import signal
-import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 from typing import Any, Literal
 
 from assistant_testing import edge_host
@@ -52,45 +51,64 @@ from assistant_testing.steps.link import (
     _Link,
 )
 
-SYSTEM_LLM = "http://127.0.0.1:11434"
+STACK_LLM = "http://127.0.0.1:8773"
+"""The stack's LLM server (the gate starts it; `scripts/llm_server.sh`)."""
 LLM_MODEL = "reachy-gemma4"
 LLM_PROCESS = "llm"
-OLLAMA_MODELS = "/usr/share/ollama/.ollama/models"
-"""The system Ollama's model store (world-readable): a test server uses the same models."""
-LLM_GPU = "0"
-OLLAMA_GPU_ENV = {"CUDA_VISIBLE_DEVICES": LLM_GPU, "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
-                  "OLLAMA_VULKAN": "0"}  # fmt: skip
-"""The LLM on GPU0 only, so GPU1 stays free for the speech server whatever loads first.
-Ollama also drives the GPUs through Vulkan, which ignores CUDA_VISIBLE_DEVICES: it is off."""
-OLLAMA_PINNING_DOC = "docs/dev-setup.md, 'Ollama on GPU0'"
+STACK_LLM_PROCESS = "llm-stack"
+LLM_SERVER_SCRIPT = "scripts/llm_server.sh"
+LLM_LOAD_TIMEOUT_S = 180.0
 
 
-def system_ollama_unpinned() -> str | None:
-    """Why the system Ollama service (systemd `ollama.service`) is not pinned to GPU0, or None.
-
-    Unpinned, Ollama spreads `reachy-gemma4` over both GPUs and the speech server no longer fits
-    on GPU1 (or the reverse, depending on which loads first)."""
+def _llm_up(url: str) -> bool:
     try:
-        done = subprocess.run(
-            ["systemctl", "show", "ollama", "-p", "LoadState", "-p", "Environment"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
+        _http("GET", f"{url}/api/version", None, 2)
+    except (OSError, AssertionError):
+        return False
+    return True
+
+
+def _llm_loaded_on_gpu(url: str, model: str = LLM_MODEL) -> str:
+    """Load `model` there (a one-token request) and check it sits entirely in GPU memory;
+    returns a line for the log."""
+    _http("POST", f"{url}/api/generate",
+          {"model": model, "prompt": "hi", "stream": False, "options": {"num_predict": 1}},
+          LLM_LOAD_TIMEOUT_S)  # fmt: skip
+    loaded = _http("GET", f"{url}/api/ps", None, 10).get("models", [])
+    found = [m for m in loaded if m.get("name", "").split(":")[0] == model.split(":")[0]]
+    assert found, f"{model} is not loaded at {url} after a request: {loaded}"
+    size, vram = int(found[0].get("size", 0)), int(found[0].get("size_vram", 0))
+    if size <= 0 or vram < size:
+        raise AssertionError(
+            f"{model} at {url} is not entirely on the GPU ({vram} of {size} bytes in GPU "
+            "memory): GPU0 is short of memory"
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"cannot read ollama.service with systemctl ({exc})"
-    props = dict(line.split("=", 1) for line in done.stdout.splitlines() if "=" in line)
-    if props.get("LoadState") != "loaded":
-        return "no systemd ollama.service: cannot check that the system Ollama runs on GPU0 only"
-    env = dict(item.split("=", 1) for item in props.get("Environment", "").split() if "=" in item)
-    wrong = [f"{k}={v}" for k, v in OLLAMA_GPU_ENV.items() if env.get(k) != v]
-    if wrong:
-        return (
-            f"the system Ollama is not pinned to GPU{LLM_GPU}: ollama.service lacks "
-            f"{' '.join(wrong)} (one-time setting, see {OLLAMA_PINNING_DOC})"
-        )
-    return None
+    return f"{model} at {url}: entirely on the GPU, context {found[0].get('context_length')}"
+
+
+async def _start_llm(ctx: ScenarioContext, name: str, within_s: float) -> str:
+    """A real `ollama serve` (`scripts/llm_server.sh`) of the scenario's own on a free port."""
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+    script = str(ctx.repo_root / LLM_SERVER_SCRIPT)
+    await ctx.processes.start(name, [script, "--port", str(port)])
+    await _wait_llm_up(url, within_s)
+    return url
+
+
+async def ensure_llm_server(ctx: ScenarioContext) -> str:
+    """The LLM server of this scenario: the stack's on 127.0.0.1:8773 if it serves, else the
+    scenario's own (stopped in teardown); `reachy-gemma4` checked to be entirely on the GPU."""
+    llm = ctx.state.get("llm")
+    if llm is not None:
+        return llm["url"]
+    if await asyncio.to_thread(_llm_up, STACK_LLM):
+        url, owned = STACK_LLM, False
+    else:
+        url, owned = await _start_llm(ctx, STACK_LLM_PROCESS, 30.0), True
+    print(await asyncio.to_thread(_llm_loaded_on_gpu, url))
+    ctx.state["llm"] = {"url": url, "owned": owned}
+    return url
 
 
 def _brain(ctx: ScenarioContext) -> dict[str, Any]:
@@ -124,7 +142,7 @@ async def admin(ctx: ScenarioContext, path: str, body: Any = None) -> Any:
 async def start_brain(
     ctx: ScenarioContext,
     engine: Literal["echo", "basic"] = "echo",
-    llm: Literal["system", "test"] = "system",
+    llm: Literal["stack", "test"] = "stack",
     follow_up_s: float | None = None,
     speech: bool = False,
     set: dict[str, Any] | None = None,
@@ -132,7 +150,8 @@ async def start_brain(
     """Start the real brain on free loopback ports (EdgeLink and admin), profile `ci`.
 
     `engine: echo` answers with the input (no models); `engine: basic` asks the real LLM:
-    the system Ollama (`llm: system`) or the scenario's own (`llm: test`, `start_llm_server`
+    the stack's LLM server (`llm: stack`, see `ensure_llm_server`) or the scenario's own that it
+    may kill (`llm: test`, `start_llm_server`
     first). `speech: true` (basic engine) transcribes voice turns and speaks the replies with
     the scenario's speech server (`speech_server_running` or `start_speech_server` first);
     without it replies are speak text. `set` overrides config keys
@@ -145,7 +164,7 @@ async def start_brain(
     if follow_up_s is not None:
         overrides["brain.follow_up_s"] = follow_up_s
     if engine == "basic":
-        base = SYSTEM_LLM if llm == "system" else _test_llm(ctx)["url"]
+        base = await ensure_llm_server(ctx) if llm == "stack" else _test_llm(ctx)["url"]
         overrides.setdefault("llm.base_url", f"{base}/v1")
         overrides.setdefault("llm.model", LLM_MODEL)
         overrides.setdefault("engine.speech", speech)
@@ -459,13 +478,6 @@ def _test_llm(ctx: ScenarioContext) -> dict[str, Any]:
     return llm
 
 
-def _ollama() -> str:
-    path = shutil.which("ollama") or "/usr/local/bin/ollama"
-    if not Path(path).exists():
-        raise AssertionError("ollama is not installed")
-    return path
-
-
 async def _wait_llm_up(url: str, within_s: float) -> None:
     deadline = time.monotonic() + within_s
     while time.monotonic() < deadline:
@@ -479,22 +491,12 @@ async def _wait_llm_up(url: str, within_s: float) -> None:
 
 @step("start_llm_server")
 async def start_llm_server(ctx: ScenarioContext, within_s: float = 30.0) -> None:
-    """Start a real `ollama serve` of the scenario's own on a free loopback port, with the
-    system Ollama's model store (so `reachy-gemma4` is there), on GPU0 only (`OLLAMA_GPU_ENV`),
-    and wait until it answers.
-    It can be killed for real (`kill_llm_server`) without touching the system service."""
-    port = _free_port()
-    url = f"http://127.0.0.1:{port}"
-    env = {
-        "OLLAMA_HOST": f"127.0.0.1:{port}",
-        "OLLAMA_MODELS": os.environ.get("ASSISTANT_TEST_OLLAMA_MODELS", OLLAMA_MODELS),
-        "OLLAMA_NOPRUNE": "1",
-        "OLLAMA_KEEP_ALIVE": "5m",
-        **OLLAMA_GPU_ENV,
-    }
-    ctx.state["test_llm"] = {"url": url, "port": port}
-    await ctx.processes.start(LLM_PROCESS, [_ollama(), "serve"], env=env)
-    await _wait_llm_up(url, within_s)
+    """Start a real LLM server of the scenario's own (`scripts/llm_server.sh`: `ollama serve` on
+    GPU0, the system model store) on a free loopback port and wait until it answers. It can be
+    killed for real (`kill_llm_server`) without touching the stack's server; it unloads
+    `reachy-gemma4` from the stack's server first, so its copy fits on GPU0."""
+    url = await _start_llm(ctx, LLM_PROCESS, within_s)
+    ctx.state["test_llm"] = {"url": url}
 
 
 @step("kill_llm_server")

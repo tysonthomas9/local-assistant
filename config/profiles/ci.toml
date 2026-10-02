@@ -1,11 +1,11 @@
-# The gate on the brain PC: loopback only, the local Ollama, JSON logs.
+# The gate on the brain PC: loopback only, our own Ollama on GPU0 (scripts/llm_server.sh), JSON logs.
 
 [net]
 edgelink_bind = "127.0.0.1:8770"
 
 [llm]
 impl = "openai"
-base_url = "http://127.0.0.1:11434/v1"
+base_url = "http://127.0.0.1:8773/v1"    # our Ollama (scripts/llm_server.sh) until vLLM (phase 2)
 model = "reachy-gemma4"
 
 [edge]

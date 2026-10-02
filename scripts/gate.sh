@@ -26,16 +26,19 @@
 #              there. Leftovers after the features FAIL the stage (docs/robot-on-another-machine.md)
 #              Features with `tier: [hw, models]` run here (they need the models too; with
 #              GATE_NO_MODELS=1 they are left out)
-#   h  models  e2e features, tier models without hw: FAILS unless both GPUs, Ollama with
-#              reachy-gemma4 and the speech server are available
+#   h  models  e2e features, tier models without hw: FAILS unless both GPUs, our LLM server
+#              with reachy-gemma4 and the speech server are available
 #
 # The models (before stage g): the speech server (servers/speech: Parakeet STT + Qwen3-TTS) on
 # 127.0.0.1:8772. If none is serving there, the gate syncs its venv in the checkout under test
 # and starts it on GPU1 (CUDA_VISIBLE_DEVICES=1; it needs 8 GB free there), and stops it after
 # stage h. A server it did not start is used and left alone. Failing to start it fails g and h.
-# The system Ollama must be pinned to GPU0 (ollama.service: CUDA_VISIBLE_DEVICES=0,
-# CUDA_DEVICE_ORDER=PCI_BUS_ID, OLLAMA_VULKAN=0; one-time setting in docs/dev-setup.md), else
-# it spreads reachy-gemma4 over both GPUs and g and h fail.
+# The LLM likewise: our own server (scripts/llm_server.sh: `ollama serve` on 127.0.0.1:8773,
+# GPU0 only, the system model store read-only), started unless one serves there, loaded once
+# and checked to sit entirely on GPU0, stopped after stage h. The system Ollama service is not
+# used or changed (the launcher only unloads reachy-gemma4 from it). The old assistant (legacy
+# stack: run_app.py, speech-to-speech, run_daemon.py) is stopped first if it runs: it holds
+# the GPUs and the robot.
 # Spoken turns write their timings to $ROOT/artifacts (ASSISTANT_ARTIFACTS_DIR).
 #   i  summary PASS/FAIL per stage. Exit 0 = PASS, 1 = FAIL, 3 = INCOMPLETE (a stage opted out)
 #
@@ -57,8 +60,11 @@ set -euo pipefail
 ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 MAIN_CHECKOUT="$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")"
 DAEMON_URL="http://127.0.0.1:8000"
-OLLAMA_URL="http://127.0.0.1:11434/v1/models"
-OLLAMA_MODEL="reachy-gemma4"
+LLM_PORT=8773
+LLM_URL="http://127.0.0.1:$LLM_PORT"
+LLM_MODEL="reachy-gemma4"
+LLM_PID=""
+LLM_STATUS=""
 SPEECH_PORT=8772
 SPEECH_URL="http://127.0.0.1:$SPEECH_PORT"
 SPEECH_GPU=1
@@ -76,6 +82,7 @@ CLONE_PARENT=""
 CLONE_DIR=""
 cleanup() {
     if declare -F stop_speech_server >/dev/null; then stop_speech_server; fi
+    if declare -F stop_llm_server >/dev/null; then stop_llm_server; fi
     rm -rf "$STATE_DIR"
     if [[ -n "$CLONE_PARENT" ]]; then rm -rf "$CLONE_PARENT"; fi
 }
@@ -345,19 +352,10 @@ models_present() {
     gpus="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)"
     printf 'GPUs: %s (need 2)\n' "${gpus:-0}"
     if [[ "${gpus:-0}" -lt 2 ]]; then ok=1; fi
-    if curl -sf -m 3 "$OLLAMA_URL" | grep -q "\"$OLLAMA_MODEL"; then
-        printf 'Ollama: %s serves %s\n' "$OLLAMA_URL" "$OLLAMA_MODEL"
+    if curl -sf -m 3 "$LLM_URL/v1/models" | grep -q "\"$LLM_MODEL"; then
+        printf 'LLM server: %s serves %s (%s)\n' "$LLM_URL" "$LLM_MODEL" "$LLM_STATUS"
     else
-        printf 'Ollama: %s not answering or without %s\n' "$OLLAMA_URL" "$OLLAMA_MODEL"
-        ok=1
-    fi
-    # The LLM on GPU0 only, so the speech server fits on GPU1 whichever loads first.
-    if ! uv run --locked python -c '
-from assistant_testing.steps.brain import system_ollama_unpinned
-problem = system_ollama_unpinned()
-print(f"Ollama: {problem}" if problem else "Ollama: pinned to GPU0")
-raise SystemExit(1 if problem else 0)'; then
-        SPEECH_STATUS="$SPEECH_STATUS; Ollama not pinned to GPU0 (docs/dev-setup.md, 'Ollama on GPU0')"
+        printf 'LLM server: %s not answering or without %s (%s)\n' "$LLM_URL" "$LLM_MODEL" "$LLM_STATUS"
         ok=1
     fi
     if curl -sf -o /dev/null -m 3 "$SPEECH_URL/health"; then
@@ -369,10 +367,80 @@ raise SystemExit(1 if problem else 0)'; then
     return "$ok"
 }
 
+# stop_legacy_assistant: the old assistant (legacy stack on main) holds the GPUs and the robot.
+# Stopped cleanly if it runs: the app with SIGINT (its shutdown), then its speech server and
+# daemon with SIGTERM; anchored patterns, so nothing else matches.
+stop_legacy_assistant() {
+    local spec sig pattern pids i
+    for spec in "INT:^[^ ]*python[0-9.]* [^ ]*local_backend/run_app[.]py" \
+                "TERM:^[^ ]*python[0-9.]* [^ ]*speech-to-speech serve" \
+                "TERM:^[^ ]*python[0-9.]* [^ ]*local_backend/run_daemon[.]py"; do
+        sig="${spec%%:*}"
+        pattern="${spec#*:}"
+        pids="$(pgrep -f "$pattern" || true)"
+        [[ -n "$pids" ]] || continue
+        printf 'old assistant: stopping %s (pid %s) with SIG%s\n' "$pattern" "$(echo $pids)" "$sig"
+        kill -"$sig" $pids 2>/dev/null || true
+        for i in $(seq 1 20); do pgrep -f "$pattern" >/dev/null || break; sleep 1; done
+        pkill -KILL -f "$pattern" 2>/dev/null || true
+    done
+}
+
+# start_llm_server: use our LLM server on $LLM_PORT, or start scripts/llm_server.sh (GPU0) from
+# the checkout under test; either way reachy-gemma4 is loaded once and must sit entirely on the
+# GPU. Runs in the main shell (sets LLM_PID/STATUS).
+start_llm_server() {
+    local log="$STATE_DIR/llm.log" waited=0 ps
+    if curl -sf -o /dev/null -m 3 "$LLM_URL/api/version"; then
+        LLM_STATUS="already running, not started by the gate"
+    else
+        (cd "$WORK" && exec scripts/llm_server.sh --port "$LLM_PORT") >"$log" 2>&1 &
+        LLM_PID=$!
+        while ! curl -sf -o /dev/null -m 2 "$LLM_URL/api/version"; do
+            if ! kill -0 "$LLM_PID" 2>/dev/null || [[ $waited -ge 60 ]]; then
+                tail -20 "$log"
+                stop_llm_server
+                LLM_STATUS="the LLM server did not start (see above)"
+                return 1
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        head -5 "$log" | grep '^llm server:' || true
+        LLM_STATUS="started by the gate (pid $LLM_PID)"
+    fi
+    if ! curl -sf -o /dev/null -m 300 "$LLM_URL/api/generate" \
+            -d "{\"model\":\"$LLM_MODEL\",\"prompt\":\"hi\",\"stream\":false,\"options\":{\"num_predict\":1}}"; then
+        LLM_STATUS="$LLM_STATUS; $LLM_MODEL did not load"
+        return 1
+    fi
+    ps="$(curl -sf -m 5 "$LLM_URL/api/ps" || true)"
+    if ! python3 -c '
+import json, sys
+models = [m for m in json.loads(sys.argv[1] or "{}").get("models", []) if m["name"].startswith(sys.argv[2])]
+sys.exit(0 if models and models[0]["size_vram"] >= models[0]["size"] > 0 else 1)' "$ps" "$LLM_MODEL"; then
+        LLM_STATUS="$LLM_STATUS; $LLM_MODEL is not entirely on the GPU: $ps"
+        return 1
+    fi
+    printf 'LLM server: %s, %s loaded entirely on GPU0\n' "$LLM_STATUS" "$LLM_MODEL"
+    nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader || true
+}
+
+stop_llm_server() {
+    if [[ -z "$LLM_PID" ]]; then return 0; fi
+    if kill -0 "$LLM_PID" 2>/dev/null; then
+        kill -TERM "$LLM_PID" 2>/dev/null || true
+        local i
+        for i in $(seq 1 30); do kill -0 "$LLM_PID" 2>/dev/null || break; sleep 1; done
+        kill -KILL "$LLM_PID" 2>/dev/null || true
+        printf 'LLM server (pid %s) stopped\n' "$LLM_PID"
+    fi
+    LLM_PID=""
+}
+
 # start_speech_server: use the speech server on $SPEECH_PORT, or sync its venv in the checkout
 # under test and start it on GPU$SPEECH_GPU. Runs in the main shell (sets SPEECH_PID/STATUS).
 start_speech_server() {
-    banner "models: speech server and Ollama"
     if curl -sf -o /dev/null -m 3 "$SPEECH_URL/health"; then
         SPEECH_STATUS="already running, not started by the gate"
         printf 'speech server: %s %s\n' "$SPEECH_URL" "$SPEECH_STATUS"
@@ -420,7 +488,7 @@ stop_speech_server() {
 
 stage_hw() {
     if [[ "${GATE_NO_MODELS:-}" != "1" ]] && ! models_present; then
-        note "the [hw, models] features need the models: $SPEECH_STATUS (GATE_NO_MODELS=1 to skip)"
+        note "the [hw, models] features need the models: LLM $LLM_STATUS; speech $SPEECH_STATUS (GATE_NO_MODELS=1 to skip)"
         return 1
     fi
     if ! robot_present; then
@@ -460,7 +528,7 @@ stage_hw() {
 
 stage_models() {
     if ! models_present; then
-        note "needs both GPUs, $OLLAMA_MODEL at $OLLAMA_URL and the speech server: $SPEECH_STATUS (GATE_NO_MODELS=1 to skip)"
+        note "needs both GPUs, $LLM_MODEL at $LLM_URL ($LLM_STATUS) and the speech server ($SPEECH_STATUS) (GATE_NO_MODELS=1 to skip)"
         return 1
     fi
     pytest_features "models and not hw"
@@ -486,7 +554,10 @@ else
     run_stage d "real-only check" stage_real_only
     run_stage e "e2e features, tier core" stage_core
     run_stage f "legacy tests (local_backend)" stage_legacy
+    banner "the old assistant, the LLM server and the speech server"
+    stop_legacy_assistant
     if [[ "${GATE_NO_MODELS:-}" != "1" ]]; then
+        start_llm_server || printf '%sLLM server: %s%s\n' "$RED" "$LLM_STATUS" "$RESET"
         start_speech_server || printf '%sspeech server: %s%s\n' "$RED" "$SPEECH_STATUS" "$RESET"
     fi
     if [[ "${GATE_NO_HW:-}" == "1" ]]; then
@@ -504,6 +575,7 @@ else
         run_stage h "e2e features, tier models" stage_models
     fi
     stop_speech_server
+    stop_llm_server
 fi
 
 banner "i) summary"
