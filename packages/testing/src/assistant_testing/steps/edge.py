@@ -12,6 +12,7 @@ antennas at most 20) that returns to the start pose and leaves the motors as the
 """
 
 import asyncio
+import itertools
 import json
 import math
 import sys
@@ -434,24 +435,68 @@ async def _robot_state(ctx: ScenarioContext) -> dict[str, Any]:
     )
 
 
+SAMPLE_PERIOD_S = 0.05
+"""The state sampler's target period (20 Hz)."""
+MIN_SAMPLE_HZ = 8.0
+"""Below this average rate during a move the measurement is starved: the step fails as such."""
+MAX_SAMPLE_GAP_S = 0.4
+"""The longest allowed gap between two samples during a move (a nod lasts about a second)."""
+
+_SAMPLER = """
+import json, sys, time, urllib.request
+url, period = sys.argv[1] + "/api/state/full", float(sys.argv[2])
+while True:
+    t = time.monotonic()
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            s = json.load(response)
+        keep = ("head_pose", "antennas_position", "body_yaw", "control_mode")
+        print("STATE " + json.dumps({"t": round(t, 3), **{k: s.get(k) for k in keep}}), flush=True)
+    except Exception as exc:
+        print("STATE-ERROR " + json.dumps({"t": round(t, 3), "error": repr(exc)}), flush=True)
+    time.sleep(max(0.0, period - (time.monotonic() - t)))
+"""
+
+
+def check_sampling(samples: list[dict[str, Any]], seconds: float) -> None:
+    """Fail when `samples` (with monotonic `t`) are too sparse to observe a move of `seconds`."""
+    assert len(samples) >= 2, f"the state sampler got {len(samples)} samples: no measurement"
+    rate = len(samples) / max(seconds, 1e-6)
+    gap = max(b["t"] - a["t"] for a, b in itertools.pairwise(samples))
+    starved = f"the measurement is starved: {len(samples)} samples in {seconds:.1f} s"
+    assert rate >= MIN_SAMPLE_HZ, f"{starved} ({rate:.1f} Hz, want >= {MIN_SAMPLE_HZ})"
+    assert gap <= MAX_SAMPLE_GAP_S, f"{starved} (a {gap:.2f} s gap, want <= {MAX_SAMPLE_GAP_S})"
+
+
 async def _during_request(
     ctx: ScenarioContext, client: str, type: str, fields: dict[str, Any], within_s: float = 20
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Send a request and sample the robot state every ~50 ms until its result arrives."""
-    samples: list[dict[str, Any]] = []
-    done = asyncio.Event()
-
-    async def sample() -> None:
-        while not done.is_set():
-            samples.append(await _robot_state(ctx))
-            await asyncio.sleep(0.05)
-
-    sampler = asyncio.create_task(sample())
+    """Send a request while a sampler ON THE ROBOT'S MACHINE reads the daemon's state every
+    50 ms (no SSH tunnel or PC load in the measurement path); returns the result and the
+    samples taken between sending it and receiving its result, checked for density."""
+    host = edge_host_steps.host_of(ctx)
+    count = ctx.state["samplers"] = ctx.state.get("samplers", 0) + 1
+    name = f"state-sampler-{count}"
+    url = f"http://127.0.0.1:{edge_host_steps.DAEMON_PORT}"
+    args = ["-c", _SAMPLER, url, str(SAMPLE_PERIOD_S)]
+    if host.ssh is not None:
+        python = f"{edge_host.REMOTE_VENV}/bin/python"
+        sampler = await ctx.processes.start(
+            name, [python, *args], ssh=host.ssh, remote_cwd=f"{edge_host.EDGE_DIR}/src"
+        )
+    else:
+        sampler = await ctx.processes.start(name, [sys.executable, *args])
     try:
+        await _expect(ctx, name, {"STATE"}, 15, what="the robot-side state sampler")
         result = await _request(ctx, client, type, fields, within_s)
+        await asyncio.sleep(3 * SAMPLE_PERIOD_S)
     finally:
-        done.set()
-        await sampler
+        await sampler.stop()
+    samples = [line.payload for line in _get_lines(sampler, "STATE") if line.payload is not None]
+    span = samples[-1]["t"] - samples[0]["t"] if samples else 0.0
+    errors = _get_lines(sampler, "STATE-ERROR")
+    print(f"sampler: {len(samples)} samples over {span:.1f} s, {len(errors)} errors")
+    check_sampling(samples, span)
     return result, samples
 
 
