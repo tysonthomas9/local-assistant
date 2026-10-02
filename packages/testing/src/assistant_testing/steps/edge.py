@@ -608,12 +608,15 @@ def _rest_pose(state: dict[str, Any]) -> dict[str, float]:
 
 @step("robot_back_at_rest")
 async def robot_back_at_rest(
-    ctx: ScenarioContext, head_deg: float = 2.0, antenna_deg: float = 5.0
+    ctx: ScenarioContext, head_deg: float = 4.0, antenna_deg: float = 5.0
 ) -> None:
     """After the move the robot is in the pose it started in (for a robot at rest: the sleep
     pose, after `goto_sleep()`) within `head_deg` / `antenna_deg`, and the motors are in the
     mode they had before (disabled at rest). The head's yaw is compared relative to the body,
-    since `goto_sleep()` may also turn the body back straight."""
+    since `goto_sleep()` may also turn the body back straight. With the motors off the head
+    settles passively into the sleep pose: measured on the real robot its pitch there varies
+    between about 25 and 28 degrees from one rest to the next (the antennas within 0.2), hence
+    4 degrees for the head; the sleep pose is about 25 degrees from neutral."""
     before = ctx.state.get("robot_start")
     assert before is not None, "no move measured; use robot_plays_emotion first"
     after = await _robot_state(ctx)
