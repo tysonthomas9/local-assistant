@@ -91,6 +91,18 @@ EMOTION_MOVES: dict[str, str] = {
 INITIAL_GOTO_S = 1.0
 """How long the SDK takes to reach a recorded move's first frame from neutral."""
 
+ATTENTION_POSES: dict[str, tuple[float, float]] = {
+    "listening": (0.0, -5.0),
+    "thinking": (7.0, -3.0),
+    "speaking": (0.0, 0.0),
+}
+"""Attention state -> head (roll, pitch) in degrees from the neutral pose: listening tilts the
+head up a little toward the user, thinking tilts it sideways, speaking faces the user. All
+within `MAX_HEAD_DEG` (the rotation is about 7.6 degrees at most)."""
+ATTENTION_MOVE_S = 1.0
+"""Each attention pose is reached over one second (slow, at least `MIN_MOVE_S`)."""
+REST_STATES = ("idle", "muted", "sleeping")
+
 
 class RobotUnavailable(RuntimeError):
     """The robot (its daemon) is not reachable: no motion is attempted."""
@@ -133,6 +145,10 @@ class MotionArbiter:
         self.emotions: dict[str, str] = dict(EMOTION_MOVES)
         self._library: Any = None
         self.last_move: dict[str, Any] | None = None
+        self._neutral: np.ndarray | None = None
+        """The neutral head pose while the robot attends (a turn is running), else None."""
+        self._sleep_after = False
+        """The robot was at rest when it began attending: back to sleep, torque off at idle."""
 
     # ------------------------------------------------------------ the facade
 
@@ -147,6 +163,82 @@ class MotionArbiter:
     def breathe(self) -> None:
         """Idle. TODO(phase 3): Pollen's continuous breathing motion."""
         self.listening = self.speaking = False
+
+    @property
+    def attending(self) -> bool:
+        """An attention pose is held (the robot is awake for a turn)."""
+        return self._neutral is not None
+
+    def attend(self, state: str) -> dict[str, Any] | None:
+        """Show an attention state with a small, slow head pose (`ATTENTION_POSES`).
+
+        The first active state wakes a robot at rest (torque on, `wake_up()` to neutral) and
+        remembers the neutral pose; each pose is then reached from neutral's frame over
+        `ATTENTION_MOVE_S`. `idle` goes back to neutral and, if the robot was at rest before,
+        `goto_sleep()` with torque off; `muted` and `sleeping` always end asleep. Returns what
+        was done, with the time the pose was reached on this machine's monotonic clock (for a
+        sampler next to the daemon), or None if nothing moved. Any error ends with
+        `goto_sleep()` and torque off, and is re-raised.
+        """
+        with self._lock:
+            ok, detail = robot_ready(self.daemon_url)
+            if not ok:
+                raise RobotUnavailable(detail)
+            try:
+                return self._attend(state)
+            except Exception:
+                self._neutral, self._sleep_after = None, False
+                for cleanup in (self.mini.goto_sleep, self.mini.disable_motors):
+                    try:
+                        cleanup()
+                    except Exception:
+                        log.exception("%s after a failed attention move", cleanup.__name__)
+                raise
+
+    def _attend(self, state: str) -> dict[str, Any] | None:
+        from reachy_mini.utils import create_head_pose
+
+        started = time.monotonic()
+        if state in ATTENTION_POSES:
+            if self._neutral is None:
+                at_rest = not self._torque_on()
+                if at_rest:
+                    self.mini.enable_motors()
+                    self.mini.wake_up()
+                self._sleep_after = at_rest
+                self._neutral = np.array(self.mini.get_current_head_pose(), dtype=float)
+            roll, pitch = ATTENTION_POSES[state]
+            target = self._neutral.copy()
+            delta = create_head_pose(roll=roll, pitch=pitch, degrees=True)
+            target[:3, :3] = self._neutral[:3, :3] @ delta[:3, :3]
+            self.mini.goto_target(head=target, duration=ATTENTION_MOVE_S, body_yaw=None)
+            return {
+                "state": state,
+                "roll_deg": roll,
+                "pitch_deg": pitch,
+                "t_start": round(started, 3),
+                "t_reached": round(time.monotonic(), 3),
+            }
+        if state not in REST_STATES:
+            return None
+        neutral, sleep = self._neutral, self._sleep_after or state != "idle"
+        self._neutral, self._sleep_after = None, False
+        if neutral is None and state == "idle":
+            return None
+        if neutral is not None:
+            self.mini.goto_target(head=neutral, duration=ATTENTION_MOVE_S, body_yaw=None)
+        reached = time.monotonic()
+        if sleep:
+            self.mini.goto_sleep()
+            self.mini.disable_motors()
+        return {
+            "state": state,
+            "roll_deg": 0.0,
+            "pitch_deg": 0.0,
+            "t_start": round(started, 3),
+            "t_reached": round(reached, 3),
+            "asleep": sleep,
+        }
 
     def goto_sleep(self) -> None:
         """The SDK's sleep pose; torque off afterwards."""

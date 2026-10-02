@@ -147,8 +147,14 @@ class ReachyAudio:
 
 
 class ReachyMotion:
+    """Attention states become small, slow head poses (`MotionArbiter.attend`), played in
+    order by a worker so the link is never blocked by a move; each prints a MOTION line with
+    the pose and when it was reached (the robot machine's monotonic clock)."""
+
     def __init__(self, body: "ReachyBody") -> None:
         self.body = body
+        self._states: asyncio.Queue[AttentionState] = asyncio.Queue()
+        self._worker: asyncio.Task[None] | None = None
 
     def _arbiter(self) -> MotionArbiter:
         arbiter = self.body.arbiter
@@ -158,17 +164,42 @@ class ReachyMotion:
 
     async def attention(self, state: AttentionState, assistant: str | None) -> None:
         del assistant
-        arbiter = self._arbiter()
-        match state:
-            case "listening":
-                arbiter.set_listening(True)
-            case "speaking":
-                arbiter.set_speaking(True)
-            case "idle" | "thinking":
-                arbiter.breathe()
-            case "muted" | "sleeping":
-                await asyncio.to_thread(arbiter.goto_sleep)
-        emit("MOTION", attention=state)
+        if self.body.arbiter is None or not self.body.healthy:
+            emit("MOTION-ERROR", {"detail": "the robot is not connected"}, attention=state)
+            return
+        self._states.put_nowait(state)
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._attend_loop(), name="reachy-attention")
+
+    async def _attend_loop(self) -> None:
+        while True:
+            state = await self._states.get()
+            try:
+                arbiter = self._arbiter()
+                match state:
+                    case "listening":
+                        arbiter.set_listening(True)
+                    case "speaking":
+                        arbiter.set_speaking(True)
+                    case _:
+                        arbiter.breathe()
+                done = await asyncio.to_thread(arbiter.attend, state)
+            except Exception as exc:
+                emit("MOTION-ERROR", {"detail": f"{type(exc).__name__}: {exc}"}, attention=state)
+                continue
+            emit("MOTION", done or {}, attention=state, moved=str(done is not None).lower())
+
+    async def rest(self) -> None:
+        """Stop attending: drop pending states and put an attending robot back to rest."""
+        if self._worker is not None:
+            self._worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._worker
+            self._worker = None
+        arbiter = self.body.arbiter
+        if arbiter is not None and arbiter.attending:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(arbiter.attend, "idle")
 
     async def express(self, name: str, intensity: float = 1.0) -> bool:
         arbiter = self._arbiter()
@@ -309,6 +340,7 @@ class ReachyBody:
             self._watch.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._watch
+        await self.motion.rest()
         await self.audio.close()
         await asyncio.to_thread(self._disconnect)
 
