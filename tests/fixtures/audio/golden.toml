@@ -1,0 +1,27 @@
+# Golden WAVs: the "user's voice" in the e2e features (spec "testing rule": fed into the edge
+# agent as real mic frames, or sent to the speech server's STT). Synthetic speech from the
+# speech server's own Qwen3-TTS (voice "aiden", which no assistant uses), never a recording of
+# a person. 16 kHz mono s16le with digital silence before (lead_s) and after (tail_s).
+# Regenerate with:
+#   uv run --project servers/speech python -m assistant_speech.golden --out tests/fixtures/audio --force
+# `text` is also the expected transcript (normalised WER).
+
+[hello]
+text = "Hello!"
+voice = "aiden"
+
+[capital_of_france]
+text = "What is the capital of France?"
+voice = "aiden"
+
+[weather_in_paris]
+text = "What is the weather usually like in Paris in the spring?"
+voice = "aiden"
+
+[what_time_is_it]
+text = "What time is it?"
+voice = "aiden"
+
+[tell_me_a_story]
+text = "Please tell me a long story about a little robot who learns to paint."
+voice = "aiden"

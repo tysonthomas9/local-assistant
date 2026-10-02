@@ -1,0 +1,31 @@
+# The speech server (proposal section 6, `servers/speech`): Parakeet TDT STT + Qwen3-TTS on
+# GPU1. NOT a member of the uv workspace: it has its own lock and env (servers/speech/.venv),
+# so torch never enters the brain's or the edge's environment.
+#
+#   uv sync --locked --project servers/speech
+#   CUDA_VISIBLE_DEVICES=1 uv run --locked --project servers/speech python -m assistant_speech
+#
+# Versions are pinned to the ones the legacy speech-to-speech stack runs on this PC.
+[project]
+name = "assistant-speech"
+version = "0.1.0"
+description = "Minimal single-session speech server: Parakeet TDT STT + Qwen3-TTS (GGML)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.141.1",
+    "faster-qwen3-tts[ggml]==0.4.0",
+    "huggingface-hub==1.32.0",
+    "nano-parakeet==0.2.1",
+    "numpy==2.5.3",
+    "qwentts-cpp-python==0.3.1",
+    "soundfile==0.14.0",
+    "torch==2.14.0",
+    "uvicorn==0.53.0",
+]
+
+[project.scripts]
+assistant-speech = "assistant_speech.server:main"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
