@@ -196,8 +196,12 @@ class ReachyMotion:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
             self._worker = None
+        while not self._states.empty():
+            self._states.get_nowait()
         arbiter = self.body.arbiter
-        if arbiter is not None and arbiter.attending:
+        if arbiter is not None:
+            # Unconditionally: `attend` waits (its lock) for a move still running in its thread
+            # after the worker was cancelled, then rests the robot if that move woke it.
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(arbiter.attend, "idle")
 
