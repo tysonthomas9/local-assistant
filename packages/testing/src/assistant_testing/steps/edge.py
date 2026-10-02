@@ -564,6 +564,11 @@ async def robot_plays_emotion(
     assert played.get("played_s", 0) >= played.get("duration_s", 1e9) - 0.05, (
         f"{move} did not run to its end: {played}"
     )
+    trace = [
+        f"{math.degrees(s['head_pose']['pitch']):.0f}/{math.degrees(s['head_pose']['roll']):.0f}"
+        for s in samples[::5]
+    ]
+    print(f"pitch/roll every 5th sample (deg): {' '.join(trace)}")
     ref, window = _move_window(before, samples)
     head = max(
         abs(math.degrees(s["head_pose"][k] - ref["head_pose"][k]))
