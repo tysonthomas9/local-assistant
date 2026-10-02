@@ -624,7 +624,12 @@ async def voice_turn_transcribed(
     reference = text if text is not None else (_golden(ctx, fed["name"])[1] if fed else "")
     wer = word_error_rate(reference, heard)
     print(f"the brain heard {heard!r} (WER {wer:.3f} against {reference!r})")
-    assert wer <= max_wer, f"word error rate {wer:.3f} > {max_wer}"
+    # The real microphone is live until the feed starts: a room sound above the energy trigger
+    # may open (and fill) a mic window before the golden WAV arrives.
+    early = [w.text for w in _get_lines(agent, "MIC-OPEN") if fed and w.index < fed["index"]]
+    assert wer <= max_wer, f"word error rate {wer:.3f} > {max_wer}" + (
+        f"; the real microphone opened a mic window before the feed: {early}" if early else ""
+    )
 
 
 @step("barge_in_stops_playback_within")
