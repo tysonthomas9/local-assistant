@@ -241,10 +241,14 @@ class MotionArbiter:
                     self.mini.goto_sleep()
                 failed = False
             finally:
-                try:
-                    if failed and (was_on or not from_neutral or woke):
-                        self.mini.goto_sleep()
-                finally:
-                    keep_on = was_on if torque_after is None else torque_after
-                    if failed or not keep_on:
-                        self.mini.disable_motors()
+                keep_on = was_on if torque_after is None else torque_after
+                if failed:
+                    # Any failure once motion setup began (wake_up() included): best-effort
+                    # goto_sleep(), then torque off; cleanup errors never hide the original.
+                    for cleanup in (self.mini.goto_sleep, self.mini.disable_motors):
+                        try:
+                            cleanup()
+                        except Exception:
+                            log.exception("%s after a failed move", cleanup.__name__)
+                elif not keep_on:
+                    self.mini.disable_motors()
