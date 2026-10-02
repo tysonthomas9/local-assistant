@@ -209,7 +209,7 @@ over 0.4 s fails as "the measurement is starved".
 
 | Step | Arguments | Does |
 |---|---|---|
-| `start_edge_agent` | `id`, `body: console \| reachy = console`, `where: pc \| edge_host = pc`, `wait = true`, `energy_trigger_dbfs: float?`, `vad_end_ms: int?`, `record = false`, `within_s = 60` | Starts the edge agent; waits for its BODY line and welcome unless `wait: false`. `energy_trigger_dbfs` opens a mic window on a loud voice, `vad_end_ms` closes it after that much quiet once speech was heard; `record` writes each played speech stream to a WAV where the agent runs (`.recordings/`, read and removed by `recorded_reply_transcript_not_empty`) |
+| `start_edge_agent` | `id`, `body: console \| reachy = console`, `where: pc \| edge_host = pc`, `wait = true`, `energy_trigger_dbfs: float?`, `energy_trigger_feed_only = false`, `vad_end_ms: int?`, `record = false`, `within_s = 60` | Starts the edge agent; waits for its BODY line and welcome unless `wait: false`. `energy_trigger_dbfs` opens a mic window on a loud voice (`energy_trigger_feed_only`: only on fed golden audio, so ordinary room sound on the real microphone cannot open a window before the feed; recorded in the timings), `vad_end_ms` closes it after that much quiet once speech was heard; `record` writes each played speech stream to a WAV where the agent runs (`.recordings/`, read and removed by `recorded_reply_transcript_not_empty`) |
 | `edge_body_is` | `client`, `aec: none \| sw \| hw?`, `camera: bool?`, `expressions: list[str]?` | The body's announced capabilities (and the hello the server got); `aec: hw` also checks the XVF3800 report (board found, one far-end reference) |
 | `edge_types` | `client`, `text` | Types a line into the agent (`/ptt down`, `/mute`, ... or text, sent as text.input) |
 | `press_push_to_talk` / `release_push_to_talk` | `client` | `/ptt down` opens a mic window (MIC-OPEN); `/ptt up` closes it (MIC-CLOSE) |
@@ -286,6 +286,7 @@ punctuation.
 | `tts_gives_audio` | `text`, `voice = ryan`, `min_s = 0.5`, `max_s = 30`, `min_voiced = 0.4` | The TTS streams `min_s` to `max_s` seconds of audio, first audio before the end, with at least `min_voiced` of its 20 ms frames above -45 dBFS (first-audio time recorded) |
 | `transcribe_tts_audio` | none | The speech server transcribes the audio of the last `tts_gives_audio` (a round trip) |
 | `speech_server_used_voice` | `voice` | The speech server's latest TTS request (`/requests`) used this voice |
+| `room_level_measured` | `client`, `seconds = 2` | The edge measures the room on its real microphone (`/level`, LEVEL): it must deliver frames; the mean and peak dBFS go in the timings (`room_level`) |
 | `feed_golden_wav` | `client`, `name` | The agent feeds `tests/fixtures/audio/<name>.wav` as mic frames in real time (`/feed`, FEED) |
 | `golden_wav_fed` | `client`, `within_s = 30` | The fed WAV reached its end (FED) |
 | `voice_turn_transcribed` | `client`, `text: str?`, `max_wer = 0.2`, `within_s = 60` | The brain's next TRANSCRIPT matches the fed WAV's text (or `text`); prints the edge's mic windows |

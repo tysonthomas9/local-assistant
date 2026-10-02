@@ -6,7 +6,9 @@ description: >
   scenario's own is started on GPU0 by scripts/llm_server.sh (the stack's server sleeps or
   unloads meanwhile) and checked to hold reachy-gemma4 entirely on GPU0; the brain runs with
   [llm] server set to it. The golden "hello" WAV is fed into the robot's edge agent as real mic
-  frames (voice turn: STT, LLM, TTS, the robot's speaker), then "hello" is typed on the same
+  frames (voice turn: STT, LLM, TTS, the robot's speaker; the room is measured on the real
+  microphone first and the energy trigger is armed only by the fed audio, so ordinary room
+  sound cannot open a window before it), then "hello" is typed on the same
   edge (text turn). Both replies play on the robot's speaker and transcribe to words. Then 4
   real requests run at once straight on that server (the sub-agent case) after one alone.
   The timings (LLM time to first token, input to the speaker's first audio, the server's GPU
@@ -20,7 +22,8 @@ scenarios:
       - speech_server_running
       - start_reachy_daemon
       - start_brain: {engine: basic, llm: test, speech: true}
-      - start_edge_agent: {id: lite, body: reachy, where: edge_host, energy_trigger_dbfs: -35, vad_end_ms: 700, record: true}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, energy_trigger_dbfs: -35, energy_trigger_feed_only: true, vad_end_ms: 700, record: true}
+      - room_level_measured: {client: lite}
       - feed_golden_wav: {client: lite, name: hello}
       - voice_turn_transcribed: {client: lite, max_wer: 0.2}
       - robot_speaks_reply: {client: lite, min_ms: 500}
@@ -46,7 +49,8 @@ scenarios:
       - speech_server_running
       - start_reachy_daemon
       - start_brain: {engine: basic, llm: test, speech: true}
-      - start_edge_agent: {id: lite, body: reachy, where: edge_host, energy_trigger_dbfs: -35, vad_end_ms: 700, record: true}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, energy_trigger_dbfs: -35, energy_trigger_feed_only: true, vad_end_ms: 700, record: true}
+      - room_level_measured: {client: lite}
       - feed_golden_wav: {client: lite, name: hello}
       - voice_turn_transcribed: {client: lite, max_wer: 0.2}
       - robot_speaks_reply: {client: lite, min_ms: 500}

@@ -87,6 +87,7 @@ async def start_edge_agent(
     where: Literal["pc", "edge_host"] = "pc",
     wait: bool = True,
     energy_trigger_dbfs: float | None = None,
+    energy_trigger_feed_only: bool = False,
     vad_end_ms: int | None = None,
     record: bool = False,
     within_s: float = 60.0,
@@ -99,6 +100,9 @@ async def start_edge_agent(
     `wait` (default) waits until the body started and the link welcomed the agent.
     `energy_trigger_dbfs` opens a mic window on a loud enough voice (standing in for a
     wake-word engine) and `vad_end_ms` closes it after that much quiet once speech was heard.
+    `energy_trigger_feed_only` arms that trigger only on fed golden audio (`/feed`): ordinary
+    room sound on the real microphone then cannot open a window before the fed utterance (the
+    real microphone still flows into the brain's follow-up windows). Both go in the timings.
     `record` writes each played speech stream to a WAV where the agent runs (read and
     removed by `recorded_reply_transcript_not_empty`).
     """
@@ -121,6 +125,15 @@ async def start_edge_agent(
     args += ["--url", f"ws://127.0.0.1:{port}/edge/v1", "--token", link.token]
     if energy_trigger_dbfs is not None:
         args += ["--energy-trigger-dbfs", str(energy_trigger_dbfs)]
+        timings = ctx.state.setdefault("timings", {})
+        timings["energy_trigger"] = {
+            "dbfs": energy_trigger_dbfs,
+            "armed_by": "fed audio only" if energy_trigger_feed_only else "the real microphone",
+        }
+    if energy_trigger_feed_only:
+        if energy_trigger_dbfs is None:
+            raise AssertionError("energy_trigger_feed_only needs energy_trigger_dbfs")
+        args += ["--energy-trigger-feed-only"]
     if vad_end_ms is not None:
         args += ["--vad-end-ms", str(vad_end_ms)]
     if record:

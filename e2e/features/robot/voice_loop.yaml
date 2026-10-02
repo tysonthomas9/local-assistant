@@ -3,8 +3,10 @@ tier: [hw, models]
 description: >
   The full voice loop on the real robot. The golden "hello" WAV is fed into the robot's edge
   agent as real 20 ms mic frames at its mic input point (right after capture; spec "testing
-  rule": voice input). The agent's energy trigger opens a mic window (with its pre-roll) and
-  closes it after 700 ms of quiet; the real brain transcribes the utterance (Parakeet on GPU1),
+  rule": voice input). The room is measured on the real microphone first (its level goes in the
+  artifact). The agent's energy trigger, armed only by the fed audio so ordinary room sound
+  cannot open a window before it, opens a mic window (with its pre-roll) and closes it after
+  700 ms of quiet; the real brain transcribes the utterance (Parakeet on GPU1),
   asks the real LLM (reachy-gemma4, vLLM by default) and speaks the reply (Qwen3-TTS, voice ryan) on the
   robot's speaker. The reply the speaker was given transcribes to non-empty text. The time
   from the end of speech to the speaker's first audio and the turn's timings are written as
@@ -18,7 +20,8 @@ scenarios:
       - speech_server_running
       - start_reachy_daemon
       - start_brain: {engine: basic, speech: true}
-      - start_edge_agent: {id: lite, body: reachy, where: edge_host, energy_trigger_dbfs: -35, vad_end_ms: 700, record: true}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, energy_trigger_dbfs: -35, energy_trigger_feed_only: true, vad_end_ms: 700, record: true}
+      - room_level_measured: {client: lite}
       - feed_golden_wav: {client: lite, name: hello}
       - voice_turn_transcribed: {client: lite, max_wer: 0.2}
       - robot_speaks_reply: {client: lite, min_ms: 500}

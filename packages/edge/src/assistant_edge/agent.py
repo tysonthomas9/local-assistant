@@ -31,14 +31,17 @@ capabilities and then:
   sent first so the start of the utterance is not lost; it does not fire while speech plays
   nor for `ECHO_TAIL_MS` after (by capture time: the speaker's echo would barge in on
   itself). With `--vad-end-ms`, a window in which speech was heard closes after that much
-  quiet (`MIC-CLOSE reason=vad_end`).
+  quiet (`MIC-CLOSE reason=vad_end`). Tests pass `--energy-trigger-feed-only`: the trigger
+  then fires only on fed audio, so room sound cannot open a window before the golden WAV.
+- **Room level.** `/level <s>` measures the real microphone for that long (`LEVEL frames
+  mean_dbfs max_dbfs`).
 - **Recording** (`--record-dir`): each played speech stream is also written to
   `<dir>/stream-<id>.wav` (what the speaker was given) when it is done or flushed (`RECORDED`).
 - **Typed input.** Any other stdin line is sent as `text.input`.
 
 Every line it prints is `TAG key=value ... [json]` (the format of `assistant_link.console`).
 Tags: BODY, WELCOME, RECV, SENT, MIC-OPEN, MIC-CLOSE, FLUSHED, PLAYBACK, RESULT, SAY, SHOW,
-FEED, FED, RECORDED, BODY-ERROR, BODY-OK, CLOSED, RETRY, REFUSED, CONSOLE-ERROR, STOPPED.
+FEED, FED, LEVEL, RECORDED, BODY-ERROR, BODY-OK, CLOSED, RETRY, REFUSED, CONSOLE-ERROR, STOPPED.
 """
 
 import asyncio
@@ -133,6 +136,10 @@ class AgentOptions:
     """Close a window after this much quiet once speech was heard in it (None: off)."""
     record_dir: Path | None = None
     """Write each played speech stream to `<dir>/stream-<id>.wav` (None: off)."""
+    energy_trigger_feed_only: bool = False
+    """Tests: the energy trigger fires only on a golden WAV being fed (`/feed`), so room sound
+    on the real microphone cannot open a window before (or instead of) the fed utterance. The
+    real microphone still flows into the windows the brain opens and into push-to-talk."""
 
 
 class EdgeAgent:
@@ -157,6 +164,9 @@ class EdgeAgent:
         """Capture time before which the energy trigger stays off (`ECHO_TAIL_MS`)."""
         self._pre_roll: deque[AudioFrame] = deque(maxlen=PRE_ROLL_MS // FRAME_MS)
         self._feeding: asyncio.Task[None] | None = None
+        self._level_probe: list[float] | None = None
+        """Levels (dBFS) of the real microphone's frames while `/level` measures."""
+        self._level_task: asyncio.Task[None] | None = None
         self._recordings: dict[int, tuple[int, bytearray]] = {}
         self._stop = asyncio.Event()
 
@@ -456,7 +466,21 @@ class EdgeAgent:
         async for frame in self.body.audio.capture():
             if self._feeding is not None:
                 continue  # a golden WAV stands in for the microphone meanwhile
+            if self._level_probe is not None:
+                self._level_probe.append(dbfs(frame.pcm))
             await self._on_mic(frame)
+
+    async def _measure_level(self, seconds: float) -> None:
+        """`/level <s>`: the real microphone's level over `seconds` (LEVEL)."""
+        self._level_probe = []
+        try:
+            await asyncio.sleep(seconds)
+        finally:
+            levels, self._level_probe = self._level_probe, None
+        mean = sum(levels) / len(levels) if levels else -120.0
+        peak = max(levels) if levels else -120.0
+        emit("LEVEL", frames=len(levels), seconds=seconds, mean_dbfs=f"{mean:.1f}",
+             max_dbfs=f"{peak:.1f}")  # fmt: skip
 
     async def _feed(self, path: str) -> None:
         """Play a 16 kHz mono 16-bit WAV in at the mic input point, in real time."""
@@ -475,7 +499,8 @@ class EdgeAgent:
         started = time.monotonic()
         for index in range(frames):
             chunk = pcm[index * FRAME_BYTES : (index + 1) * FRAME_BYTES].ljust(FRAME_BYTES, b"\0")
-            await self._on_mic(AudioFrame(pcm=chunk, capture_ts_us=time.monotonic_ns() // 1000))
+            frame = AudioFrame(pcm=chunk, capture_ts_us=time.monotonic_ns() // 1000)
+            await self._on_mic(frame, fed=True)
             due = started + (index + 1) * FRAME_MS / 1000
             await asyncio.sleep(max(0.0, due - time.monotonic()))
         emit("FED", path=path, frames=frames, took_ms=f"{(time.monotonic() - started) * 1000:.0f}")
@@ -492,10 +517,11 @@ class EdgeAgent:
 
         self._feeding = asyncio.create_task(run(), name="feed")
 
-    async def _on_mic(self, frame: AudioFrame) -> None:
+    async def _on_mic(self, frame: AudioFrame, *, fed: bool = False) -> None:
         level = dbfs(frame.pcm)
         threshold = self.options.energy_trigger_dbfs
-        if self.window is None and threshold is not None and not self.muted:
+        armed = fed or not self.options.energy_trigger_feed_only
+        if self.window is None and threshold is not None and armed and not self.muted:
             # Not while speech plays, nor its tail: the speaker's own echo would trigger a
             # barge-in.
             loud = (
@@ -588,6 +614,9 @@ class EdgeAgent:
                 await self._open_window("wake", self.follow_up_max_s)
             case "feed", [path]:
                 self._start_feed(path)
+            case "level", [seconds]:
+                probe = float(seconds)
+                self._level_task = self._spawn(lambda: self._measure_level(probe), "level")
             case "mute", []:
                 await self._set_muted(True)
             case "unmute", []:
@@ -595,6 +624,6 @@ class EdgeAgent:
             case _:
                 raise ValueError(
                     f"unknown command {line!r}: /ptt down|up, /wake <word> [score], "
-                    "/feed <wav>, /mute, /unmute, /quit, or plain text"
+                    "/feed <wav>, /level <s>, /mute, /unmute, /quit, or plain text"
                 )
         return True

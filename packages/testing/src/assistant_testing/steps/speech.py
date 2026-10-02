@@ -459,6 +459,33 @@ async def feed_golden_wav(ctx: ScenarioContext, client: str, name: str) -> None:
     print(line.text)
 
 
+@step("room_level_measured")
+async def room_level_measured(ctx: ScenarioContext, client: str, seconds: float = 2.0) -> None:
+    """Measure the room on the edge agent's real microphone for `seconds` (`/level`, before a
+    feed) and put it in the timings (`room_level`): the microphone must deliver frames; the
+    level is recorded, not judged (an ordinary room may sit above the energy trigger)."""
+    agent = _client_name(client)
+    await ctx.processes.get(agent).write_line(f"/level {seconds}")
+    line = await _expect(ctx, agent, {"LEVEL", "CONSOLE-ERROR"}, seconds + 15, what="LEVEL")
+    assert line.tag == "LEVEL", f"the agent did not measure the room: {line.text}"
+    frames = int(line.fields.get("frames", 0))
+    expected = int(seconds * 1000 / 20)
+    assert frames >= expected // 2, (
+        f"the real microphone delivered {frames} frames in {seconds} s (want about {expected})"
+    )
+    mean, peak = float(line.fields["mean_dbfs"]), float(line.fields["max_dbfs"])
+    trigger = (_timings(ctx).get("energy_trigger") or {}).get("dbfs")
+    _timings(ctx)["room_level"] = {
+        "seconds": seconds,
+        "frames": frames,
+        "mean_dbfs": mean,
+        "max_dbfs": peak,
+        "above_energy_trigger": None if trigger is None else mean > trigger,
+    }
+    print(f"room level on the real microphone: mean {mean} dBFS, peak {peak} dBFS over "
+          f"{seconds} s ({frames} frames); energy trigger {trigger} dBFS")  # fmt: skip
+
+
 def _turn_input_time(ctx: ScenarioContext, client: str) -> tuple[float, str] | None:
     """When the user's input ended at the edge: the mic window closing after a fed utterance
     (end of speech or push-to-talk released) or the typed text.input (SENT), whichever came

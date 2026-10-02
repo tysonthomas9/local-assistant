@@ -35,6 +35,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="also write each played speech stream to <dir>/stream-<id>.wav",
     )
+    parser.add_argument(
+        "--energy-trigger-feed-only",
+        action="store_true",
+        help="tests: the energy trigger fires only on audio fed with /feed, not on room sound",
+    )
     args = parser.parse_args(argv)
     body = load_body(args.body)
     options = AgentOptions(
@@ -44,5 +49,6 @@ def main(argv: list[str] | None = None) -> int:
         energy_trigger_dbfs=args.energy_trigger_dbfs,
         vad_end_ms=args.vad_end_ms,
         record_dir=args.record_dir,
+        energy_trigger_feed_only=args.energy_trigger_feed_only,
     )
     return asyncio.run(EdgeAgent(body, options).run())
