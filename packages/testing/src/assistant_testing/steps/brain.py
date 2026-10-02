@@ -526,6 +526,8 @@ async def robot_pose_follows(
     _remember_start(ctx, await _robot_state(ctx))
     name = _client_name(client)
     agent = ctx.processes.get(name)
+    consumed = ctx.state["link"].consumed.setdefault(name, set())
+    consumed.update(line.index for line in _get_lines(agent, "MOTION"))  # before this turn
     sampler = await _start_sampler(ctx)
     motions: list[_Line] = []
     try:
@@ -536,6 +538,7 @@ async def robot_pose_follows(
                 what=f"MOTION attention={state}",
             )  # fmt: skip
             assert line.tag == "MOTION", f"the attention move failed: {line.text}"
+            assert line.fields.get("moved") == "true", f"the head did not move: {line.text}"
             motions.append(line)
         await asyncio.sleep(3 * SAMPLE_PERIOD_S)
     finally:
@@ -549,12 +552,12 @@ async def robot_pose_follows(
         print(f"  {line.text}")
     posed = [m for m in moves if m.get("state") in ATTENTION_POSES]
     assert posed, "no attention pose was moved to"
-    start = posed[0]["t_start"]
-    neutral_samples = [s for s in samples if s["t"] <= start]
-    # The neutral pose: the first pose is reached from neutral (after wake_up for a robot at
-    # rest), i.e. the last sample before it began.
-    assert neutral_samples, "no sample before the first attention move"
-    neutral = _matrix(neutral_samples[-1]["head_pose"])
+    # The neutral pose: read by the arbiter at `t_neutral` (after wake_up() for a robot at
+    # rest), before the first pose; the first sample from then on is the reference.
+    start = posed[0]["t_neutral"]
+    neutral_samples = [s for s in samples if s["t"] >= start]
+    assert neutral_samples, "no sample at the neutral pose"
+    neutral = _matrix(neutral_samples[0]["head_pose"])
     for move in posed:
         roll, pitch = ATTENTION_POSES[move["state"]]
         target = _mul(neutral, _matrix({"roll": math.radians(roll), "pitch": math.radians(pitch),

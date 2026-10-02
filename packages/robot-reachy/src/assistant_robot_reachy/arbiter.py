@@ -147,6 +147,8 @@ class MotionArbiter:
         self.last_move: dict[str, Any] | None = None
         self._neutral: np.ndarray | None = None
         """The neutral head pose while the robot attends (a turn is running), else None."""
+        self._neutral_t = 0.0
+        """When the neutral pose was read (this machine's monotonic clock)."""
         self._sleep_after = False
         """The robot was at rest when it began attending: back to sleep, torque off at idle."""
 
@@ -207,6 +209,7 @@ class MotionArbiter:
                     self.mini.wake_up()
                 self._sleep_after = at_rest
                 self._neutral = np.array(self.mini.get_current_head_pose(), dtype=float)
+                self._neutral_t = time.monotonic()
             roll, pitch = ATTENTION_POSES[state]
             target = self._neutral.copy()
             delta = create_head_pose(roll=roll, pitch=pitch, degrees=True)
@@ -216,12 +219,14 @@ class MotionArbiter:
                 "state": state,
                 "roll_deg": roll,
                 "pitch_deg": pitch,
+                "t_neutral": round(self._neutral_t, 3),
                 "t_start": round(started, 3),
                 "t_reached": round(time.monotonic(), 3),
             }
         if state not in REST_STATES:
             return None
         neutral, sleep = self._neutral, self._sleep_after or state != "idle"
+        neutral_t = self._neutral_t
         self._neutral, self._sleep_after = None, False
         if neutral is None and state == "idle":
             return None
@@ -235,6 +240,7 @@ class MotionArbiter:
             "state": state,
             "roll_deg": 0.0,
             "pitch_deg": 0.0,
+            "t_neutral": round(neutral_t, 3) if neutral is not None else None,
             "t_start": round(started, 3),
             "t_reached": round(reached, 3),
             "asleep": sleep,
