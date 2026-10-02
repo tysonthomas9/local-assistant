@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import os
+from pathlib import Path
 
 from assistant_edge.agent import AgentOptions, EdgeAgent
 from assistant_edge.bodies import available, load_body
@@ -22,6 +23,18 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="open a mic window when the level stays above this many dBFS (default: off)",
     )
+    parser.add_argument(
+        "--vad-end-ms",
+        type=int,
+        default=None,
+        help="close a mic window after this much quiet once speech was heard (needs the trigger)",
+    )
+    parser.add_argument(
+        "--record-dir",
+        type=Path,
+        default=None,
+        help="also write each played speech stream to <dir>/stream-<id>.wav",
+    )
     args = parser.parse_args(argv)
     body = load_body(args.body)
     options = AgentOptions(
@@ -29,5 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         url=args.url,
         token=args.token,
         energy_trigger_dbfs=args.energy_trigger_dbfs,
+        vad_end_ms=args.vad_end_ms,
+        record_dir=args.record_dir,
     )
     return asyncio.run(EdgeAgent(body, options).run())

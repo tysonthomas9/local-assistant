@@ -22,20 +22,34 @@ capabilities and then:
   `result{ok: false}`. `attention` goes to the body's motion, `privacy` (a request) is applied
   and echoed back as the authoritative state, `timer.sync` and `duck` are acknowledged on the
   console (timers ring from S5 on).
+- **Golden audio.** `/feed <wav>` plays a 16 kHz mono 16-bit WAV into the agent at the mic
+  input point, right after capture: its 20 ms frames, paced in real time, replace the
+  microphone's until it ends, so everything after capture (energy trigger, mic windows, the
+  end-of-speech detector, uplink) runs as for a voice (spec "testing rule": voice input).
+- **Energy trigger and end of speech** (`--energy-trigger-dbfs`, standing in for a wake-word
+  engine and VAD): a few loud frames open a mic window, with the last `PRE_ROLL_MS` of audio
+  sent first so the start of the utterance is not lost; it does not fire while speech plays
+  (the speaker's echo would barge in on itself). With `--vad-end-ms`, a window in which speech
+  was heard closes after that much quiet (`MIC-CLOSE reason=vad_end`).
+- **Recording** (`--record-dir`): each played speech stream is also written to
+  `<dir>/stream-<id>.wav` (what the speaker was given) when it is done or flushed (`RECORDED`).
 - **Typed input.** Any other stdin line is sent as `text.input`.
 
 Every line it prints is `TAG key=value ... [json]` (the format of `assistant_link.console`).
 Tags: BODY, WELCOME, RECV, SENT, MIC-OPEN, MIC-CLOSE, FLUSHED, PLAYBACK, RESULT, SAY, SHOW,
-BODY-ERROR, BODY-OK, CLOSED, RETRY, REFUSED, CONSOLE-ERROR, STOPPED.
+FEED, FED, RECORDED, BODY-ERROR, BODY-OK, CLOSED, RETRY, REFUSED, CONSOLE-ERROR, STOPPED.
 """
 
 import asyncio
 import contextlib
 import signal
 import time
+import wave
+from collections import deque
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any
 
 from pydantic import JsonValue
@@ -82,6 +96,11 @@ MIC_STREAM = 0
 PTT_MAX_S = 30.0
 ENERGY_FRAMES = 3
 """Consecutive loud frames that fire the energy trigger."""
+MIC_RATE = 16000
+FRAME_MS = 20
+FRAME_BYTES = MIC_RATE * 2 * FRAME_MS // 1000
+PRE_ROLL_MS = 300
+"""Audio before the energy trigger fired that is sent when its window opens."""
 
 
 @dataclass
@@ -92,6 +111,9 @@ class _Window:
     frames: int = 0
     level_sum: float = 0.0
     level_max: float = -120.0
+    heard: bool = False
+    """A frame of this window was above the energy threshold (speech)."""
+    quiet_ms: int = 0
 
 
 @dataclass
@@ -101,6 +123,10 @@ class AgentOptions:
     token: str
     energy_trigger_dbfs: float | None = None
     """Open a mic window when the level stays above this (None: off)."""
+    vad_end_ms: int | None = None
+    """Close a window after this much quiet once speech was heard in it (None: off)."""
+    record_dir: Path | None = None
+    """Write each played speech stream to `<dir>/stream-<id>.wav` (None: off)."""
 
 
 class EdgeAgent:
@@ -121,6 +147,9 @@ class EdgeAgent:
         self.flushed: set[int] = set()
         self.timers = 0
         self._loud = 0
+        self._pre_roll: deque[AudioFrame] = deque(maxlen=PRE_ROLL_MS // FRAME_MS)
+        self._feeding: asyncio.Task[None] | None = None
+        self._recordings: dict[int, tuple[int, bytearray]] = {}
         self._stop = asyncio.Event()
 
     # ------------------------------------------------------------ lifecycle
@@ -225,6 +254,10 @@ class EdgeAgent:
             if rate is None:
                 return  # flushed, or no speak.begin: drop
             self.voiced.add(frame.stream)
+            if self.options.record_dir is not None:
+                self._recordings.setdefault(frame.stream, (rate, bytearray()))[1].extend(
+                    frame.payload
+                )
             await self.body.audio.play(frame.stream, frame.payload, rate)
         elif frame.kind is FrameKind.SOUND_CLIP:
             emit("CLIP", stream=frame.stream, bytes=len(frame.payload))
@@ -235,6 +268,7 @@ class EdgeAgent:
         match message:
             case SpeakBegin():
                 self.flushed.discard(message.stream_id)
+                self._recordings.pop(message.stream_id, None)
                 self.speaking[message.stream_id] = message.rate
                 if message.text and hasattr(self.body, "say"):
                     self.body.say(message.stream_id, message.text)  # pyright: ignore[reportAttributeAccessIssue]
@@ -342,6 +376,7 @@ class EdgeAgent:
             self.speaking.pop(sid, None)
             self.voiced.discard(sid)
             self.flushed.add(sid)
+            self._save_recording(sid)
         took_ms = (time.monotonic() - started) * 1000
         emit("FLUSHED", stream=stream_id if stream_id is not None else "all",
              played_ms=played, local=str(local).lower(), took_ms=f"{took_ms:.1f}")  # fmt: skip
@@ -352,10 +387,25 @@ class EdgeAgent:
             if event.state in ("done", "flushed"):
                 self.speaking.pop(event.stream_id, None)
                 self.voiced.discard(event.stream_id)
+                self._save_recording(event.stream_id)
             emit("PLAYBACK", stream=event.stream_id, state=event.state, played_ms=event.played_ms)
             await self.send(
                 Playback(stream_id=event.stream_id, played_ms=event.played_ms, state=event.state)
             )
+
+    def _save_recording(self, stream_id: int) -> None:
+        recording = self._recordings.pop(stream_id, None)
+        if recording is None or self.options.record_dir is None:
+            return
+        rate, pcm = recording
+        self.options.record_dir.mkdir(parents=True, exist_ok=True)
+        path = self.options.record_dir / f"stream-{stream_id}.wav"
+        with wave.open(str(path), "wb") as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(rate)
+            out.writeframes(bytes(pcm))
+        emit("RECORDED", stream=stream_id, path=path, ms=len(pcm) * 1000 // (2 * rate))
 
     # ------------------------------------------------------------ microphone
 
@@ -395,18 +445,65 @@ class EdgeAgent:
 
     async def _capture_loop(self) -> None:
         async for frame in self.body.audio.capture():
+            if self._feeding is not None:
+                continue  # a golden WAV stands in for the microphone meanwhile
             await self._on_mic(frame)
+
+    async def _feed(self, path: str) -> None:
+        """Play a 16 kHz mono 16-bit WAV in at the mic input point, in real time."""
+        try:
+            with wave.open(path) as wav:
+                shape = (wav.getframerate(), wav.getnchannels(), wav.getsampwidth())
+                pcm = wav.readframes(wav.getnframes())
+        except (OSError, wave.Error, EOFError) as exc:
+            emit("CONSOLE-ERROR", {"detail": f"feed {path}: {type(exc).__name__}: {exc}"})
+            return
+        if shape != (MIC_RATE, 1, 2):
+            emit("CONSOLE-ERROR", {"detail": f"feed {path}: need 16 kHz mono 16-bit, got {shape}"})
+            return
+        frames = (len(pcm) + FRAME_BYTES - 1) // FRAME_BYTES
+        emit("FEED", path=path, frames=frames, ms=frames * FRAME_MS)
+        started = time.monotonic()
+        for index in range(frames):
+            chunk = pcm[index * FRAME_BYTES : (index + 1) * FRAME_BYTES].ljust(FRAME_BYTES, b"\0")
+            await self._on_mic(AudioFrame(pcm=chunk, capture_ts_us=time.monotonic_ns() // 1000))
+            due = started + (index + 1) * FRAME_MS / 1000
+            await asyncio.sleep(max(0.0, due - time.monotonic()))
+        emit("FED", path=path, frames=frames, took_ms=f"{(time.monotonic() - started) * 1000:.0f}")
+
+    def _start_feed(self, path: str) -> None:
+        if self._feeding is not None:
+            raise ValueError("a WAV is already being fed")
+
+        async def run() -> None:
+            try:
+                await self._feed(path)
+            finally:
+                self._feeding = None
+
+        self._feeding = asyncio.create_task(run(), name="feed")
 
     async def _on_mic(self, frame: AudioFrame) -> None:
         level = dbfs(frame.pcm)
         threshold = self.options.energy_trigger_dbfs
         if self.window is None and threshold is not None and not self.muted:
-            self._loud = self._loud + 1 if level > threshold else 0
+            # Not while speech plays: the speaker's own echo would trigger a barge-in.
+            loud = level > threshold and not self.speaking
+            self._loud = self._loud + 1 if loud else 0
+            self._pre_roll.append(frame)
             if self._loud >= ENERGY_FRAMES:
                 self._loud = 0
                 score = min(1.0, max(0.0, (level - threshold) / 30 + 0.5))
                 await self.send(Wake(word="energy", score=round(score, 3)))
                 await self._open_window("energy", self.follow_up_max_s)
+                pre_roll = list(self._pre_roll)
+                self._pre_roll.clear()
+                for earlier in pre_roll:  # this frame included, as the last one
+                    await self._uplink(earlier, dbfs(earlier.pcm))
+                return
+        await self._uplink(frame, level)
+
+    async def _uplink(self, frame: AudioFrame, level: float) -> None:
         window = self.window
         if window is None or self.muted:
             return  # no uplink outside a mic window
@@ -417,6 +514,15 @@ class EdgeAgent:
             window.frames += 1
             window.level_sum += level
             window.level_max = max(window.level_max, level)
+        threshold, end_ms = self.options.energy_trigger_dbfs, self.options.vad_end_ms
+        if threshold is None or end_ms is None:
+            return
+        if level > threshold:
+            window.heard, window.quiet_ms = True, 0
+        elif window.heard:
+            window.quiet_ms += FRAME_MS
+            if window.quiet_ms >= end_ms:
+                await self._close_window("vad_end")
 
     async def _set_muted(self, muted: bool) -> None:
         self.muted = muted
@@ -466,6 +572,8 @@ class EdgeAgent:
             case "wake", [word]:
                 await self.send(Wake(word=word, score=1.0))
                 await self._open_window("wake", self.follow_up_max_s)
+            case "feed", [path]:
+                self._start_feed(path)
             case "mute", []:
                 await self._set_muted(True)
             case "unmute", []:
@@ -473,6 +581,6 @@ class EdgeAgent:
             case _:
                 raise ValueError(
                     f"unknown command {line!r}: /ptt down|up, /wake <word> [score], "
-                    "/mute, /unmute, /quit, or plain text"
+                    "/feed <wav>, /mute, /unmute, /quit, or plain text"
                 )
         return True
