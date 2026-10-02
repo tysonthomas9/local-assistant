@@ -86,7 +86,12 @@ if [ "$stdin" = 1 ]; then
     feeder=$!
 fi
 
-state() { launchctl print "$job" 2>/dev/null; }
+# The runner stops a job by signalling this script's whole process group, which also hits
+# whatever command the script is running: the job checks below ignore those signals (an
+# ignored signal stays ignored across exec), else a signal landing on them would read as "the
+# job has ended" and the job would be booted out, its output cut, mid-shutdown.
+state() { (trap '' TERM INT HUP; exec launchctl print "$job") 2>/dev/null; }
+running() { (trap '' TERM INT HUP; state | grep -q '^	state = running'); }
 finish() {
     code=$1
     sleep 0.3
@@ -125,14 +130,14 @@ trap 'stop_job SIGINT' INT
 trap 'stop_job SIGHUP' HUP
 
 waited=0
-while state | grep -q '^	state = running'; do
+while running; do
     sleep 0.2
     if [ "$stopping" = 1 ]; then
         waited=$((waited + 1))
         [ "$waited" = 100 ] && launchctl kill SIGKILL "$job" 2>/dev/null  # 20 s after TERM
     fi
 done
-code=$(state | awk '$1 == "last" && $2 == "exit" && $3 == "code" {print $5; exit}')
+code=$( (trap '' TERM INT HUP; state | awk '$1 == "last" && $2 == "exit" && $3 == "code" {print $5; exit}') )
 case $code in
     ''|*[!0-9]*) code=70 ;;
 esac

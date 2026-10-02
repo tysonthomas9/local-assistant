@@ -202,8 +202,12 @@ class ReachyMotion:
         if arbiter is not None:
             # Unconditionally: `attend` waits (its lock) for a move still running in its thread
             # after the worker was cancelled, then rests the robot if that move woke it.
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(arbiter.attend, "idle")
+            try:
+                done = await asyncio.to_thread(arbiter.attend, "idle")
+            except Exception as exc:
+                emit("MOTION-ERROR", {"detail": f"{type(exc).__name__}: {exc}"}, rest="true")
+            else:
+                emit("MOTION", done or {}, rest="true", moved=str(done is not None).lower())
 
     async def express(self, name: str, intensity: float = 1.0) -> bool:
         arbiter = self._arbiter()

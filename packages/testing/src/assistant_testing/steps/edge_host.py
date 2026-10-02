@@ -482,7 +482,16 @@ async def edge_host_clean(ctx: ScenarioContext) -> None:
     if left:
         raise AssertionError(f"still running on {host.label}: {left}")
     if rested:
-        raise AssertionError(f"the scenario left the motors enabled (put to rest: {rested})")
+        motion = [
+            f"{proc.name}: {line}"
+            for proc in procs
+            for line in proc.lines
+            if line.startswith(("MOTION", "BODY-", "STOPPED", "Traceback")) or "attention" in line
+        ]
+        raise AssertionError(
+            f"the scenario left the motors enabled (put to rest: {rested}); the edge's motion "
+            "and health lines:\n" + "\n".join(motion[-30:])
+        )
 
 
 # ---------------------------------------------------------------- EdgeLink across machines
