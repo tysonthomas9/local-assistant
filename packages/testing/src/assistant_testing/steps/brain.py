@@ -475,6 +475,8 @@ async def restart_llm_server(ctx: ScenarioContext, within_s: float = 30.0) -> No
 
 
 ATTENTION_POSES = {"listening": (0.0, -5.0), "thinking": (7.0, -3.0), "speaking": (0.0, 0.0)}
+SETTLE_WINDOW_S = 0.5
+"""How long after a move's end the head may still be reaching its pose."""
 """What the reachy body's MotionArbiter.attend does per state: (roll, pitch) from neutral."""
 
 
@@ -544,7 +546,7 @@ async def robot_pose_follows(
             assert line.tag == "MOTION", f"the attention move failed: {line.text}"
             assert line.fields.get("moved") == "true", f"the head did not move: {line.text}"
             motions.append(line)
-        await asyncio.sleep(3 * SAMPLE_PERIOD_S)
+        await asyncio.sleep(SETTLE_WINDOW_S + 3 * SAMPLE_PERIOD_S)
     finally:
         await sampler.stop()
     samples = [p for line in _get_lines(sampler, "STATE") if (p := line.payload) is not None]
@@ -567,12 +569,19 @@ async def robot_pose_follows(
         roll, pitch = ATTENTION_POSES[move["state"]]
         target = _mul(neutral, _matrix({"roll": math.radians(roll), "pitch": math.radians(pitch),
                                          "yaw": 0.0}))  # fmt: skip
-        after = [s for s in samples if s["t"] >= move["t_reached"]]
-        assert after, f"no sample after {move['state']} was reached"
-        reached = after[0]
+        # The servos trail the commanded move a little and the next move may start at once:
+        # the pose counts as reached if the head comes within tolerance during the move or
+        # just after it (`SETTLE_WINDOW_S`).
+        window = [s for s in samples
+                  if move["t_start"] <= s["t"] <= move["t_reached"] + SETTLE_WINDOW_S]  # fmt: skip
+        assert window, f"no sample while {move['state']} was moved to"
+        reached = min(window, key=lambda s: _angle(target, _matrix(s["head_pose"])))
         error = _angle(target, _matrix(reached["head_pose"]))
         turned = _angle(neutral, _matrix(reached["head_pose"]))
-        print(f"  {move['state']} reached: {_degrees(reached['head_pose'])}")
+        print(
+            f"  {move['state']} closest at +{reached['t'] - move['t_reached']:.2f} s: "
+            f"{_degrees(reached['head_pose'])}"
+        )
         print(
             f"  {move['state']}: target roll {roll} pitch {pitch} deg; measured "
             f"{turned:.1f} deg from neutral, {error:.1f} deg off the target"
