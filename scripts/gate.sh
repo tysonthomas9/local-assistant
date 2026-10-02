@@ -327,7 +327,8 @@ stage_hw() {
     pytest_features hw || rc=$?
     # Teardown must have stopped everything on the robot's machine; anything still running from
     # ~/assistant-edge is stopped now and fails the stage.
-    swept="$(uv run --locked python -m assistant_testing.edge_host sweep | tee /dev/stderr | tail -1)"
+    uv run --locked python -m assistant_testing.edge_host sweep | tee "$STATE_DIR/sweep"
+    swept="$(tail -1 "$STATE_DIR/sweep")"
     note "$(cat "$STATE_DIR/note" 2>/dev/null); robot $where"
     if [[ "$swept" != "sweep: 0 "* ]]; then
         note "$(cat "$STATE_DIR/note"); LEFTOVERS: $swept"
