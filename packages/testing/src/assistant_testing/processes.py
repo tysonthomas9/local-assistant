@@ -211,6 +211,9 @@ class ManagedProcess:
         return self.proc.returncode
 
 
+REMOTE_STOP_GRACE_S = 30.0
+"""How long a remote process gets to exit after SIGTERM (see `RemoteProcess.stop`)."""
+
 REMOTE_PGID_MARK = "@@edge-pgid "
 """First line a remote process prints (from the launcher, before exec): its process group and
 the edge host's $HOME (so its output can show `~` instead of the user's home path)."""
@@ -344,8 +347,13 @@ class RemoteProcess(ManagedProcess):
             proc.kill()
             await proc.wait()
 
-    async def stop(self, grace_s: float = 10.0) -> int | None:
-        """SIGTERM the remote group, SIGKILL it after `grace_s`; then end the ssh client."""
+    async def stop(self, grace_s: float = REMOTE_STOP_GRACE_S) -> int | None:
+        """SIGTERM the remote group, SIGKILL it after `grace_s`; then end the ssh client.
+
+        The default outlasts edge_app_run.sh's own SIGKILL of its job (20 s after SIGTERM):
+        killed earlier, the script could not unload the job's LaunchAgent. A reachy edge agent
+        stopping puts the robot to rest first (a move still running, back to neutral, the
+        SDK's `goto_sleep()`: up to about 10 s)."""
         if self.remote_pgid is not None:
             if self.running:
                 await self._remote_kill("TERM", "CONT")

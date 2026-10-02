@@ -30,6 +30,7 @@ from assistant_testing import edge_host as eh
 from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.registry import step
 from assistant_testing.processes import (
+    REMOTE_STOP_GRACE_S,
     ManagedProcess,
     RemoteProcess,
     home_scrubber,
@@ -446,7 +447,7 @@ async def stop_reachy_daemon(ctx: ScenarioContext) -> None:
     url = _daemon_url(ctx)
     daemon: ManagedProcess = ctx.processes.get(DAEMON)
     await _rest_before_daemon_stops(host_of(ctx))
-    await daemon.stop(grace_s=20)
+    await daemon.stop(grace_s=REMOTE_STOP_GRACE_S)
     if "Daemon stopped successfully" not in daemon.output:
         raise AssertionError(f"daemon did not report a clean stop:\n{daemon.output[-3000:]}")
     try:
