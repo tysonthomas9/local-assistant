@@ -15,7 +15,7 @@ scenarios:
       - ollama_serves
       - speech_server_running
       - start_reachy_daemon
-      - start_brain: {engine: basic, speech: true, follow_up_s: 0}
+      - start_brain: {engine: basic, speech: true}
       - start_edge_agent: {id: lite, body: reachy, where: edge_host}
       - edge_types: {client: lite, text: "Please tell me a long story about a little robot who learns to paint, in at least six sentences."}
       - robot_speaks_reply: {client: lite, wait_done: false}
