@@ -9,7 +9,7 @@ from the uv workspace (`.venv-assistant`) and the legacy root `.venv`:
 
 ```bash
 uv sync --locked --project servers/speech
-CUDA_VISIBLE_DEVICES=1 servers/speech/.venv/bin/python -m assistant_speech --port 8772
+CUDA_VISIBLE_DEVICES=1 CUDA_DEVICE_ORDER=PCI_BUS_ID servers/speech/.venv/bin/python -m assistant_speech --port 8772
 ```
 
 It prints `READY url=http://127.0.0.1:8772 gpu=... gpu_memory_mib=... load_s=...` once both

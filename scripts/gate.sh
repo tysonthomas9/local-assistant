@@ -33,6 +33,9 @@
 # 127.0.0.1:8772. If none is serving there, the gate syncs its venv in the checkout under test
 # and starts it on GPU1 (CUDA_VISIBLE_DEVICES=1; it needs 8 GB free there), and stops it after
 # stage h. A server it did not start is used and left alone. Failing to start it fails g and h.
+# The system Ollama must be pinned to GPU0 (ollama.service: CUDA_VISIBLE_DEVICES=0,
+# CUDA_DEVICE_ORDER=PCI_BUS_ID, OLLAMA_VULKAN=0; one-time setting in docs/dev-setup.md), else
+# it spreads reachy-gemma4 over both GPUs and g and h fail.
 # Spoken turns write their timings to $ROOT/artifacts (ASSISTANT_ARTIFACTS_DIR).
 #   i  summary PASS/FAIL per stage. Exit 0 = PASS, 1 = FAIL, 3 = INCOMPLETE (a stage opted out)
 #
@@ -348,6 +351,15 @@ models_present() {
         printf 'Ollama: %s not answering or without %s\n' "$OLLAMA_URL" "$OLLAMA_MODEL"
         ok=1
     fi
+    # The LLM on GPU0 only, so the speech server fits on GPU1 whichever loads first.
+    if ! uv run --locked python -c '
+from assistant_testing.steps.brain import system_ollama_unpinned
+problem = system_ollama_unpinned()
+print(f"Ollama: {problem}" if problem else "Ollama: pinned to GPU0")
+raise SystemExit(1 if problem else 0)'; then
+        SPEECH_STATUS="$SPEECH_STATUS; Ollama not pinned to GPU0 (docs/dev-setup.md, 'Ollama on GPU0')"
+        ok=1
+    fi
     if curl -sf -o /dev/null -m 3 "$SPEECH_URL/health"; then
         printf 'speech server: %s answering (%s)\n' "$SPEECH_URL" "$SPEECH_STATUS"
     else
@@ -377,7 +389,7 @@ start_speech_server() {
         SPEECH_STATUS="uv sync of servers/speech failed"
         return 1
     fi
-    (cd "$WORK" && CUDA_VISIBLE_DEVICES="$SPEECH_GPU" exec "$venv/bin/python" -m assistant_speech \
+    (cd "$WORK" && CUDA_VISIBLE_DEVICES="$SPEECH_GPU" CUDA_DEVICE_ORDER=PCI_BUS_ID exec "$venv/bin/python" -m assistant_speech \
         --port "$SPEECH_PORT") >"$log" 2>&1 &
     SPEECH_PID=$!
     while ! grep -q '^READY ' "$log" 2>/dev/null; do

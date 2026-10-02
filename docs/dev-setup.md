@@ -45,10 +45,29 @@ checkout, so the legacy suite runs against the real legacy environment. Exit cod
 Before the robot (hw) and models stages the gate checks the models: Ollama with
 `reachy-gemma4`, and the speech server (`servers/speech`, see its README) on 127.0.0.1:8772.
 If none is serving there it syncs the speech server's venv and starts one on GPU1, and stops
-it again at the end; a server it did not start is left alone. No GPU, a busy GPU1 or no
-Ollama fail those stages. Timings of the spoken turns are kept in `artifacts/` of the
-checkout the gate was run from. See "The models tier" in `e2e/features/README.md` to run the
-models features by hand.
+it again at the end; a server it did not start is left alone. No GPU, a busy GPU1, no
+Ollama or an Ollama not pinned to GPU0 (below) fail those stages. Timings of the spoken turns
+are kept in `artifacts/` of the checkout the gate was run from. See "The models tier" in
+`e2e/features/README.md` to run the models features by hand.
+
+### Ollama on GPU0 (one-time setting)
+
+The LLM runs on GPU0 and the speech server on GPU1. Left alone, the system Ollama spreads
+`reachy-gemma4` (about 22 GB at its 32k context) over both GPUs, and then the speech server
+(about 7 GB) no longer fits on GPU1, or the reverse, depending on which loads first. Pin the
+service to GPU0 once. Ollama also drives the GPUs through Vulkan, which ignores
+`CUDA_VISIBLE_DEVICES`, so Vulkan is turned off:
+
+```bash
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+printf '[Service]\nEnvironment="CUDA_VISIBLE_DEVICES=0" "CUDA_DEVICE_ORDER=PCI_BUS_ID" "OLLAMA_VULKAN=0"\n' \
+  | sudo tee /etc/systemd/system/ollama.service.d/gpu0.conf
+sudo systemctl daemon-reload && sudo systemctl restart ollama
+```
+
+The gate and the models features check this setting (`systemctl show ollama`) and fail,
+naming it, while it is missing. An `ollama serve` that a feature starts itself gets the same
+environment.
 
 The hw stage uses the robot wherever it is plugged in. If it is attached to another machine
 (e.g. a Mac), see [Running robot tests with the robot on another machine](robot-on-another-machine.md).

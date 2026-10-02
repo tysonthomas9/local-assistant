@@ -20,6 +20,7 @@ import math
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 import urllib.error
@@ -56,6 +57,40 @@ LLM_MODEL = "reachy-gemma4"
 LLM_PROCESS = "llm"
 OLLAMA_MODELS = "/usr/share/ollama/.ollama/models"
 """The system Ollama's model store (world-readable): a test server uses the same models."""
+LLM_GPU = "0"
+OLLAMA_GPU_ENV = {"CUDA_VISIBLE_DEVICES": LLM_GPU, "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+                  "OLLAMA_VULKAN": "0"}  # fmt: skip
+"""The LLM on GPU0 only, so GPU1 stays free for the speech server whatever loads first.
+Ollama also drives the GPUs through Vulkan, which ignores CUDA_VISIBLE_DEVICES: it is off."""
+OLLAMA_PINNING_DOC = "docs/dev-setup.md, 'Ollama on GPU0'"
+
+
+def system_ollama_unpinned() -> str | None:
+    """Why the system Ollama service (systemd `ollama.service`) is not pinned to GPU0, or None.
+
+    Unpinned, Ollama spreads `reachy-gemma4` over both GPUs and the speech server no longer fits
+    on GPU1 (or the reverse, depending on which loads first)."""
+    try:
+        done = subprocess.run(
+            ["systemctl", "show", "ollama", "-p", "LoadState", "-p", "Environment"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"cannot read ollama.service with systemctl ({exc})"
+    props = dict(line.split("=", 1) for line in done.stdout.splitlines() if "=" in line)
+    if props.get("LoadState") != "loaded":
+        return "no systemd ollama.service: cannot check that the system Ollama runs on GPU0 only"
+    env = dict(item.split("=", 1) for item in props.get("Environment", "").split() if "=" in item)
+    wrong = [f"{k}={v}" for k, v in OLLAMA_GPU_ENV.items() if env.get(k) != v]
+    if wrong:
+        return (
+            f"the system Ollama is not pinned to GPU{LLM_GPU}: ollama.service lacks "
+            f"{' '.join(wrong)} (one-time setting, see {OLLAMA_PINNING_DOC})"
+        )
+    return None
 
 
 def _brain(ctx: ScenarioContext) -> dict[str, Any]:
@@ -445,7 +480,8 @@ async def _wait_llm_up(url: str, within_s: float) -> None:
 @step("start_llm_server")
 async def start_llm_server(ctx: ScenarioContext, within_s: float = 30.0) -> None:
     """Start a real `ollama serve` of the scenario's own on a free loopback port, with the
-    system Ollama's model store (so `reachy-gemma4` is there), and wait until it answers.
+    system Ollama's model store (so `reachy-gemma4` is there), on GPU0 only (`OLLAMA_GPU_ENV`),
+    and wait until it answers.
     It can be killed for real (`kill_llm_server`) without touching the system service."""
     port = _free_port()
     url = f"http://127.0.0.1:{port}"
@@ -454,6 +490,7 @@ async def start_llm_server(ctx: ScenarioContext, within_s: float = 30.0) -> None
         "OLLAMA_MODELS": os.environ.get("ASSISTANT_TEST_OLLAMA_MODELS", OLLAMA_MODELS),
         "OLLAMA_NOPRUNE": "1",
         "OLLAMA_KEEP_ALIVE": "5m",
+        **OLLAMA_GPU_ENV,
     }
     ctx.state["test_llm"] = {"url": url, "port": port}
     await ctx.processes.start(LLM_PROCESS, [_ollama(), "serve"], env=env)

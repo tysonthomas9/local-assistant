@@ -37,7 +37,7 @@ from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.registry import step
 from assistant_testing.processes import RemoteProcess
 from assistant_testing.steps import edge_host as edge_host_steps
-from assistant_testing.steps.brain import LLM_MODEL, SYSTEM_LLM, admin
+from assistant_testing.steps.brain import LLM_MODEL, SYSTEM_LLM, admin, system_ollama_unpinned
 from assistant_testing.steps.link import SERVER, _client_name, _expect, _free_port, _get_lines
 
 SPEECH = "speech"
@@ -116,6 +116,25 @@ def _gpu_free_mib(index: str) -> int | None:
     with contextlib.suppress(ValueError):
         return int(done.stdout.strip().splitlines()[0])
     return None
+
+
+def _gpu_apps(index: str) -> str:
+    """The compute processes on GPU `index` (nvidia-smi numbering), e.g. `ollama/llama-server
+    pid 123 13142 MiB`."""
+    query = ["nvidia-smi", "--query-compute-apps=gpu_bus_id,pid,process_name,used_memory",
+             "--format=csv,noheader,nounits"]  # fmt: skip
+    bus = ["nvidia-smi", f"--id={index}", "--query-gpu=pci.bus_id", "--format=csv,noheader"]
+    try:
+        apps = subprocess.run(query, capture_output=True, text=True, timeout=20, check=False)
+        gpu = subprocess.run(bus, capture_output=True, text=True, timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    found = []
+    for line in apps.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) == 4 and parts[0] == gpu.stdout.strip():
+            found.append(f"{parts[2]} pid {parts[1]} {parts[3]} MiB")
+    return ", ".join(found)
 
 
 def _check_health(health: dict[str, Any]) -> None:
@@ -205,10 +224,13 @@ async def _start_own(ctx: ScenarioContext) -> dict[str, Any]:
     free = _gpu_free_mib(SPEECH_GPU)
     assert free is not None, f"nvidia-smi cannot read GPU{SPEECH_GPU}: the speech server needs it"
     print(f"GPU{SPEECH_GPU}: {free} MiB free")
-    assert free >= MIN_FREE_GPU_MIB, (
-        f"GPU{SPEECH_GPU} has only {free} MiB free (the speech server needs {MIN_FREE_GPU_MIB}); "
-        "it is busy with other work"
-    )
+    if free < MIN_FREE_GPU_MIB:
+        unpinned = system_ollama_unpinned()
+        raise AssertionError(
+            f"GPU{SPEECH_GPU} has only {free} MiB free (the speech server needs "
+            f"{MIN_FREE_GPU_MIB}); on it: {_gpu_apps(SPEECH_GPU) or 'unknown'}"
+            + (f"; {unpinned}" if unpinned else "")
+        )
     root = ctx.repo_root
     venv = root / "servers/speech/.venv"
     env = {"UV_PROJECT_ENVIRONMENT": str(venv), "VIRTUAL_ENV": ""}
@@ -226,7 +248,11 @@ async def _start_own(ctx: ScenarioContext) -> dict[str, Any]:
     proc = await ctx.processes.start(
         SPEECH,
         argv,
-        env={"CUDA_VISIBLE_DEVICES": SPEECH_GPU, "PYTHONUNBUFFERED": "1"},
+        env={
+            "CUDA_VISIBLE_DEVICES": SPEECH_GPU,
+            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+            "PYTHONUNBUFFERED": "1",
+        },
         ready_line=r"^READY ",
         ready_timeout=READY_TIMEOUT_S,
     )
@@ -297,8 +323,11 @@ async def restart_speech_server(ctx: ScenarioContext) -> None:
 
 @step("ollama_serves")
 async def ollama_serves(ctx: ScenarioContext, model: str = LLM_MODEL) -> None:
-    """The system Ollama answers and has `model` (default reachy-gemma4)."""
+    """The system Ollama answers, has `model` (default reachy-gemma4) and is pinned to GPU0
+    (so the speech server always fits on GPU1, see `brain.system_ollama_unpinned`)."""
     del ctx
+    unpinned = await asyncio.to_thread(system_ollama_unpinned)
+    assert unpinned is None, unpinned
     try:
         data, _ = await asyncio.to_thread(_request, "GET", f"{SYSTEM_LLM}/api/tags", None)
     except OSError as exc:

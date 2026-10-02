@@ -77,11 +77,12 @@ The model weights come from the Hugging Face cache (`~/.cache/huggingface/hub`:
 runs offline, so download them once with `--online` (see `servers/speech/README.md`). A feature
 uses the speech server already serving on 127.0.0.1:8772 (the gate starts one there) or starts
 one of its own on GPU1 for the scenario. No GPU, a busy GPU1 (less than 8 GB free), missing
-weights or no Ollama fail the features; they are never skipped. To share one server across a
-run, start it first:
+weights, no Ollama or an Ollama not pinned to GPU0 (the one-time setting in
+`docs/dev-setup.md`, "Ollama on GPU0": else it spreads `reachy-gemma4` over both GPUs) fail the
+features; they are never skipped. To share one server across a run, start it first:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 servers/speech/.venv/bin/python -m assistant_speech --port 8772
+CUDA_VISIBLE_DEVICES=1 CUDA_DEVICE_ORDER=PCI_BUS_ID servers/speech/.venv/bin/python -m assistant_speech --port 8772
 uv run pytest e2e -m models
 ```
 
@@ -178,7 +179,7 @@ remote process group, and teardown stops them. The daemon API (`ssh -L`) and Edg
 | `daemon_status_is` | `state = running`, `version: str?` | `GET /api/daemon/status` (through the tunnel): state, backend ready, no error |
 | `robot_state_read` | `control_mode: str?` | `GET /api/state/full`: head pose, body yaw, both antennas (and the motor mode) |
 | `stop_reachy_daemon` | none | SIGTERM; the daemon reports a clean stop and stops answering |
-| `edge_host_clean` | none | Stops this scenario's processes on the edge host; nothing from `~/assistant-edge` may still run there |
+| `edge_host_clean` | none | Stops this scenario's processes on the edge host, the daemon last; the motors must be disabled by then (else the robot is put to rest, SDK `goto_sleep` and torque off, and the step fails) and nothing from `~/assistant-edge` may still run there. Any teardown also rests the robot before its daemon stops: the motors' torque outlives the daemon |
 
 ### The edge agent and the robot (`steps/edge.py`)
 
@@ -257,7 +258,7 @@ reachy bodies do; the link client console does not, so use `brain_state_is` with
 | `llm_gate_never_exceeded` | `max_in_flight` | From the gate's event log: never more requests at once |
 | `voice_request_admitted_first` | none | From the gate's event log: the voice request was admitted before every background request already waiting (and some were) |
 | `llm_request_log` | `priority: bool`, `classes: map?` | Every request carries `priority` (with this value per class), or none does |
-| `start_llm_server` / `kill_llm_server` / `restart_llm_server` | `within_s = 30` | A real `ollama serve` of the scenario's own on a free loopback port (the system model store); killed for real with SIGKILL (runners included), restarted on the same port |
+| `start_llm_server` / `kill_llm_server` / `restart_llm_server` | `within_s = 30` | A real `ollama serve` of the scenario's own on a free loopback port (the system model store), on GPU0 only; killed for real with SIGKILL (runners included), restarted on the same port |
 | `robot_pose_follows` | `client`, `text`, `states: list[str]`, `tolerance_deg = 6`, `max_head_deg = 10` | Types `text`; the body's MOTION lines follow the attention `states`; a sampler on the robot's machine checks each pose within `tolerance_deg` of neutral turned by the state's roll/pitch, and no more than `max_head_deg` from neutral (remembers the start pose for `robot_back_at_rest`) |
 
 ### Speech (`steps/speech.py`)
@@ -272,7 +273,7 @@ punctuation.
 |---|---|---|
 | `speech_server_running` | none | Uses the speech server serving on 127.0.0.1:8772, else starts one of the scenario's own on GPU1 (fails if GPU1 has less than 8 GB free); checks it runs on a GPU |
 | `start_speech_server` / `stop_speech_server` / `kill_speech_server` / `restart_speech_server` | none | A speech server of the scenario's own on a free loopback port; stopped (SIGTERM) or killed for real (SIGKILL), then restarted on the same port; it must stop or start answering |
-| `ollama_serves` | `model = reachy-gemma4` | The system Ollama answers and has the model |
+| `ollama_serves` | `model = reachy-gemma4` | The system Ollama answers, has the model and is pinned to GPU0 |
 | `transcribe_golden_wav` | `name` | The speech server transcribes `tests/fixtures/audio/<name>.wav` (STT time recorded) |
 | `transcript_matches` | `text: str?`, `max_wer = 0.2` | The last transcript matches `text` (default: what the golden WAV or the TTS said) with at most this word error rate |
 | `tts_gives_audio` | `text`, `voice = ryan`, `min_s = 0.5`, `max_s = 30`, `min_voiced = 0.4` | The TTS streams `min_s` to `max_s` seconds of audio, first audio before the end, with at least `min_voiced` of its 20 ms frames above -45 dBFS (first-audio time recorded) |
