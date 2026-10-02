@@ -1,0 +1,23 @@
+feature: The edge agent survives a daemon restart
+tier: hw
+description: >
+  The real daemon is stopped while the edge agent runs: the agent notices within seconds,
+  stops its speaker, tells the brain error{body_unavailable} and keeps its EdgeLink up. When
+  the daemon is back the agent reconnects to the robot on its own, and the robot nods again
+  (and returns to rest, motors disabled).
+scenarios:
+  - name: the daemon is stopped and started again; the body recovers
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - stop_reachy_daemon
+      - edge_body_lost: {client: lite, within_s: 10}
+      - start_reachy_daemon
+      - edge_body_recovers: {client: lite, within_s: 60}
+      - robot_nods: {client: lite, degrees: 5}
+      - robot_back_at_rest
+      - client_stayed_connected: lite
+      - edge_host_clean

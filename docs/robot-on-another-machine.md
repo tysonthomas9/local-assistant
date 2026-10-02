@@ -89,11 +89,20 @@ Python 3.12, and installs them only if they are missing. Everything else goes in
 - **Tunnel ports.** An `ssh -R` port counts as ours only if, after the port is seen listening,
   our ssh is still running and did not log "remote port forwarding failed" (someone else may
   have taken the port first); otherwise another port is tried.
-- **The daemon** runs with its API on `127.0.0.1:8000` on the edge host, with no media and no
-  wake-up or sleep motion. The PC reads it through an `ssh -L` tunnel. Upstream behaviour: the
-  reachy-mini daemon always announces itself over mDNS (UDP 5353, service `reachy_mini`) on the
-  edge host's network, advertising port 8000. The port is bound to loopback, so the
-  announcement points at something the LAN cannot reach.
+- **The daemon** runs WITH media (camera, WebRTC) and no wake-up or sleep motion, started as
+  `python -m assistant_robot_reachy.daemon` from the synced checkout. That launcher keeps every
+  socket on loopback: the API on `127.0.0.1:8000`, the WebRTC signalling server (upstream:
+  `0.0.0.0:8443`) on `127.0.0.1:8443`, and no mDNS announcement (upstream: UDP 5353 on every
+  interface). The hw feature `robot/daemon_connect.yaml` checks it with `lsof`. The PC reads
+  the API through an `ssh -L` tunnel.
+- **macOS camera and microphone permission (once).** macOS asks the *responsible* process for
+  camera and microphone access; for anything started over SSH that is `sshd`, which can never
+  be granted, so the camera fails and the microphone records silence. The daemon and the
+  reachy edge agent therefore start through `assistant_robot_reachy.own_permissions`, which
+  makes the venv's Python responsible for itself. The first run shows a prompt on the Mac's
+  screen ("python3.12" would like to access the camera / microphone): someone at the Mac
+  clicks **Allow** once (or enables Python under System Settings > Privacy & Security >
+  Camera and Microphone). Until then the daemon hangs while opening the robot's sound card.
 - **EdgeLink** stays on `127.0.0.1` on the PC. A process on the edge host reaches it through an
   `ssh -R` tunnel to `127.0.0.1` there. Plain `ws://` never crosses the LAN. S7 replaces the
   tunnel with TLS and pairing.

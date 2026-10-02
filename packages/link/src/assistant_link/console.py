@@ -8,8 +8,11 @@ the production `LinkServer` / `LinkClient` over a real WebSocket.
 
 Every output line is `TAG key=value ... [json]`; the JSON (if any) starts at the first `{`.
 Server tags: LISTENING, CONNECTED, RECV, FRAME, SENT, SENT-FRAME, REFUSED, DISCONNECTED,
-CONSOLE-ERROR. Client tags: WELCOME, RECV, FRAME, SENT, SENT-FRAME, FRAME-REFUSED, REFUSED,
-CLOSED, RETRY, GAVE-UP, CONSOLE-ERROR. Both: FLOOD-STARTED, FLOOD-DONE, FLOOD-STOPPED.
+STREAMED, JPEG, CONSOLE-ERROR. A received 0x01 mic frame's FRAME line carries its level
+(`dbfs=`); 0x03 chunks of one slot are joined and, once a whole JPEG has arrived, printed as
+`JPEG device= slot= bytes= width= height=`.
+Client tags: WELCOME, RECV, FRAME, SENT, SENT-FRAME, FRAME-REFUSED, REFUSED, CLOSED, RETRY,
+GAVE-UP, CONSOLE-ERROR. Both: FLOOD-STARTED, FLOOD-DONE, FLOOD-STOPPED.
 DISCONNECTED and CLOSED carry `stalled=true` when the write-stall watchdog dropped the link.
 
 Server stdin commands:            Client stdin commands:
@@ -18,9 +21,13 @@ Server stdin commands:            Client stdin commands:
   flood <device> <kind> <n> [k=v]   flood <kind> <n> [bytes=N] [stream=N]
   raw <device> <text>               raw <text>
   close <device> <code> [reason]    quit
+  stream <device> <stream_id> <clip> [rate=N] [text=... (rest of line)]
   quit
 `<kind>` is a name (mic_pcm, out_pcm, jpeg_chunk, sound_clip, opus) or a number (0x01).
 Frame payloads are a deterministic byte pattern; both sides print its CRC-32.
+`stream` sends real speech the way the brain does: `speak.begin`, the clip as 20 ms 0x02 frames
+(as fast as the link takes them), `speak.end`. `<clip>` is `tone:<hz>:<seconds>` or the path
+of a 16-bit mono WAV file.
 """
 
 import argparse
@@ -31,6 +38,7 @@ import os
 import sys
 import threading
 import time
+import wave
 import zlib
 from collections.abc import Awaitable, Callable
 from importlib.metadata import version
@@ -48,6 +56,8 @@ from assistant_contracts.messages import (
     parse_message,
 )
 from assistant_contracts.version import PROTOCOL_VERSION
+from assistant_core.jpeg import jpeg_size
+from assistant_core.levels import dbfs, tone
 from assistant_link.auth import DevTokenVerifier
 from assistant_link.client import LinkClient
 from assistant_link.connection import Connection, LinkClosed, SendQueueFull, WrongDirection
@@ -187,10 +197,50 @@ async def read_commands(handle: Callable[[str], Awaitable[bool]]) -> None:
 # ---------------------------------------------------------------- server console
 
 
+def load_clip(clip: str, rate: int) -> tuple[bytes, int]:
+    """(s16le mono PCM, its rate) for `tone:<hz>:<seconds>` or a 16-bit mono WAV path."""
+    if clip.startswith("tone:"):
+        _, hz, seconds = clip.split(":")
+        return tone(float(hz), float(seconds), rate), rate
+    with wave.open(clip, "rb") as wav:
+        if wav.getsampwidth() != 2 or wav.getnchannels() != 1:
+            raise ValueError(f"{clip}: need 16-bit mono WAV")
+        return wav.readframes(wav.getnframes()), wav.getframerate()
+
+
+async def stream_speech(conn: Connection, stream_id: int, clip: str, options: list[str]) -> None:
+    rate, text = 24000, None
+    for i, option in enumerate(options):
+        key, _, value = option.partition("=")
+        if key == "rate":
+            rate = int(value)
+        elif key == "text":
+            text = " ".join([value, *options[i + 1 :]])  # the rest of the line
+            break
+        else:
+            raise ValueError(f"unknown stream option {option!r}")
+    pcm, rate = load_clip(clip, rate)
+    begin = parse_message(
+        {"type": "speak.begin", "stream_id": stream_id, "rate": rate, "text": text}
+    )
+    await conn.send(begin)
+    emit("SENT", dump_message(begin), device=conn.device_id, type=begin.type)
+    step = rate * 2 // 50  # 20 ms
+    for seq, offset in enumerate(range(0, len(pcm), step)):
+        chunk = pcm[offset : offset + step]
+        await conn.send_frame(Frame(FrameKind.OUT_PCM, stream_id, seq, 0, chunk))
+    end = parse_message({"type": "speak.end", "stream_id": stream_id})
+    await conn.send(end)
+    emit("SENT", dump_message(end), device=conn.device_id, type=end.type)
+    emit("STREAMED", device=conn.device_id, stream=stream_id, rate=rate,
+         ms=len(pcm) * 1000 // (2 * rate), bytes=len(pcm))  # fmt: skip
+
+
 class ServerConsole:
     def __init__(self, accept_opus: bool) -> None:
         self.accept_opus = accept_opus
         self.server: LinkServer | None = None
+        self.jpeg: dict[tuple[str, int], bytearray] = {}
 
     async def on_connect(self, conn: Connection, hello: Hello) -> Welcome:
         caps = hello.body.capabilities
@@ -211,7 +261,21 @@ class ServerConsole:
         emit("RECV", dump_message(message), device=conn.device_id, type=message.type)
 
     async def on_frame(self, conn: Connection, frame: Frame) -> None:
-        emit("FRAME", device=conn.device_id, **frame_fields(frame))
+        fields = frame_fields(frame)
+        if frame.kind is FrameKind.MIC_PCM:
+            fields["dbfs"] = f"{dbfs(frame.payload):.1f}"
+        emit("FRAME", device=conn.device_id, **fields)
+        if frame.kind is FrameKind.JPEG_CHUNK:
+            key = (conn.device_id, frame.stream)
+            if frame.seq == 0:
+                self.jpeg[key] = bytearray()
+            data = self.jpeg.setdefault(key, bytearray())
+            data += frame.payload
+            if data.endswith(b"\xff\xd9"):
+                size = jpeg_size(bytes(data)) or (0, 0)
+                emit("JPEG", device=conn.device_id, slot=frame.stream, bytes=len(data),
+                     width=size[0], height=size[1])  # fmt: skip
+                del self.jpeg[key]
 
     async def on_disconnect(self, conn: Connection, code: int | None, reason: str) -> None:
         stalled = str(conn.stalled).lower()
@@ -256,6 +320,9 @@ class ServerConsole:
         elif command == "close":
             device, code, *reason = rest.split()
             await self._conn(device).close(int(code), " ".join(reason))
+        elif command == "stream":
+            device, stream_id, clip, *options = rest.split()
+            await stream_speech(self._conn(device), int(stream_id), clip, options)
         else:
             raise ValueError(f"unknown command {command!r}")
         return True

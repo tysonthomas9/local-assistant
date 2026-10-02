@@ -143,10 +143,47 @@ remote process group, and teardown stops them. The daemon API (`ssh -L`) and Edg
 | `robot_host_found` | none | Picks the machine with the robot and prints it; fails (never skips) if neither this PC nor the edge host has its USB serial device |
 | `edge_host_bootstrapped` | `reachy_mini: str` | Runs `scripts/edge_host_bootstrap.sh` there (installs once, then only validates) and checks the pinned reachy-mini version and the robot device |
 | `code_synced_to_edge_host` | none | `git push`es this checkout's HEAD to the edge host over SSH, checks it out in `~/assistant-edge/src` and `uv sync`s only the edge packages |
-| `start_reachy_daemon` | `ready_within_s = 90` | Starts the real reachy-mini daemon there (API on 127.0.0.1, no media, no wake-up/sleep motion); fails if a daemon it did not start already answers |
+| `start_reachy_daemon` | `ready_within_s = 120` | Starts the real reachy-mini daemon there WITH media (`python -m assistant_robot_reachy.daemon` from the synced checkout: API on 127.0.0.1, WebRTC signalling on 127.0.0.1:8443, no mDNS; no wake-up/sleep motion); fails if a daemon it did not start already answers |
+| `reachy_daemon_running` | `ready_within_s = 120` | Reuses a daemon that already answers there, else starts one as above; teardown stops only one it started (the `reachy_daemon` pytest fixture does the same) |
+| `daemon_ports_on_loopback` | `listening: list[int]?` (default 8000, 8443) | `lsof` of the daemon's process group: every socket is on 127.0.0.1 / [::1] at both ends (no `*`, no LAN address, no mDNS 5353) and it LISTENs on 127.0.0.1 at each port |
 | `daemon_status_is` | `state = running`, `version: str?` | `GET /api/daemon/status` (through the tunnel): state, backend ready, no error |
 | `robot_state_read` | `control_mode: str?` | `GET /api/state/full`: head pose, body yaw, both antennas (and the motor mode) |
 | `stop_reachy_daemon` | none | SIGTERM; the daemon reports a clean stop and stops answering |
 | `edge_host_clean` | none | Stops this scenario's processes on the edge host; nothing from `~/assistant-edge` may still run there |
 
-Later tasks add `start` (brain), `start_edge`, `expect_message` and the robot and model steps.
+### The edge agent and the robot (`steps/edge.py`)
+
+The real edge agent (`python -m assistant_edge --body console|reachy`) is a link client: its
+process is `client:<id>`, so the link steps above (`server_sends`, `server_receives`,
+`kill_process`, `restart_process`, `client_reconnects_within`, ...) work on it too. `body` is
+`console` (prints what it would do; its speaker is a real-time playback clock with no sound
+device) or `reachy` (the real robot through the reachy-mini SDK; runs where the robot is,
+`where: edge_host`, and needs the daemon). Robot moves are measured from the daemon's
+`/api/state/full`, sampled while the robot moves; the arbiter limits a nod to 10 degrees and a
+wiggle to 20, always returns to the start pose and leaves the motors as they were.
+
+| Step | Arguments | Does |
+|---|---|---|
+| `start_edge_agent` | `id`, `body: console \| reachy = console`, `where: pc \| edge_host = pc`, `wait = true`, `energy_trigger_dbfs: float?`, `within_s = 60` | Starts the edge agent; waits for its BODY line and welcome unless `wait: false` |
+| `edge_body_is` | `client`, `aec: none \| sw \| hw?`, `camera: bool?`, `expressions: list[str]?` | The body's announced capabilities (and the hello the server got); `aec: hw` also checks the XVF3800 report (board found, one far-end reference) |
+| `edge_types` | `client`, `text` | Types a line into the agent (`/ptt down`, `/mute`, ... or text, sent as text.input) |
+| `press_push_to_talk` / `release_push_to_talk` | `client` | `/ptt down` opens a mic window (MIC-OPEN); `/ptt up` closes it (MIC-CLOSE) |
+| `edge_answers` | `client`, `type`, `fields: map?`, `ok = true`, `error_contains: str?`, `within_s = 10` | The server sends a request; the edge's `result` for that id has `ok` (and the error text) |
+| `edge_output_clean` | `client` | No traceback, CONSOLE-ERROR, UNHANDLED or BODY-ERROR line from the agent |
+| `edge_agent_fails` | `client`, `contains: str`, `within_s = 60` | The agent exited non-zero, said `contains` and never connected |
+| `client_stayed_connected` | `client` | One welcome, no CLOSED, no RETRY: the link never dropped |
+| `server_streams_speech` | `client`, `stream: int`, `clip: str`, `rate = 24000`, `text: str?` | The server console's `stream` command: speak.begin, 20 ms 0x02 frames, speak.end; `clip` is `tone:<hz>:<seconds>` or a 16-bit mono WAV path |
+| `playback_reported` | `client`, `stream`, `state: started \| progress \| done \| flushed`, `min_played_ms: int?`, `max_played_ms: int?`, `within_s = 10` | The server got the edge's playback clock in that state (`progress`: the first with at least `min_played_ms`) |
+| `playback_paced` | `client`, `stream`, `ms: int` | started -> done took 90 % of `ms` to `ms` + 1.5 s, and done reports `ms` (±5 %) played |
+| `playback_stops_within` | `client`, `stream`, `ms: float`, `local = true` | The edge's FLUSHED line (local on barge-in, else the brain's flush) took at most `ms`, and the server got playback{flushed} |
+| `barge_in_reported` | `client`, `stream`, `min_played_ms = 0`, `max_played_ms: int?`, `within_s = 5` | The server got vad{start, barge_in, stream_id, played_ms} |
+| `uplink_audio_live` | `client`, `min_frames: int`, `above_dbfs = -100`, `within_s = 10` | At least `min_frames` mic frames reached the server; the loudest is above `above_dbfs` and the level varies (not digital silence) |
+| `uplink_carries_no_audio` | `client`, `seconds: float` | No mic frame from the edge reaches the server for `seconds` |
+| `robot_nods` | `client`, `degrees: float` (at most 10) | express{yes}; the sampled head pitch peaks between half of `degrees` and `degrees` + 3, and the result is ok |
+| `antennas_wiggle` | `client`, `degrees: float` (at most 20) | express{happy}; both antennas swing between half of `degrees` and `degrees` + 5, and the result is ok |
+| `robot_back_at_rest` | `head_deg = 2`, `antenna_deg = 5` | After the move the head and antennas are back at their start and the motor mode is what it was |
+| `robot_camera_frame` | `client`, `slot = 1`, `max_side = 640`, `min_bytes = 2000` | snapshot; the server reassembles a whole JPEG on `slot` that fits `max_side` and matches the result |
+| `edge_body_lost` | `client`, `within_s = 10` | The daemon went away: BODY-ERROR from the agent, error{body_unavailable} at the server |
+| `edge_body_recovers` | `client`, `within_s = 30` | The agent reconnected its body on its own (BODY-OK) |
+
+Later tasks add `start` (brain) and the model steps.

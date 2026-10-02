@@ -139,6 +139,15 @@ async def _expect(
     return parsed
 
 
+def _get_lines(proc: ManagedProcess, tag: str) -> list[_Line]:
+    """Every output line of `proc` with this tag so far (consumed or not)."""
+    return [
+        line
+        for i, text in enumerate(proc.lines)
+        if (line := _parse(i, text)) is not None and line.tag == tag
+    ]
+
+
 async def _type(ctx: ScenarioContext, process: str, command: str) -> ManagedProcess:
     proc = ctx.processes.get(process)
     await proc.write_line(command)
@@ -236,6 +245,8 @@ async def restart_process(ctx: ScenarioContext, process: str) -> None:
     name = _process_name(process)
     ready = r"^LISTENING " if name == SERVER else None
     await ctx.processes.restart(name, ready_line=ready)
+    # The new process prints from line 0 again: what was consumed belonged to the old one.
+    _link(ctx).consumed.pop(name, None)
 
 
 @step("wait")

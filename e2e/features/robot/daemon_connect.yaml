@@ -1,0 +1,34 @@
+feature: The edge agent drives the real robot through the daemon
+tier: hw
+description: >
+  The real reachy-mini daemon runs on the robot's machine WITH media (camera and WebRTC), and
+  every one of its sockets stays on loopback: lsof shows the HTTP API (8000) and the WebRTC
+  signalling server (8443) listening on 127.0.0.1 only, nothing on all interfaces or a LAN
+  address, no mDNS. The real edge agent with the reachy body starts there, connects to the
+  robot through the reachy-mini SDK (audio straight from the robot's XVF3800 sound card, whose
+  hardware echo canceller is on; camera frames from the daemon) and dials the link server on
+  this PC. Nothing moves: the motors stay disabled. Without the daemon (no robot) the reachy
+  body refuses to start, so nothing can move.
+scenarios:
+  - name: the daemon runs with media, all on loopback; the reachy body connects
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - daemon_status_is: {state: running, version: "1.10.0"}
+      - daemon_ports_on_loopback
+      - edge_body_is: {client: lite, aec: hw, camera: true, expressions: ["yes", happy]}
+      - robot_state_read: {control_mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: without the daemon the reachy body refuses to start
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, wait: false}
+      - edge_agent_fails: {client: lite, contains: "no robot"}
+      - edge_host_clean

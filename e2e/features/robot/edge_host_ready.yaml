@@ -5,8 +5,8 @@ description: >
   alias) instead of this PC; a robot attached to this PC is used first. The edge host is
   bootstrapped (or validated) with scripts/edge_host_bootstrap.sh, gets the exact commit under
   test by git push over SSH and `uv sync`s the edge packages. The real reachy-mini daemon is
-  started there with its API on 127.0.0.1, read through an SSH tunnel, and stopped again; the
-  robot does not move (motors stay disabled). A real EdgeLink client then runs on the edge
+  started there WITH media, every socket of it on loopback (its API on 127.0.0.1, read through
+  an SSH tunnel), and stopped again; the robot does not move (motors stay disabled). A real EdgeLink client then runs on the edge
   host and talks to a link server on this PC through an `ssh -R` tunnel, loopback on both ends.
 scenarios:
   - name: bootstrap, start the daemon, read the robot, stop the daemon
@@ -16,6 +16,7 @@ scenarios:
       - code_synced_to_edge_host
       - start_reachy_daemon
       - daemon_status_is: {state: running, version: "1.10.0"}
+      - daemon_ports_on_loopback
       - robot_state_read: {control_mode: disabled}
       - stop_reachy_daemon
       - edge_host_clean

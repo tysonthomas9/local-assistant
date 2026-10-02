@@ -5,9 +5,11 @@ attached here, else the SSH alias from config `[test.edge_host] ssh` / ASSISTANT
 Nothing here is simulated: the bootstrap script, `git push`, `uv sync`, the reachy-mini daemon
 and the SSH tunnels are all real, and every process is stopped in teardown.
 
-The daemon's HTTP API stays on 127.0.0.1 on the edge host; the PC reaches it through an
-`ssh -L` tunnel. EdgeLink stays on 127.0.0.1 on the PC; an edge-host process reaches it through
-an `ssh -R` tunnel (S7 replaces the tunnel with TLS and pairing).
+The daemon runs with media (camera, WebRTC) through `python -m assistant_robot_reachy.daemon`,
+which keeps every one of its sockets on loopback. Its HTTP API stays on 127.0.0.1 on the edge
+host; the PC reaches it through an `ssh -L` tunnel. EdgeLink stays on 127.0.0.1 on the PC; an
+edge-host process reaches it through an `ssh -R` tunnel (S7 replaces the tunnel with TLS and
+pairing).
 """
 
 import asyncio
@@ -16,6 +18,7 @@ import random
 import re
 import shlex
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -35,8 +38,9 @@ from assistant_testing.processes import (
 
 DAEMON = "daemon"
 DAEMON_PORT = 8000
+DAEMON_MODULE = "assistant_robot_reachy.daemon"
+"""The daemon WITH media, every socket on loopback (WebRTC signalling 8443 too, no mDNS)."""
 DAEMON_ARGS = (
-    "--no-media",  # S3 brings up media; meanwhile no WebRTC signalling port is opened
     "--no-wake-up-on-start",  # no motion: the motors stay as they are (disabled)
     "--no-goto-sleep-on-stop",
     "--dataset-update-interval",
@@ -194,26 +198,56 @@ print("imports ok from", assistant_edge.__file__)'
 # ---------------------------------------------------------------- the reachy-mini daemon
 
 
-@step("start_reachy_daemon")
-async def start_reachy_daemon(ctx: ScenarioContext, ready_within_s: float = 90.0) -> None:
-    """Start the real reachy-mini daemon on the robot's machine, API on 127.0.0.1 only.
+async def _daemon_answers(host: eh.EdgeHost) -> bool:
+    probe = f"curl -s -m 3 -o /dev/null http://127.0.0.1:{DAEMON_PORT}/api/daemon/status"
+    return (await asyncio.to_thread(host.run, probe, 30)).returncode == 0
 
-    Fails if a daemon this scenario did not start already answers there (the test stops only
-    what it started). No motion: the robot is not woken up and not put to sleep.
+
+@step("start_reachy_daemon")
+async def start_reachy_daemon(ctx: ScenarioContext, ready_within_s: float = 120.0) -> None:
+    """Start the real reachy-mini daemon WITH media on the robot's machine, all on loopback.
+
+    Runs `python -m assistant_robot_reachy.daemon` from the synced checkout (see
+    `code_synced_to_edge_host`). Fails if a daemon this scenario did not start already answers
+    there (the test stops only what it started). No motion: the robot is not woken up and not
+    put to sleep.
     """
     host = host_of(ctx)
-    probe = f"curl -s -m 3 -o /dev/null http://127.0.0.1:{DAEMON_PORT}/api/daemon/status"
-    if (await asyncio.to_thread(host.run, probe, 30)).returncode == 0:
+    if await _daemon_answers(host):
         raise AssertionError(
             f"a reachy-mini daemon is already answering on {host.label} port {DAEMON_PORT}; "
             "stop it first (this test starts and stops its own)"
         )
-    argv = [eh.DAEMON_BIN, *DAEMON_ARGS]
+    await _start_daemon(ctx, host, ready_within_s)
+    ctx.state["daemon_started"] = True
+
+
+@step("reachy_daemon_running")
+async def reachy_daemon_running(ctx: ScenarioContext, ready_within_s: float = 120.0) -> None:
+    """Make sure the real daemon runs: reuse one that already answers, else start one (with
+    media, on loopback). Teardown stops only a daemon this scenario started."""
+    await ensure_reachy_daemon(ctx, ready_within_s)
+
+
+async def ensure_reachy_daemon(ctx: ScenarioContext, ready_within_s: float = 120.0) -> str:
+    """The daemon's URL as seen from here; starts the daemon only if none answers."""
+    host = host_of(ctx)
+    if await _daemon_answers(host):
+        await _daemon_tunnel(ctx, host)
+        ctx.state["daemon_started"] = False
+        print(f"reusing the reachy-mini daemon already running on {host.label}")
+    else:
+        await _start_daemon(ctx, host, ready_within_s)
+        ctx.state["daemon_started"] = True
+    return ctx.state["daemon_url"]
+
+
+async def _start_daemon(ctx: ScenarioContext, host: eh.EdgeHost, ready_within_s: float) -> None:
     ready = rf"Uvicorn running on http://127\.0\.0\.1:{DAEMON_PORT}"
     if host.ssh is None:
         await ctx.processes.start(
             DAEMON,
-            [str(Path.home() / eh.DAEMON_BIN.removeprefix("~/")), *DAEMON_ARGS],
+            [sys.executable, "-m", DAEMON_MODULE, *DAEMON_ARGS],
             env={k: str(Path.home() / v[2:]) if v.startswith("~/") else v
                  for k, v in DAEMON_ENV.items()},
             ready_line=ready,
@@ -221,6 +255,9 @@ async def start_reachy_daemon(ctx: ScenarioContext, ready_within_s: float = 90.0
         )  # fmt: skip
         ctx.state["daemon_url"] = f"http://127.0.0.1:{DAEMON_PORT}"
         return
+    if ctx.state.get("edge_sha") is None:
+        raise AssertionError("code not synced to the edge host; use code_synced_to_edge_host")
+    argv = [f"{eh.REMOTE_VENV}/bin/python", "-m", DAEMON_MODULE, *DAEMON_ARGS]
     await ctx.processes.start(
         DAEMON,
         argv,
@@ -230,6 +267,14 @@ async def start_reachy_daemon(ctx: ScenarioContext, ready_within_s: float = 90.0
         ready_line=ready,
         ready_timeout=ready_within_s,
     )
+    await _daemon_tunnel(ctx, host)
+
+
+async def _daemon_tunnel(ctx: ScenarioContext, host: eh.EdgeHost) -> None:
+    """`ssh -L` from a free local port to the daemon API (none needed for a local robot)."""
+    if host.ssh is None:
+        ctx.state["daemon_url"] = f"http://127.0.0.1:{DAEMON_PORT}"
+        return
     local_port = _free_port()
     await ctx.processes.start(
         "tunnel:daemon",

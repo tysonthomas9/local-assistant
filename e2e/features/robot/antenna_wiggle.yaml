@@ -1,0 +1,19 @@
+feature: The robot wiggles its antennas when happy
+tier: hw
+description: >
+  The brain sends express{happy}; both real antennas swing about 15 degrees towards upright and
+  back twice (the arbiter allows at most 20), end where they started, and the motors end up
+  disabled as they were.
+scenarios:
+  - name: express happy wiggles both antennas and returns them
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - antennas_wiggle: {client: lite, degrees: 15}
+      - robot_back_at_rest
+      - robot_state_read: {control_mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean

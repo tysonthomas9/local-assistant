@@ -1,0 +1,25 @@
+feature: Speech plays on the robot's speaker in real time
+tier: hw
+description: >
+  The server streams speech the way the brain does (speak.begin, 20 ms 0x02 frames,
+  speak.end). The reachy body plays it on the robot's own speaker through the reachy-mini SDK
+  (resampled to the sound card's 16 kHz), paced by the edge's playback clock, which reports
+  started, progress every 200 ms and done with the milliseconds actually played.
+scenarios:
+  - name: "a <seconds> s tone at <rate> Hz plays and the clock reports it"
+    examples:
+      - {seconds: 2, ms: 2000, rate: 24000}
+      - {seconds: 1.5, ms: 1500, rate: 16000}
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - server_streams_speech: {client: lite, stream: 5, clip: "tone:440:<seconds>", rate: <rate>}
+      - playback_reported: {client: lite, stream: 5, state: started}
+      - playback_reported: {client: lite, stream: 5, state: progress, min_played_ms: 400}
+      - playback_reported: {client: lite, stream: 5, state: done, within_s: 8}
+      - playback_paced: {client: lite, stream: 5, ms: <ms>}
+      - edge_output_clean: lite
+      - edge_host_clean

@@ -90,3 +90,22 @@ class Body(Protocol):
     def events(self) -> AsyncIterator[BodyEvent]:
         """Button, DOA and IMU tap events."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class BodyHealth:
+    """A change in whether the body's hardware is reachable (e.g. the robot daemon died)."""
+
+    ok: bool
+    detail: str = ""
+
+
+@runtime_checkable
+class ReportsHealth(Protocol):
+    """Optional: a body whose hardware can go away and come back while the edge runs.
+
+    The edge reports `ok=False` to the brain as `error{code: "body_unavailable"}` and keeps
+    running; the body recovers on its own once its hardware is back (`ok=True`).
+    """
+
+    def health(self) -> AsyncIterator[BodyHealth]: ...

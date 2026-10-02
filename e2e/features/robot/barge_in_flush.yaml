@@ -1,0 +1,23 @@
+feature: Barge-in stops the robot's speaker at once
+tier: hw
+description: >
+  While the robot speaks, push-to-talk is a barge-in: the edge flushes its own speaker first
+  (within 150 ms, without waiting for the brain), then sends vad{start, barge_in, stream_id,
+  played_ms} and playback{flushed}, and the microphone streams the new utterance.
+scenarios:
+  - name: push-to-talk during speech flushes the speaker locally
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - server_streams_speech: {client: lite, stream: 21, clip: "tone:330:6"}
+      - playback_reported: {client: lite, stream: 21, state: progress, min_played_ms: 800}
+      - press_push_to_talk: lite
+      - playback_stops_within: {client: lite, stream: 21, ms: 150, local: true}
+      - barge_in_reported: {client: lite, stream: 21, min_played_ms: 800, max_played_ms: 5000}
+      - uplink_audio_live: {client: lite, min_frames: 50}
+      - release_push_to_talk: lite
+      - edge_output_clean: lite
+      - edge_host_clean

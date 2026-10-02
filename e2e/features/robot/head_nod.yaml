@@ -1,0 +1,32 @@
+feature: The robot nods when the brain says yes
+tier: hw
+description: >
+  The brain sends express{yes}; the real head pitches by about 8 degrees (the arbiter allows at
+  most 10, slowly) and returns to where it started, and the motors end up disabled as they
+  were. The daemon's own state, sampled during the move, is the measurement. An expression this
+  body has no move for is answered with result ok:false and nothing moves.
+scenarios:
+  - name: express yes nods the head and returns it to rest
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - robot_state_read: {control_mode: disabled}
+      - robot_nods: {client: lite, degrees: 8}
+      - robot_back_at_rest
+      - robot_state_read: {control_mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: an expression without a move is refused
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - edge_answers: {client: lite, type: express, fields: {name: sad}, ok: false, error_contains: "no expression"}
+      - robot_state_read: {control_mode: disabled}
+      - edge_host_clean
