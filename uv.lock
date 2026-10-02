@@ -125,6 +125,7 @@ dependencies = [
     { name = "assistant-core" },
     { name = "assistant-link" },
     { name = "assistant-skill-sdk" },
+    { name = "httpx" },
 ]
 
 [package.metadata]
@@ -133,6 +134,7 @@ requires-dist = [
     { name = "assistant-core", editable = "packages/core" },
     { name = "assistant-link", editable = "packages/link" },
     { name = "assistant-skill-sdk", editable = "packages/skill-sdk" },
+    { name = "httpx", specifier = ">=0.28" },
 ]
 
 [[package]]

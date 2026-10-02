@@ -13,7 +13,9 @@ capabilities and then:
 - **Barge-in.** Opening a window while speech is playing flushes playback locally first and
   sends `vad{start, barge_in: true, stream_id, played_ms}`.
 - **Speech.** `speak.begin` + 0x02 frames + `speak.end` play through the body; its playback
-  clock is reported as `playback{started|progress|done|flushed, played_ms}`. `flush` drops a
+  clock is reported as `playback{started|progress|done|flushed, played_ms}`. The reply text
+  of `speak.begin` is shown (`SAY`, by the body if it can) and a stream without audio is
+  `done` at its `speak.end`. `flush` drops a
   stream (or all) and reports `flushed`; late frames of a flushed stream are dropped.
 - **Requests.** `snapshot` is answered with 0x03 JPEG chunks on its slot and `result`;
   `express`, `look_at` and `play_sound` with `result`. What the body cannot do is answered
@@ -114,6 +116,8 @@ class EdgeAgent:
         self.mic_seq = 0
         self.speaking: dict[int, int] = {}
         """stream_id -> rate of speech streams begun and not yet done or flushed."""
+        self.voiced: set[int] = set()
+        """Streams of `speaking` that got audio (a text-only stream has none to play)."""
         self.flushed: set[int] = set()
         self.timers = 0
         self._loud = 0
@@ -129,7 +133,8 @@ class EdgeAgent:
         )
 
     async def run(self) -> int:
-        self.caps = await self.body.start()
+        # The agent shows reply text (`SAY`) for every body, so every edge takes speak text.
+        self.caps = (await self.body.start()).model_copy(update={"speak_text": True})
         emit("BODY", self.caps.model_dump(mode="json"), kind=self.body.kind)
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -219,6 +224,7 @@ class EdgeAgent:
             rate = self.speaking.get(frame.stream)
             if rate is None:
                 return  # flushed, or no speak.begin: drop
+            self.voiced.add(frame.stream)
             await self.body.audio.play(frame.stream, frame.payload, rate)
         elif frame.kind is FrameKind.SOUND_CLIP:
             emit("CLIP", stream=frame.stream, bytes=len(frame.payload))
@@ -232,10 +238,10 @@ class EdgeAgent:
                 self.speaking[message.stream_id] = message.rate
                 if message.text and hasattr(self.body, "say"):
                     self.body.say(message.stream_id, message.text)  # pyright: ignore[reportAttributeAccessIssue]
+                elif message.text:
+                    emit("SAY", {"stream": message.stream_id, "text": message.text})
             case SpeakEnd():
-                rate = self.speaking.get(message.stream_id)
-                if rate is not None:
-                    await self.body.audio.play(message.stream_id, b"", rate)
+                await self._speak_end(message.stream_id)
             case Flush():
                 target = None if message.stream_id == "all" else message.stream_id
                 await self._flush(target, local=False)
@@ -314,6 +320,18 @@ class EdgeAgent:
 
     # ------------------------------------------------------------ playback
 
+    async def _speak_end(self, stream_id: int) -> None:
+        rate = self.speaking.get(stream_id)
+        if rate is None:
+            return
+        if stream_id in self.voiced:
+            await self.body.audio.play(stream_id, b"", rate)
+            return
+        # Text only (no 0x02 frames): nothing to play, so the stream is done at once.
+        self.speaking.pop(stream_id, None)
+        emit("PLAYBACK", stream=stream_id, state="done", played_ms=0)
+        await self.send(Playback(stream_id=stream_id, played_ms=0, state="done"))
+
     async def _flush(self, stream_id: int | None, *, local: bool) -> tuple[int | None, int]:
         """Flush one stream or all; returns (the stream that was playing, its played ms)."""
         playing = next(iter(self.speaking), None)
@@ -322,6 +340,7 @@ class EdgeAgent:
         targets = list(self.speaking) if stream_id is None else [stream_id]
         for sid in targets:
             self.speaking.pop(sid, None)
+            self.voiced.discard(sid)
             self.flushed.add(sid)
         took_ms = (time.monotonic() - started) * 1000
         emit("FLUSHED", stream=stream_id if stream_id is not None else "all",
@@ -332,6 +351,7 @@ class EdgeAgent:
         async for event in self.body.audio.playback_events():
             if event.state in ("done", "flushed"):
                 self.speaking.pop(event.stream_id, None)
+                self.voiced.discard(event.stream_id)
             emit("PLAYBACK", stream=event.stream_id, state=event.state, played_ms=event.played_ms)
             await self.send(
                 Playback(stream_id=event.stream_id, played_ms=event.played_ms, state=event.state)
