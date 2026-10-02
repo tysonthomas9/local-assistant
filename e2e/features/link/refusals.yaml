@@ -36,3 +36,14 @@ scenarios:
       - connection_closed_with_code: {client: intruder, code: 4003}
       - client_sends: {client: desk, type: wake, fields: {word: hey jarvis, score: 0.9}}
       - server_receives: {client: desk, type: wake}
+
+  - name: peers that leave before hello do not disturb the server
+    steps:
+      - start_link_server
+      - peer_leaves_before_hello: {stage: tcp}
+      - peer_leaves_before_hello: {stage: upgraded}
+      - peer_leaves_before_hello: {stage: upgraded}
+      - start_link_client: desk
+      - client_sends: {client: desk, type: wake, fields: {word: hey jarvis, score: 0.9}}
+      - server_receives: {client: desk, type: wake}
+      - server_output_clean

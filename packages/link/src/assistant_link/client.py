@@ -33,6 +33,7 @@ from assistant_link.server import CLOSE_TIMEOUT_S, PING_INTERVAL_S, PING_TIMEOUT
 
 FATAL_CLOSE_CODES: Final = frozenset({CloseCode.VERSION_MISMATCH, CloseCode.AUTH_REFUSED})
 WELCOME_TIMEOUT_S: Final = 10.0
+PROTOCOL_ERROR: Final = 1002
 OPEN_TIMEOUT_S: Final = 5.0
 
 
@@ -92,6 +93,8 @@ class LinkClient:
         self.ping_timeout = ping_timeout
         self.rng = rng or random.Random()
         self.connection: Connection | None = None
+        self.stalled = False
+        """The last connection was dropped by the write-stall watchdog."""
         self._stopping = False
         self._ws: ClientConnection | None = None
 
@@ -141,6 +144,7 @@ class LinkClient:
             max_size=2**22,
         ) as ws:
             self._ws = ws
+            self.stalled = False
             try:
                 self._check_pin(ws)
                 await ws.send(dump_message(hello))
@@ -154,6 +158,7 @@ class LinkClient:
                     device_id=hello.device_id,
                     session_id=welcome.session_id,
                     opus=opus_negotiated(hello.body.capabilities, welcome.audio.opus),
+                    write_stall_s=self.ping_interval + self.ping_timeout,
                 )
                 self.connection = conn
                 conn.start()
@@ -167,6 +172,7 @@ class LinkClient:
                 finally:
                     self.connection = None
                     await conn.stop_writer()
+                    self.stalled = conn.stalled
                 await ws.wait_closed()
                 return await self._closed(ws, welcomed=True)
             finally:
@@ -190,10 +196,16 @@ class LinkClient:
                 continue
             try:
                 message = decode_text(raw, sender="brain")
-            except (VersionMismatch, ValueError) as exc:
-                await self.handler.on_refused("bad_welcome", str(exc))
+            except VersionMismatch as exc:
+                await self.handler.on_refused("version_mismatch", str(exc))
                 with contextlib.suppress(ConnectionClosed):
                     await ws.close(CloseCode.VERSION_MISMATCH, "brain speaks another version")
+                return None
+            except ValueError as exc:
+                # A malformed welcome is a protocol error, not a version problem: retry later.
+                await self.handler.on_refused("bad_welcome", str(exc))
+                with contextlib.suppress(ConnectionClosed):
+                    await ws.close(PROTOCOL_ERROR, "malformed welcome")
                 return None
             if isinstance(message, Welcome):
                 return message

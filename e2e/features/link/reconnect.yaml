@@ -5,7 +5,8 @@ description: >
   again on the same port; the client reconnects on its own with backoff (0.5 s doubling to
   10 s, with jitter) and gets a new session. A frozen client (SIGSTOP) is declared dead by
   the server's heartbeat (ping every 5 s, dead after 15 s without a reply) and reconnects
-  once it is thawed (SIGCONT).
+  once it is thawed (SIGCONT). While one side floods frames to a frozen peer, the keepalive
+  ping cannot get out, so a write-stall watchdog drops the link after 15 s instead.
 scenarios:
   - name: the server is killed and restarted; the client reconnects within 3 s
     steps:
@@ -41,3 +42,29 @@ scenarios:
       - client_reconnects_within: {client: desk, seconds: 12}
       - client_sends: {client: desk, type: text.input, fields: {text: back again}}
       - server_receives: {client: desk, type: text.input, fields: {text: back again}}
+
+  - name: the server floods a frozen client; the write watchdog drops it
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - server_floods: {client: desk, kind: out_pcm}
+      - kill_process: {process: desk, signal_name: STOP}
+      - server_disconnects: {client: desk, within_s: 20, stalled: true}
+      - flood_stopped: {process: server}
+      - kill_process: {process: desk, signal_name: CONT}
+      - client_reconnects_within: {client: desk, seconds: 12}
+      - server_sends: {client: desk, type: attention, fields: {state: idle}}
+      - client_receives: {client: desk, type: attention, fields: {state: idle}, within_s: 10}
+
+  - name: a client floods a frozen server; its write watchdog drops the link
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - client_floods: {client: desk, kind: jpeg_chunk}
+      - kill_process: {process: server, signal_name: STOP}
+      - client_disconnects: {client: desk, within_s: 20, stalled: true}
+      - flood_stopped: {process: desk}
+      - kill_process: {process: server, signal_name: CONT}
+      - client_reconnects_within: {client: desk, seconds: 15}
+      - client_sends: {client: desk, type: text.input, fields: {text: back again}}
+      - server_receives: {client: desk, type: text.input, fields: {text: back again}, within_s: 10}

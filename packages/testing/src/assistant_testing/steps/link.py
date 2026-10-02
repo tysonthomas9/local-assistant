@@ -10,7 +10,10 @@ expectations, and a "reconnects" step only counts a welcome printed after the ea
 """
 
 import asyncio
+import base64
+import contextlib
 import json
+import os
 import signal
 import socket
 import sys
@@ -534,12 +537,16 @@ async def server_disconnects(
     within_s: float = 5.0,
     code: int | None = None,
     not_before_s: float = 0.0,
+    stalled: bool | None = None,
 ) -> None:
     """The server dropped the client's session (heartbeat timeout, close, kill).
 
     `not_before_s`: the drop must not come earlier than this (e.g. only the heartbeat).
+    `stalled`: whether the write-stall watchdog (not the keepalive or a close) dropped it.
     """
     want = {"device": client, **({"code": str(code)} if code is not None else {})}
+    if stalled is not None:
+        want["stalled"] = str(stalled).lower()
     started = time.monotonic()
     await _expect(ctx, SERVER, {"DISCONNECTED"}, within_s, fields=want, what="DISCONNECTED")
     elapsed = time.monotonic() - started
@@ -581,3 +588,104 @@ async def client_retries_with_backoff(
         assert low - 1e-3 <= delay <= high + 1e-3, (
             f"retry {attempt} waited {delay} s, outside [{low:.3f}, {high:.3f}]: {line.text}"
         )
+
+
+@step("client_disconnects")
+async def client_disconnects(
+    ctx: ScenarioContext, client: str, within_s: float = 5.0, stalled: bool | None = None
+) -> None:
+    """The client's connection dropped (it keeps running and retries).
+
+    `stalled`: whether its write-stall watchdog dropped it.
+    """
+    want = {} if stalled is None else {"stalled": str(stalled).lower()}
+    await _expect(ctx, _client_name(client), {"CLOSED"}, within_s, fields=want, what="CLOSED")
+
+
+# ---------------------------------------------------------------- floods and early leavers
+
+
+async def _flood(ctx: ScenarioContext, process: str, command: str) -> None:
+    await _type(ctx, process, command)
+    line = await _expect(ctx, process, {"FLOOD-STARTED", "CONSOLE-ERROR"}, 10, what="FLOOD")
+    assert line.tag == "FLOOD-STARTED", f"{process} did not start the flood: {line.text}"
+
+
+@step("server_floods")
+async def server_floods(
+    ctx: ScenarioContext,
+    client: str,
+    kind: str = "out_pcm",
+    count: int = 1_000_000,
+    bytes: int = 1_048_576,
+    stream: int = 1,
+) -> None:
+    """The server sends `count` frames to the client as fast as the link takes them."""
+    command = f"flood {client} {kind} {count} bytes={bytes} stream={stream}"
+    await _flood(ctx, SERVER, command)
+
+
+@step("client_floods")
+async def client_floods(
+    ctx: ScenarioContext,
+    client: str,
+    kind: str = "jpeg_chunk",
+    count: int = 1_000_000,
+    bytes: int = 1_048_576,
+    stream: int = 1,
+) -> None:
+    """The client sends `count` frames to the server as fast as the link takes them."""
+    command = f"flood {kind} {count} bytes={bytes} stream={stream}"
+    await _flood(ctx, _client_name(client), command)
+
+
+@step("flood_stopped")
+async def flood_stopped(ctx: ScenarioContext, process: str, within_s: float = 5.0) -> None:
+    """The flood from `process` ended early because its link closed (it never finished)."""
+    name = _process_name(process)
+    line = await _expect(
+        ctx, name, {"FLOOD-STOPPED", "FLOOD-DONE"}, within_s, what="the end of the flood"
+    )
+    assert line.tag == "FLOOD-STOPPED", f"the flood finished, so writes never backed up: {line}"
+
+
+@step("peer_leaves_before_hello")
+async def peer_leaves_before_hello(
+    ctx: ScenarioContext, stage: Literal["tcp", "upgraded"] = "upgraded"
+) -> None:
+    """A real TCP peer connects to the server and hangs up before sending hello.
+
+    `tcp`: right after the TCP connect. `upgraded`: after a real WebSocket upgrade with the
+    dev token (HTTP 101), before any message.
+    """
+    link = _link(ctx)
+    reader, writer = await asyncio.open_connection("127.0.0.1", link.port)
+    try:
+        if stage == "upgraded":
+            key = base64.b64encode(os.urandom(16)).decode()
+            request = (
+                "GET /edge/v1 HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{link.port}\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+                f"Authorization: Bearer {link.token}\r\n\r\n"
+            )
+            writer.write(request.encode())
+            await writer.drain()
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 10)
+            assert head.startswith(b"HTTP/1.1 101"), f"upgrade refused: {head!r}"
+    finally:
+        writer.close()
+        with contextlib.suppress(ConnectionError):
+            await writer.wait_closed()
+
+
+@step("server_output_clean")
+async def server_output_clean(ctx: ScenarioContext) -> None:
+    """The server printed no traceback or handler error so far."""
+    bad = [
+        line
+        for line in ctx.processes.get(SERVER).lines
+        if "Traceback" in line or "handler failed" in line or line.startswith("ERROR")
+    ]
+    assert not bad, "server output has errors:\n" + "\n".join(bad)

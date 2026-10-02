@@ -116,7 +116,13 @@ device id. Messages are checked by containment: the listed `fields` must be in t
 | `client_receives_frame` | `client`, `kind`, `bytes: int?`, `within_s = 5` | The client received the frame, with the payload CRC the server sent |
 | `capability_negotiated` | `client`, `capability: opus \| speak_text`, `negotiated: bool = true` | "capability "<cap>" is negotiated" (both ends agree for `opus`) |
 | `connection_closed_with_code` | `client`, `code: int`, `within_s = 5` | "the connection is closed with code <n>"; for 4001/4003 the client also gives up and exits 2 |
-| `server_disconnects` | `client`, `within_s = 5`, `code: int?`, `not_before_s = 0` | The server dropped the client's session |
+| `server_disconnects` | `client`, `within_s = 5`, `code: int?`, `not_before_s = 0`, `stalled: bool?` | The server dropped the client's session (`stalled`: by the write-stall watchdog) |
+| `client_disconnects` | `client`, `within_s = 5`, `stalled: bool?` | The client's connection dropped; it keeps running and retries |
+| `server_floods` | `client`, `kind = out_pcm`, `count = 1000000`, `bytes = 1048576`, `stream = 1` | The server sends frames to the client as fast as the link takes them |
+| `client_floods` | `client`, `kind = jpeg_chunk`, `count`, `bytes`, `stream` | The client floods frames to the server |
+| `flood_stopped` | `process`, `within_s = 5` | The flood ended early because its link closed (the writes were backed up) |
+| `peer_leaves_before_hello` | `stage: tcp \| upgraded = upgraded` | A real TCP peer connects (and, if `upgraded`, completes the WebSocket upgrade) and hangs up before hello |
+| `server_output_clean` | none | The server printed no traceback or handler error |
 | `kill_process` | `process`, `signal_name: KILL \| STOP \| CONT = KILL` | "kill the <process>" with a real signal (kill -9, freeze, thaw) |
 | `restart_process` | `process` | "restart the <process>" with the same command line (the server keeps its port) |
 | `client_reconnects_within` | `client`, `seconds: float` | "client "<id>" reconnects within <s> s": a new welcome and a new server session |

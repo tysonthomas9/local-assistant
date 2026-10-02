@@ -16,12 +16,13 @@ and sends what is typed on stdin (see `assistant_link.console`).
 import asyncio
 import contextlib
 import ipaddress
+import logging
 import ssl as ssl_module
 import uuid
 from typing import Final, Protocol
 
 from websockets.asyncio.server import Server, ServerConnection, serve
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidMessage
 
 from assistant_contracts.frames import Frame, opus_negotiated
 from assistant_contracts.messages import Envelope, Error, Hello, Welcome, dump_message
@@ -38,6 +39,23 @@ CLOSE_TIMEOUT_S: Final = 2.0
 """How long a closing handshake may take before the TCP connection is dropped."""
 HELLO_TIMEOUT_S: Final = 10.0
 POLICY_VIOLATION: Final = 1008
+
+
+class _QuietEarlyHangups(logging.Filter):
+    """Drop websockets' traceback for a peer that hung up before sending any HTTP request.
+
+    Port probes and edges that give up mid-connect do this; it is not a server error.
+    Every other handshake failure is still logged.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc = record.exc_info[1] if record.exc_info else None
+        hung_up = isinstance(exc, InvalidMessage) and isinstance(exc.__cause__, EOFError)
+        return not (record.getMessage() == "opening handshake failed" and hung_up)
+
+
+WS_LOGGER: Final = logging.getLogger("assistant_link.server.websockets")
+WS_LOGGER.addFilter(_QuietEarlyHangups())
 
 
 class LinkHandler(Protocol):
@@ -111,6 +129,7 @@ class LinkServer:
             ping_timeout=self.ping_timeout,
             close_timeout=CLOSE_TIMEOUT_S,
             max_size=2**22,
+            logger=WS_LOGGER,
         )
         if self.port == 0:
             self.port = next(iter(self._server.sockets)).getsockname()[1]
@@ -135,6 +154,8 @@ class LinkServer:
     async def _read_hello(self, ws: ServerConnection) -> Hello | None:
         try:
             raw = await asyncio.wait_for(ws.recv(), self.hello_timeout)
+        except ConnectionClosed:
+            return None  # the peer left before saying hello: nothing to refuse or log
         except TimeoutError:
             await self._refuse(ws, None, POLICY_VIOLATION, "no_hello", "no hello in time")
             return None
@@ -178,7 +199,11 @@ class LinkServer:
             return
 
         conn = Connection(
-            ws, side="brain", device_id=hello.device_id, session_id=f"s-{uuid.uuid4().hex[:12]}"
+            ws,
+            side="brain",
+            device_id=hello.device_id,
+            session_id=f"s-{uuid.uuid4().hex[:12]}",
+            write_stall_s=self.ping_interval + self.ping_timeout,
         )
         welcome = await self.handler.on_connect(conn, hello)
         conn.codec.opus = opus_negotiated(hello.body.capabilities, welcome.audio.opus)

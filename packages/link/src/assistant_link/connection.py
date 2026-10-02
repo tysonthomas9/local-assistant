@@ -26,10 +26,23 @@ from assistant_link.directions import Side, frame_allowed_from, message_allowed_
 SEND_QUEUE_SIZE: Final = 256
 """Queued outgoing items per connection (about 5 s of 20 ms audio frames)."""
 
+WRITE_STALL_S: Final = 15.0
+"""A single write that has not gone out after this long means the peer is dead.
+
+It matches the heartbeat (ping every 5 s, dead after 15 s). The watchdog is needed because a
+WebSocket ping waits behind a full write buffer, so the keepalive alone never times out
+while outgoing data is backed up (e.g. the peer is frozen during an audio stream).
+"""
+WRITE_STALLED: Final = 1011
+
 MessageHandler = Callable[[Envelope], Awaitable[None]]
 FrameHandler = Callable[[Frame], Awaitable[None]]
 RefusalHandler = Callable[[str, str], Awaitable[None]]
 """Called with (error code, detail) whenever an incoming item is refused."""
+
+
+class LinkClosed(Exception):
+    """The connection is gone; nothing more can be sent on it."""
 
 
 class SendQueueFull(Exception):
@@ -88,6 +101,7 @@ class Connection:
         session_id: str,
         opus: bool = False,
         queue_size: int = SEND_QUEUE_SIZE,
+        write_stall_s: float = WRITE_STALL_S,
     ) -> None:
         self.ws = ws
         self.side: Side = side
@@ -97,6 +111,10 @@ class Connection:
         self.codec = FrameCodec(opus=opus)
         self._queue: asyncio.Queue[str | bytes | None] = asyncio.Queue(maxsize=queue_size)
         self._writer: asyncio.Task[None] | None = None
+        self._dead = False
+        self.write_stall_s = write_stall_s
+        self.stalled = False
+        """True if the write-stall watchdog dropped this connection."""
 
     @property
     def opus(self) -> bool:
@@ -112,11 +130,46 @@ class Connection:
             self._writer = asyncio.create_task(self._drain(), name=f"link-writer:{self.device_id}")
 
     async def _drain(self) -> None:
-        while (item := await self._queue.get()) is not None:
-            try:
-                await self.ws.send(item)
-            except ConnectionClosed:
-                return
+        try:
+            while (item := await self._queue.get()) is not None:
+                try:
+                    async with asyncio.timeout(self.write_stall_s):
+                        await self.ws.send(item)
+                except ConnectionClosed:
+                    return
+                except TimeoutError:
+                    self._abort_stalled()
+                    return
+        finally:
+            self._mark_dead()
+
+    def _abort_stalled(self) -> None:
+        """The write watchdog fired: fail the protocol with 1011 and drop the TCP connection."""
+        self.stalled = True
+        with contextlib.suppress(Exception):
+            self.ws.protocol.fail(WRITE_STALLED, "write stalled: peer is not reading")
+        self.ws.transport.abort()
+
+    def _mark_dead(self) -> None:
+        """No writer any more: refuse new items and wake producers blocked on a full queue."""
+        self._dead = True
+        while not self._queue.empty():
+            self._queue.get_nowait()
+
+    async def _put(self, item: str | bytes) -> None:
+        if self._dead:
+            raise LinkClosed(f"the link to {self.device_id} is closed")
+        await self._queue.put(item)
+        if self._dead:
+            raise LinkClosed(f"the link to {self.device_id} is closed")
+
+    def _put_nowait(self, item: str | bytes) -> None:
+        if self._dead:
+            raise LinkClosed(f"the link to {self.device_id} is closed")
+        try:
+            self._queue.put_nowait(item)
+        except asyncio.QueueFull:
+            raise SendQueueFull(f"send queue to {self.device_id} is full") from None
 
     # ------------------------------------------------------------ sending
 
@@ -131,33 +184,34 @@ class Connection:
         return self.codec.encode(frame)
 
     async def send(self, message: Envelope) -> None:
-        """Queue a message; waits while the send queue is full (backpressure)."""
-        await self._queue.put(self._encode_message(message))
+        """Queue a message; waits while the send queue is full (backpressure).
+
+        Raises `LinkClosed` once the connection is gone (also for a producer that was waiting).
+        """
+        await self._put(self._encode_message(message))
 
     def send_nowait(self, message: Envelope) -> None:
-        try:
-            self._queue.put_nowait(self._encode_message(message))
-        except asyncio.QueueFull:
-            raise SendQueueFull(f"send queue to {self.device_id} is full") from None
+        self._put_nowait(self._encode_message(message))
 
     async def send_frame(self, frame: Frame) -> None:
         """Queue a binary frame. Raises `FrameKindNotNegotiated` for 0x05 without Opus."""
-        await self._queue.put(self._encode_frame(frame))
+        await self._put(self._encode_frame(frame))
 
     def send_frame_nowait(self, frame: Frame) -> None:
-        try:
-            self._queue.put_nowait(self._encode_frame(frame))
-        except asyncio.QueueFull:
-            raise SendQueueFull(f"send queue to {self.device_id} is full") from None
+        self._put_nowait(self._encode_frame(frame))
 
     async def send_raw(self, data: str | bytes) -> None:
         """Queue raw bytes or text unchecked (debug consoles only: tests peer validation)."""
-        await self._queue.put(data)
+        await self._put(data)
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         with contextlib.suppress(asyncio.QueueFull):
             self._queue.put_nowait(None)
-        await self.ws.close(code, reason)
+        try:
+            async with asyncio.timeout(self.write_stall_s):
+                await self.ws.close(code, reason)
+        except TimeoutError:
+            self._abort_stalled()
         await self.stop_writer()
 
     async def stop_writer(self) -> None:
@@ -165,6 +219,7 @@ class Connection:
             self._writer.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._writer
+        self._mark_dead()
 
     # ------------------------------------------------------------ receiving
 

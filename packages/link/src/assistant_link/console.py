@@ -9,11 +9,13 @@ the production `LinkServer` / `LinkClient` over a real WebSocket.
 Every output line is `TAG key=value ... [json]`; the JSON (if any) starts at the first `{`.
 Server tags: LISTENING, CONNECTED, RECV, FRAME, SENT, SENT-FRAME, REFUSED, DISCONNECTED,
 CONSOLE-ERROR. Client tags: WELCOME, RECV, FRAME, SENT, SENT-FRAME, FRAME-REFUSED, REFUSED,
-CLOSED, RETRY, GAVE-UP, CONSOLE-ERROR.
+CLOSED, RETRY, GAVE-UP, CONSOLE-ERROR. Both: FLOOD-STARTED, FLOOD-DONE, FLOOD-STOPPED.
+DISCONNECTED and CLOSED carry `stalled=true` when the write-stall watchdog dropped the link.
 
 Server stdin commands:            Client stdin commands:
   send <device> <type> [json]       send <type> [json]
   frame <device> <kind> [k=v ...]   frame <kind> [bytes=N] [stream=N] [seq=N] [unchecked]
+  flood <device> <kind> <n> [k=v]   flood <kind> <n> [bytes=N] [stream=N]
   raw <device> <text>               raw <text>
   close <device> <code> [reason]    quit
   quit
@@ -48,7 +50,8 @@ from assistant_contracts.messages import (
 from assistant_contracts.version import PROTOCOL_VERSION
 from assistant_link.auth import DevTokenVerifier
 from assistant_link.client import LinkClient
-from assistant_link.connection import Connection, SendQueueFull, WrongDirection
+from assistant_link.connection import Connection, LinkClosed, SendQueueFull, WrongDirection
+from assistant_link.directions import frame_allowed_from
 from assistant_link.server import DEFAULT_PORT, EDGE_PATH, LinkServer
 
 DEV_TOKEN_ENV = "ASSISTANT_LINK_TOKEN"
@@ -109,6 +112,44 @@ def build_frame(kind_text: str, options: list[str]) -> tuple[Frame, bool]:
     return frame, unchecked
 
 
+_FLOODS: set[asyncio.Task[None]] = set()
+
+
+def start_flood(conn: Connection, kind_text: str, count_text: str, options: list[str]) -> None:
+    """Send `count` frames as fast as the link takes them, in the background.
+
+    Prints FLOOD-STARTED, then FLOOD-DONE when all went out or FLOOD-STOPPED when the link
+    closed first (e.g. the write-stall watchdog dropped a frozen peer).
+    """
+    template, unchecked = build_frame(kind_text, options)
+    if unchecked:
+        raise ValueError("flood sends checked frames only")
+    count = int(count_text, 0)
+    if count < 1:
+        raise ValueError("flood count must be >= 1")
+    if not frame_allowed_from(conn.side, template.kind):
+        raise WrongDirection(f"the {conn.side} may not send frame {template.kind.name}")
+    conn.codec.encode(template)  # refuses 0x05 unless negotiated, before starting
+    tags = {"device": conn.device_id, "kind": f"0x{int(template.kind):02x}", "count": count}
+
+    async def run() -> None:
+        sent = 0
+        try:
+            for seq in range(count):
+                frame = Frame(template.kind, template.stream, seq % 2**32, 0, template.payload)
+                await conn.send_frame(frame)
+                sent += 1
+        except LinkClosed as exc:
+            emit("FLOOD-STOPPED", {"detail": str(exc)}, sent=sent, **tags)
+        else:
+            emit("FLOOD-DONE", sent=sent, **tags)
+
+    task = asyncio.create_task(run(), name="flood")
+    _FLOODS.add(task)
+    task.add_done_callback(_FLOODS.discard)
+    emit("FLOOD-STARTED", **tags)
+
+
 def build_message(type_name: str, fields_json: str) -> Envelope:
     fields = json.loads(fields_json) if fields_json.strip() else {}
     if not isinstance(fields, dict):
@@ -138,7 +179,7 @@ async def read_commands(handle: Callable[[str], Awaitable[bool]]) -> None:
         try:
             if not await handle(text):
                 return
-        except (ValueError, KeyError, WrongDirection, FrameError, SendQueueFull) as exc:
+        except (ValueError, KeyError, WrongDirection, FrameError, SendQueueFull, LinkClosed) as exc:
             emit("CONSOLE-ERROR", {"detail": f"{type(exc).__name__}: {exc}", "command": text})
     await asyncio.Event().wait()  # stdin ended: keep running until signalled
 
@@ -173,7 +214,8 @@ class ServerConsole:
         emit("FRAME", device=conn.device_id, **frame_fields(frame))
 
     async def on_disconnect(self, conn: Connection, code: int | None, reason: str) -> None:
-        emit("DISCONNECTED", {"reason": reason}, device=conn.device_id, code=code)
+        stalled = str(conn.stalled).lower()
+        emit("DISCONNECTED", {"reason": reason}, device=conn.device_id, code=code, stalled=stalled)
 
     async def on_refused(self, device_id: str | None, code: str, detail: str) -> None:
         emit("REFUSED", {"detail": detail}, device=device_id or "-", code=code)
@@ -204,6 +246,9 @@ class ServerConsole:
             else:
                 await conn.send_frame(frame)
             emit("SENT-FRAME", device=device, **frame_fields(frame))
+        elif command == "flood":
+            device, kind, count, *options = rest.split()
+            start_flood(self._conn(device), kind, count, options)
         elif command == "raw":
             device, _, text = rest.strip().partition(" ")
             await self._conn(device).send_raw(text)
@@ -268,7 +313,8 @@ class ClientConsole:
         emit("FRAME", **frame_fields(frame))
 
     async def on_disconnect(self, code: int | None, reason: str) -> None:
-        emit("CLOSED", {"reason": reason}, code=code)
+        stalled = str(self.client.stalled if self.client is not None else False).lower()
+        emit("CLOSED", {"reason": reason}, code=code, stalled=stalled)
 
     async def on_refused(self, code: str, detail: str) -> None:
         emit("REFUSED", {"detail": detail}, code=code)
@@ -306,6 +352,9 @@ class ClientConsole:
                     emit("FRAME-REFUSED", {"detail": str(exc)}, **frame_fields(frame))
                     return True
             emit("SENT-FRAME", **frame_fields(frame))
+        elif command == "flood":
+            kind, count, *options = rest.split()
+            start_flood(self._conn(), kind, count, options)
         elif command == "raw":
             await self._conn().send_raw(rest.strip())
             emit("SENT-RAW", {"text": rest.strip()})
