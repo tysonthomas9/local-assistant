@@ -28,7 +28,7 @@ import os
 import threading
 import time
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -90,6 +90,41 @@ EMOTION_MOVES: dict[str, str] = {
 
 INITIAL_GOTO_S = 1.0
 """How long the SDK takes to reach a recorded move's first frame from neutral."""
+
+GOTO_CLOCK_RACE = "time value is out of range [0,1]"
+"""The daemon's goto (reachy-mini 1.10.0, `Backend.play_move` on a `GotoMove`) loops
+`while time.time() - t0 < duration` and then reads the clock again for `t`; when the second
+read lands past the end (a late thread switch at the last tick, or a wall-clock step),
+`time_trajectory(t / duration)` raises this ValueError and the goto task fails, although the
+head already got its setpoints up to the end."""
+GOTO_ATTEMPTS = 3
+
+
+def goto_retrying(goto: Callable[..., None], *args: Any, **kwargs: Any) -> None:
+    """Run one SDK goto; the daemon's end-of-goto clock race (`GOTO_CLOCK_RACE`) re-issues it
+    to the same target over the same duration (from the present pose: the rest of the way, or
+    nothing left), at most `GOTO_ATTEMPTS` times. Any other error is raised at once."""
+    for attempt in range(1, GOTO_ATTEMPTS + 1):
+        try:
+            goto(*args, **kwargs)
+            return
+        except Exception as exc:
+            if GOTO_CLOCK_RACE not in str(exc) or attempt == GOTO_ATTEMPTS:
+                raise
+            log.warning("goto hit the daemon's clock race (attempt %d), re-issued", attempt)
+
+
+def connect_mini(**options: Any) -> Any:
+    """A connected `ReachyMini` whose every goto (ours, and the SDK's own inside `wake_up()`,
+    `goto_sleep()` and `play_move()`'s initial goto) survives the daemon's clock race."""
+    from reachy_mini import ReachyMini
+
+    class _ReachyMini(ReachyMini):
+        def goto_target(self, *args: Any, **kwargs: Any) -> None:
+            goto_retrying(super().goto_target, *args, **kwargs)
+
+    return _ReachyMini(**options)
+
 
 ATTENTION_POSES: dict[str, tuple[float, float]] = {
     "listening": (0.0, -5.0),

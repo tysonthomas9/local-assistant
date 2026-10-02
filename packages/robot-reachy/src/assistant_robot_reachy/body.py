@@ -45,6 +45,7 @@ from assistant_robot_reachy.arbiter import (
     DAEMON_URL,
     MotionArbiter,
     RobotUnavailable,
+    connect_mini,
     robot_ready,
 )
 from assistant_robot_reachy.xvf3800 import aec_status
@@ -302,9 +303,7 @@ class ReachyBody:
     # ------------------------------------------------------------ lifecycle
 
     def _connect(self) -> None:
-        from reachy_mini import ReachyMini
-
-        mini = ReachyMini(
+        mini = connect_mini(
             connection_mode="localhost_only",
             media_backend="local",
             automatic_body_yaw=False,
