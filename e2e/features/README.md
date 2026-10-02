@@ -5,7 +5,8 @@ E2E uses only real devices and the real stack: the real Reachy Mini, real brain 
 Each YAML file here is one feature. Every scenario in it becomes one pytest item, run by the
 plugin in `packages/testing` (`assistant_testing.features`). Scenarios drive **real** code
 and processes. A scenario that needs the robot is tier `hw`, and one that needs the GPUs and
-model servers is tier `models`.
+model servers is tier `models`. A scenario that needs both lists both (`tier: [hw, models]`):
+it gets both markers, and the gate runs it in the hw stage (under the edge-host lock).
 
 The rule is enforced. `scripts/gate.sh` runs a "real-only check"
 (`python -m assistant_testing.real_only`) before the e2e stages, and the feature
@@ -17,7 +18,7 @@ Wherever a step takes a `body` argument, it must be a real body type: `reachy` o
 
 ```yaml
 feature: EdgeLink handshake          # short name
-tier: core                           # core | hw | models (becomes a pytest marker)
+tier: core                           # core | hw | models, or a list such as [hw, models]
 description: A device connects to the brain and is welcomed.
 scenarios:
   - name: device says hello
@@ -198,4 +199,36 @@ over 0.4 s fails as "the measurement is starved".
 | `edge_body_lost` | `client`, `within_s = 10` | The daemon went away: BODY-ERROR from the agent, error{body_unavailable} at the server |
 | `edge_body_recovers` | `client`, `within_s = 30` | The agent reconnected its body on its own (BODY-OK) |
 
-Later tasks add `start` (brain) and the model steps.
+### The brain (`steps/brain.py`)
+
+The real brain (`python -m assistant_brain --profile ci`) is the EdgeLink server: its process
+is `server`, like the link server console, so the link and edge steps work against it
+(`start_edge_agent`, `start_link_client`, `client_receives`, `kill_process: {process:
+server}`, `restart_process`, `client_reconnects_within`, ...). The brain does not print
+`RECV` lines; what it did is read from its event lines (`assistant_brain.console`) and its
+loopback admin endpoint (turn log, LLM priority gate, LLM request log). The `echo` engine
+needs no models (tier core); the `basic` engine asks the real Ollama with `reachy-gemma4`
+(tier models): the system service at 127.0.0.1:11434, or a real `ollama serve` of the
+scenario's own (`llm: test`) that a scenario may kill without touching the system service.
+The edge only gets `attention` if its body advertises `motion.attention` (the console and
+reachy bodies do; the link client console does not, so use `brain_state_is` with it).
+
+| Step | Arguments | Does |
+|---|---|---|
+| `start_brain` | `engine: echo \| basic = echo`, `llm: system \| test = system`, `follow_up_s: float?`, `set: map?` (config overrides, e.g. `{llm.max_concurrency: 3}`) | Starts the brain on free loopback ports (EdgeLink and admin) and waits for LISTENING |
+| `brain_output_clean` | none | No traceback, bus handler failure, BRAIN-ERROR or error log line from the brain |
+| `edge_shows_reply` | `client`, `text: str?`, `containing: str?`, `within_s = 60` | The next reply the edge shows (SAY, from `speak.begin.text`): exactly `text`, or containing `containing` (case-insensitive) |
+| `attention_sequence_is` | `client`, `states: list[str]`, `within_s = 30` | The edge received exactly these `attention` states next, in order |
+| `brain_state_is` | `client`, `state`, `within_s = 30` | The client's session (admin `/sessions`) is in this turn state |
+| `turn_logged` | `kind: text \| voice \| proactive?`, `outcome = finished`, `reply: str?`, `states: list[str]?`, `ttft = false`, `max_ttft_ms: float?`, `error_contains: str?`, `within_s = 60` | The latest turn in the turn log; `ttft` checks the LLM's queue time, time to first token and total time are logged |
+| `brain_says` | `client`, `text: str?`, `prompt: str?` | Proactive speech (`POST /say`): spoken now when idle, queued while a turn or mic window is active |
+| `speech_queued` | `client`, `within_s = 5` | The brain queued proactive speech behind an active turn (SPEECH-QUEUED, not idle) |
+| `flood_finished` | `client`, `within_s = 10` | The client's `client_floods` sent every frame (FLOOD-DONE) |
+| `start_background_llm_requests` | `count`, `max_tokens = 300` | The brain starts `count` real background-class LLM requests (`POST /llm/background`) |
+| `llm_gate_state` | `in_flight`, `waiting`, `within_s = 30` | The priority gate has this many requests running and waiting |
+| `llm_requests_done` | `count`, `within_s = 300` | Exactly `count` LLM requests were made and all ended ok |
+| `llm_gate_never_exceeded` | `max_in_flight` | From the gate's event log: never more requests at once |
+| `voice_request_admitted_first` | none | From the gate's event log: the voice request was admitted before every background request already waiting (and some were) |
+| `llm_request_log` | `priority: bool`, `classes: map?` | Every request carries `priority` (with this value per class), or none does |
+| `start_llm_server` / `kill_llm_server` / `restart_llm_server` | `within_s = 30` | A real `ollama serve` of the scenario's own on a free loopback port (the system model store); killed for real with SIGKILL (runners included), restarted on the same port |
+| `robot_pose_follows` | `client`, `text`, `states: list[str]`, `tolerance_deg = 2.5`, `max_head_deg = 10` | Types `text`; the body's MOTION lines follow the attention `states`; a sampler on the robot's machine checks each pose within `tolerance_deg` of neutral turned by the state's roll/pitch, and no more than `max_head_deg` from neutral (remembers the start pose for `robot_back_at_rest`) |

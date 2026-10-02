@@ -1,0 +1,32 @@
+feature: A typed question is answered by the real LLM
+tier: models
+description: >
+  The basic engine in text mode: the real brain asks the real Ollama (reachy-gemma4, the
+  system service) through the priority gate and the reply reaches the real edge agent as speak
+  text, while its attention follows the turn. The turn log records the LLM's queue time, time
+  to first token and total time; the request carries the voice class's priority. The session
+  keeps the conversation, so a follow-up question can refer to the one before.
+scenarios:
+  - name: a question gets a real answer and the turn log has the time to first token
+    steps:
+      - start_brain: {engine: basic}
+      - start_edge_agent: {id: desk}
+      - attention_sequence_is: {client: desk, states: [idle]}
+      - edge_types: {client: desk, text: "What is the capital of France? Answer in one word."}
+      - edge_shows_reply: {client: desk, containing: Paris, within_s: 120}
+      - attention_sequence_is: {client: desk, states: [listening, thinking, speaking, idle]}
+      - turn_logged: {kind: text, ttft: true, states: [listening, thinking, speaking]}
+      - llm_request_log: {priority: true, classes: {voice: 0}}
+      - brain_output_clean
+      - edge_output_clean: desk
+
+  - name: the session remembers the conversation
+    steps:
+      - start_brain: {engine: basic}
+      - start_edge_agent: {id: desk}
+      - edge_types: {client: desk, text: "Please remember this: my favourite colour is green. Just say OK."}
+      - edge_shows_reply: {client: desk, within_s: 120}
+      - edge_types: {client: desk, text: "What is my favourite colour? Answer in one word."}
+      - edge_shows_reply: {client: desk, containing: green, within_s: 120}
+      - turn_logged: {kind: text, ttft: true}
+      - brain_output_clean

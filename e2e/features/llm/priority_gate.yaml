@@ -1,0 +1,37 @@
+feature: The LLM priority gate keeps voice turns first
+tier: models
+description: >
+  Real requests to the real Ollama through the brain's priority gate with max_concurrency 3 and
+  one slot reserved for voice. Five background requests (started through the admin endpoint)
+  take the two slots they may use and three wait; a typed turn (class voice) then gets the
+  reserved slot at once instead of queuing behind them. The gate's event log shows that no more
+  than three requests ever ran at once and that the voice request was admitted before every
+  background request already waiting. With send_priority on, every request carries vLLM's
+  `priority` (voice 0, background 10); with it off, none does.
+scenarios:
+  - name: five background requests, then a voice turn is admitted first
+    steps:
+      - start_brain: {engine: basic, set: {llm.max_concurrency: 3, llm.reserved_voice_slots: 1}}
+      - start_edge_agent: {id: desk}
+      - start_background_llm_requests: {count: 5, max_tokens: 400}
+      - llm_gate_state: {in_flight: 2, waiting: 3}
+      - edge_types: {client: desk, text: Say hello in three words.}
+      - edge_shows_reply: {client: desk, within_s: 120}
+      - turn_logged: {kind: text, ttft: true}
+      - llm_requests_done: {count: 6, within_s: 300}
+      - llm_gate_never_exceeded: {max_in_flight: 3}
+      - voice_request_admitted_first
+      - llm_request_log: {priority: true, classes: {voice: 0, background: 10}}
+      - brain_output_clean
+
+  - name: without send_priority no request carries a priority
+    steps:
+      - start_brain: {engine: basic, set: {llm.max_concurrency: 3, llm.reserved_voice_slots: 1, llm.send_priority: false}}
+      - start_edge_agent: {id: desk}
+      - start_background_llm_requests: {count: 2, max_tokens: 50}
+      - edge_types: {client: desk, text: Say hello in three words.}
+      - edge_shows_reply: {client: desk, within_s: 120}
+      - llm_requests_done: {count: 3, within_s: 300}
+      - llm_gate_never_exceeded: {max_in_flight: 3}
+      - llm_request_log: {priority: false}
+      - brain_output_clean
