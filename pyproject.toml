@@ -53,8 +53,8 @@ assistant-testing = { workspace = true }
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["packages/*/src", "packages/*/tests", "tests"]
-include = ["packages/**/*.py", "tests/**/*.py"]
+src = ["packages/*/src", "packages/*/tests", "servers/*/src", "tests"]
+include = ["packages/**/*.py", "servers/**/*.py", "tests/**/*.py"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC", "PT", "TID"]

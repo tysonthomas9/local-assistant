@@ -5,6 +5,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# Test output: timings artifacts and the edge agent's recorded replies
+artifacts/
+.recordings/
+
 # Upstream clones (separate git repos; versions are recorded in the docs)
 reachy_mini_conversation_app/
 third_party/

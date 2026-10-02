@@ -15,6 +15,7 @@ import asyncio
 import itertools
 import json
 import math
+import os
 import sys
 import time
 from typing import Any, Literal
@@ -86,6 +87,8 @@ async def start_edge_agent(
     where: Literal["pc", "edge_host"] = "pc",
     wait: bool = True,
     energy_trigger_dbfs: float | None = None,
+    vad_end_ms: int | None = None,
+    record: bool = False,
     within_s: float = 60.0,
 ) -> None:
     """Start the real edge agent with a real body; it dials the link server console.
@@ -94,6 +97,10 @@ async def start_edge_agent(
     on a macOS edge host inside "Reachy Edge.app" (the owner of the microphone and camera
     permission, see scripts/edge_app_run.sh). It needs the daemon (`start_reachy_daemon`).
     `wait` (default) waits until the body started and the link welcomed the agent.
+    `energy_trigger_dbfs` opens a mic window on a loud enough voice (standing in for a
+    wake-word engine) and `vad_end_ms` closes it after that much quiet once speech was heard.
+    `record` writes each played speech stream to a WAV where the agent runs (read and
+    removed by `recorded_reply_transcript_not_empty`).
     """
     link = _link(ctx)
     if body == "reachy" and where != "edge_host":
@@ -114,6 +121,11 @@ async def start_edge_agent(
     args += ["--url", f"ws://127.0.0.1:{port}/edge/v1", "--token", link.token]
     if energy_trigger_dbfs is not None:
         args += ["--energy-trigger-dbfs", str(energy_trigger_dbfs)]
+    if vad_end_ms is not None:
+        args += ["--vad-end-ms", str(vad_end_ms)]
+    if record:
+        run = os.environ.get("ASSISTANT_TEST_RUN") or f"run-{os.getpid()}"
+        args += ["--record-dir", f".recordings/{run}-{id}"]  # in the agent's checkout
     # The robot's microphone needs the macOS permission of Reachy Edge.app: run inside it.
     # The reachy body plays Pollen's recorded moves from the edge host's offline HF cache.
     hf = {k: edge_host_steps.DAEMON_ENV[k] for k in ("HF_HOME", "HF_HUB_OFFLINE")}

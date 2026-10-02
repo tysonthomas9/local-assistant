@@ -1,0 +1,18 @@
+feature: The speech server speaks, and what it says can be heard again
+tier: models
+description: >
+  The real speech server (Qwen3-TTS 1.7B CustomVoice through qwentts.cpp on GPU1) streams
+  speech for a sentence in each assistant's voice (Jarvis: ryan, Marvin: eric): a plausible
+  duration, first audio before the end, and not silent. The real STT then transcribes that
+  audio back to the sentence with a word error rate of at most 0.2.
+scenarios:
+  - name: Ryan's and Eric's speech round-trips through the STT
+    steps:
+      - speech_server_running
+      - tts_gives_audio: {text: "The quick brown fox jumps over the lazy dog.", voice: ryan, min_s: 1.5, max_s: 8}
+      - transcribe_tts_audio
+      - transcript_matches: {max_wer: 0.2}
+      - tts_gives_audio: {text: "Good morning! Your first meeting is with the design team.", voice: eric, min_s: 1.5, max_s: 9}
+      - transcribe_tts_audio
+      - transcript_matches: {max_wer: 0.2}
+      - timings_recorded: {name: tts_roundtrip}

@@ -1,0 +1,35 @@
+feature: Barge-in cuts a spoken reply on the robot, and the brain forgets what was not heard
+tier: [hw, models]
+description: >
+  The real brain speaks a long reply (real LLM, real TTS on GPU1) on the robot's speaker.
+  Push-to-talk during it is a barge-in: the edge stops its speaker within 200 ms (its own
+  local flush, without waiting for the brain) and reports vad{start, barge_in, played_ms}. The
+  brain cancels the reply (LLM and TTS) and the turn log shows the reply truncated at that
+  played_ms: the heard text is the beginning of what was spoken. The golden "what time is it"
+  WAV, fed as mic frames into the open window, is then the next turn, and it is answered.
+scenarios:
+  - name: push-to-talk during a long spoken reply truncates it at played_ms
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - ollama_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true, follow_up_s: 0}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - edge_types: {client: lite, text: "Please tell me a long story about a little robot who learns to paint, in at least six sentences."}
+      - robot_speaks_reply: {client: lite, wait_done: false}
+      - playback_progress_at_least: {client: lite, ms: 2500}
+      - press_push_to_talk: lite
+      - barge_in_stops_playback_within: {client: lite, ms: 200}
+      - turn_truncated_at_played_ms
+      - feed_golden_wav: {client: lite, name: what_time_is_it}
+      - golden_wav_fed: {client: lite}
+      - release_push_to_talk: lite
+      - voice_turn_transcribed: {max_wer: 0.2}
+      - robot_speaks_reply: {client: lite, min_ms: 300}
+      - turn_logged: {kind: voice}
+      - timings_recorded: {name: barge_in_on_robot}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean

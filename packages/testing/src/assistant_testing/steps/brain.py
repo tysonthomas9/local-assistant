@@ -91,13 +91,17 @@ async def start_brain(
     engine: Literal["echo", "basic"] = "echo",
     llm: Literal["system", "test"] = "system",
     follow_up_s: float | None = None,
+    speech: bool = False,
     set: dict[str, Any] | None = None,
 ) -> None:
     """Start the real brain on free loopback ports (EdgeLink and admin), profile `ci`.
 
     `engine: echo` answers with the input (no models); `engine: basic` asks the real LLM:
     the system Ollama (`llm: system`) or the scenario's own (`llm: test`, `start_llm_server`
-    first). `set` overrides config keys (`{"llm.max_concurrency": 3}`).
+    first). `speech: true` (basic engine) transcribes voice turns and speaks the replies with
+    the scenario's speech server (`speech_server_running` or `start_speech_server` first);
+    without it replies are speak text. `set` overrides config keys
+    (`{"llm.max_concurrency": 3}`).
     """
     port, admin_port = _free_port(), _free_port()
     ctx.state["link"] = _Link(port=port, token=DEV_TOKEN)
@@ -109,6 +113,15 @@ async def start_brain(
         base = SYSTEM_LLM if llm == "system" else _test_llm(ctx)["url"]
         overrides.setdefault("llm.base_url", f"{base}/v1")
         overrides.setdefault("llm.model", LLM_MODEL)
+        overrides.setdefault("engine.speech", speech)
+        if speech:
+            from assistant_testing.steps.speech import speech_url
+
+            url = speech_url(ctx)
+            overrides.setdefault("stt.base_url", url)
+            overrides.setdefault("tts.base_url", url)
+    elif speech:
+        raise AssertionError("speech needs the basic engine")
     argv = [sys.executable, "-m", "assistant_brain", "--config-dir", "config", "--profile", "ci"]
     argv += ["--engine", engine, "--host", "127.0.0.1", "--port", str(port)]
     argv += ["--admin-port", str(admin_port), "--token", DEV_TOKEN]
