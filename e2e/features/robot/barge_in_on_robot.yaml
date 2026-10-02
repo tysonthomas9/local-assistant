@@ -26,7 +26,7 @@ scenarios:
       - feed_golden_wav: {client: lite, name: what_time_is_it}
       - golden_wav_fed: {client: lite}
       - release_push_to_talk: lite
-      - voice_turn_transcribed: {max_wer: 0.2}
+      - voice_turn_transcribed: {client: lite, max_wer: 0.2}
       - robot_speaks_reply: {client: lite, min_ms: 300}
       - turn_logged: {kind: voice}
       - timings_recorded: {name: barge_in_on_robot}

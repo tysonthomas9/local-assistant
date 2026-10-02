@@ -20,7 +20,7 @@ scenarios:
       - start_brain: {engine: basic, speech: true, follow_up_s: 0}
       - start_edge_agent: {id: lite, body: reachy, where: edge_host, energy_trigger_dbfs: -35, vad_end_ms: 700, record: true}
       - feed_golden_wav: {client: lite, name: hello}
-      - voice_turn_transcribed: {max_wer: 0.2}
+      - voice_turn_transcribed: {client: lite, max_wer: 0.2}
       - robot_speaks_reply: {client: lite, min_ms: 500}
       - turn_logged: {kind: voice, ttft: true}
       - recorded_reply_transcript_not_empty: {client: lite}

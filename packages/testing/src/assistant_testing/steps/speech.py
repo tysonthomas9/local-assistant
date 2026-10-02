@@ -581,11 +581,18 @@ async def recorded_reply_transcript_not_empty(
 
 @step("voice_turn_transcribed")
 async def voice_turn_transcribed(
-    ctx: ScenarioContext, text: str | None = None, max_wer: float = 0.2, within_s: float = 60.0
+    ctx: ScenarioContext,
+    client: str,
+    text: str | None = None,
+    max_wer: float = 0.2,
+    within_s: float = 60.0,
 ) -> None:
     """The brain transcribed the fed utterance (its TRANSCRIPT line): the golden WAV's text
-    (or `text`) with a word error rate of at most `max_wer`."""
+    (or `text`) with a word error rate of at most `max_wer`. Prints the edge's mic windows."""
     line = await _expect(ctx, SERVER, {"TRANSCRIPT"}, within_s, what="TRANSCRIPT")
+    agent = ctx.processes.get(_client_name(client))
+    for window in _get_lines(agent, "MIC-OPEN") + _get_lines(agent, "MIC-CLOSE"):
+        print(f"  edge: {window.text}")
     heard = str((line.payload or {}).get("text") or "")
     fed = ctx.state.get("fed")
     reference = text if text is not None else (_golden(ctx, fed["name"])[1] if fed else "")
