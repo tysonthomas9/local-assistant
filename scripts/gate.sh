@@ -327,6 +327,15 @@ stage_hw() {
     where="$(sed -E 's/^robot: //' "$STATE_DIR/robot-host" | tail -1)"
     # Leftovers of an EARLIER run (e.g. a runner killed with -9) are cleaned first and reported,
     # so they cannot be mistaken for this run's.
+    # One hw run at a time: take the exclusive lock on the robot's machine BEFORE the sweep, so
+    # a second run fails fast instead of sweeping away the first run's processes.
+    export ASSISTANT_TEST_RUN="${ASSISTANT_TEST_RUN:-gate-$(date +%s)-$$}"
+    if ! uv run --locked python -m assistant_testing.edge_host lock --pid "$$" \
+            | tee "$STATE_DIR/lock"; then
+        note "$(tail -1 "$STATE_DIR/lock")"
+        return 1
+    fi
+    trap 'uv run --locked python -m assistant_testing.edge_host unlock || true' EXIT
     printf 'pre-run sweep (an earlier run'"'"'s leftovers):\n'
     uv run --locked python -m assistant_testing.edge_host sweep
     pytest_features hw || rc=$?

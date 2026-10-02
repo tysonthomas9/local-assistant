@@ -79,6 +79,16 @@ Python 3.12, and installs them only if they are missing. Everything else goes in
   in that port range on the edge host. The gate sweeps before the hw features (an earlier run's
   leftovers are reported and cleaned) and after them; leftovers after the features fail the
   stage.
+- **One hw run at a time.** Before its pre-run sweep the gate takes an exclusive lock on the
+  edge host (`~/assistant-edge/hw-run.lock`, `python -m assistant_testing.edge_host lock`) and
+  releases it when the stage ends (`unlock`). A second run fails fast with "another hw run is
+  in progress" instead of sweeping away the first run's processes. A lock whose owner (a gate
+  on the same PC) has died is taken over.
+- **No user names in logs.** Output from the edge host (sweep, launchers, bootstrap, sync)
+  shows its `$HOME` as `~`.
+- **Tunnel ports.** An `ssh -R` port counts as ours only if, after the port is seen listening,
+  our ssh is still running and did not log "remote port forwarding failed" (someone else may
+  have taken the port first); otherwise another port is tried.
 - **The daemon** runs with its API on `127.0.0.1:8000` on the edge host, with no media and no
   wake-up or sleep motion. The PC reads it through an `ssh -L` tunnel. Upstream behaviour: the
   reachy-mini daemon always announces itself over mDNS (UDP 5353, service `reachy_mini`) on the

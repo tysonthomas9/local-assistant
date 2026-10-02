@@ -8,6 +8,13 @@ defined in ~/.ssh/config, so no address or user name is ever in the repo.
     python -m assistant_testing.edge_host check   # which host has the robot; exit 1 if none
     python -m assistant_testing.edge_host sweep   # stop leftovers: edge-dir processes, test ssh
                                                   # clients/tunnels here, their forwards there
+    python -m assistant_testing.edge_host lock --pid <pid>   # take the exclusive hw-run lock
+    python -m assistant_testing.edge_host unlock             # release it (only our own)
+
+Only one hw run may use the robot at a time: the gate takes an exclusive lock on the robot's
+machine (`~/assistant-edge/hw-run.lock`) before its pre-run sweep and releases it in teardown, so
+a second run fails fast instead of sweeping the first run's processes. Output from the edge host
+never shows its home directory: `$HOME` is rewritten to `~`.
 
 A robot attached to this machine is always used first. Everything on the edge host lives in
 `~/assistant-edge/` (see scripts/edge_host_bootstrap.sh). EdgeLink and the daemon API stay on
@@ -15,6 +22,7 @@ loopback on both machines; they are joined by SSH tunnels (`-L`/`-R`) until S7 a
 """
 
 import glob
+import hashlib
 import os
 import shlex
 import subprocess
@@ -25,7 +33,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from assistant_core.config import load_config
-from assistant_testing.processes import TEST_SSH_PATTERN, die_with_parent, ssh_argv
+from assistant_testing.processes import (
+    RUN_ID,
+    TEST_SSH_PATTERN,
+    die_with_parent,
+    home_scrubber,
+    ssh_argv,
+)
 
 ENV_VAR = "ASSISTANT_EDGE_HOST"
 EDGE_DIR = "~/assistant-edge"
@@ -44,6 +58,9 @@ dir; `[/]` keeps it from matching the shell that runs it."""
 REVERSE_PORTS = range(47000, 48000)
 """Edge-host loopback ports for `ssh -R` tunnels (EdgeLink). A listener in this range owned by
 sshd is a test tunnel, so the sweep can find one a crashed runner left behind."""
+LOCK_DIR = "$HOME/assistant-edge/hw-run.lock"
+"""The exclusive hw-run lock on the robot's machine (`mkdir` is atomic on macOS and Linux)."""
+_HOMES: dict[str | None, str] = {}
 
 
 @dataclass(frozen=True)
@@ -78,6 +95,20 @@ class EdgeHost:
             check=False,
             preexec_fn=die_with_parent(),
         )
+
+    def home(self) -> str:
+        """The edge host's $HOME (asked once per host and cached)."""
+        if self.ssh not in _HOMES:
+            if self.ssh is None:
+                _HOMES[None] = str(Path.home())
+            else:
+                done = self.run('printf %s "$HOME"', timeout_s=30, tag=False)
+                _HOMES[self.ssh] = done.stdout.strip() if done.returncode == 0 else ""
+        return _HOMES[self.ssh]
+
+    def scrub(self, text: str) -> str:
+        """`text` with the edge host's home directory shown as `~` (never the user name)."""
+        return home_scrubber(self.home())(text)
 
 
 def local_robot() -> str | None:
@@ -171,6 +202,10 @@ def sweep(host: EdgeHost) -> list[str]:
 
     Its own ssh calls are untagged, so it never finds itself.
     """
+    return [host.scrub(line) for line in _sweep(host)]
+
+
+def _sweep(host: EdgeHost) -> list[str]:
     found = [f"edge forward: {line}" for line in _edge_forwards(host)]
     local = _local_test_ssh()
     found += [f"this machine: {line}" for line in local]
@@ -198,7 +233,81 @@ def sweep(host: EdgeHost) -> list[str]:
 def leftovers(host: EdgeHost) -> list[str]:
     """Processes still running from the edge dir (none after a clean teardown)."""
     done = host.run(f"pgrep -fl {shlex.quote(_SWEEP_PATTERN)} || true", timeout_s=30, tag=False)
-    return [line for line in done.stdout.splitlines() if line.strip()]
+    return [host.scrub(line) for line in done.stdout.splitlines() if line.strip()]
+
+
+# ---------------------------------------------------------------- the exclusive hw-run lock
+
+
+def machine_id() -> str:
+    """A short, stable id of this machine (a hash, so no host or user name leaks)."""
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            raw = Path(path).read_text().strip()
+        except OSError:
+            continue
+        if raw:
+            return hashlib.sha256(raw.encode()).hexdigest()[:12]
+    import socket
+
+    return hashlib.sha256(socket.gethostname().encode()).hexdigest()[:12]
+
+
+def _parse_owner(text: str) -> dict[str, str]:
+    return dict(item.split("=", 1) for item in text.split() if "=" in item)
+
+
+class LockHeld(Exception):
+    """Another hw run holds the robot."""
+
+
+def acquire_lock(host: EdgeHost, owner_pid: int, run_id: str = RUN_ID) -> str:
+    """Take the exclusive hw-run lock on the robot's machine; return a status line.
+
+    `owner_pid` is the process on THIS machine whose life the lock follows (the gate). A lock
+    left by a dead owner on this machine is stale and taken over; a live one, or one from
+    another machine, raises `LockHeld` ("another hw run is in progress").
+    """
+    owner = f"run={run_id} machine={machine_id()} pid={owner_pid} since={int(time.time())}"
+    script = (
+        f'mkdir -p "$HOME/assistant-edge" && if mkdir "{LOCK_DIR}" 2>/dev/null; then '
+        f'printf "%s\\n" {shlex.quote(owner)} > "{LOCK_DIR}/owner"; echo ACQUIRED; '
+        f'else echo HELD; cat "{LOCK_DIR}/owner" 2>/dev/null; fi'
+    )
+    for _ in range(2):
+        done = host.run(script, timeout_s=30, tag=False)
+        if done.returncode != 0:
+            raise RuntimeError(f"could not reach {host.label} for the hw-run lock: {done.stderr}")
+        lines = done.stdout.splitlines()
+        if lines[:1] == ["ACQUIRED"]:
+            return f"hw-run lock taken on {host.label} ({owner})"
+        held = _parse_owner(" ".join(lines[1:]))
+        same_machine = held.get("machine") == machine_id()
+        pid = int(held.get("pid", "0") or 0)
+        if held.get("run") == run_id:
+            return f"hw-run lock already held by this run on {host.label}"
+        if not same_machine or (pid > 0 and _alive(pid)) or not held:
+            since = held.get("since")
+            age = f", for {int(time.time()) - int(since)} s" if since and since.isdigit() else ""
+            raise LockHeld(
+                f"another hw run is in progress on {host.label} (run {held.get('run', '?')}"
+                f"{age}); wait for it, or if it is surely dead remove {LOCK_DIR} there"
+            )
+        # The owner on this machine is dead (e.g. a gate killed with -9): take the lock over.
+        host.run(f'rm -rf "{LOCK_DIR}"', timeout_s=30, tag=False)
+    raise LockHeld(f"could not take the hw-run lock on {host.label}")
+
+
+def release_lock(host: EdgeHost, run_id: str = RUN_ID) -> str:
+    """Release the hw-run lock if this run holds it (never someone else's)."""
+    script = (
+        f'if grep -q "^run={run_id} " "{LOCK_DIR}/owner" 2>/dev/null; then '
+        f'rm -rf "{LOCK_DIR}"; echo RELEASED; else echo NOT-OURS; fi'
+    )
+    done = host.run(script, timeout_s=30, tag=False)
+    if "RELEASED" in done.stdout:
+        return f"hw-run lock released on {host.label}"
+    return f"hw-run lock on {host.label} not held by this run (nothing released)"
 
 
 def _check(repo_root: Path) -> int:
@@ -237,6 +346,17 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path.cwd()
     if args[:1] == ["check"]:
         return _check(repo_root)
+    if args[:1] == ["lock"]:
+        pid = int(args[2]) if args[1:2] == ["--pid"] and len(args) > 2 else os.getppid()
+        try:
+            print(acquire_lock(resolve(repo_root), pid))
+        except LockHeld as exc:
+            print(f"hw-run lock: {exc}")
+            return 1
+        return 0
+    if args[:1] == ["unlock"]:
+        print(release_lock(resolve(repo_root)))
+        return 0
     if args[:1] == ["sweep"]:
         host = resolve(repo_root)
         found = sweep(host)
@@ -244,7 +364,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"stopped leftover ({host.label}): {line}")
         print(f"sweep: {len(found)} leftover process(es) (this machine and {host.label})")
         return 0
-    print("usage: python -m assistant_testing.edge_host check|sweep", file=sys.stderr)
+    print(
+        "usage: python -m assistant_testing.edge_host check|sweep|lock [--pid N]|unlock",
+        file=sys.stderr,
+    )
     return 2
 
 

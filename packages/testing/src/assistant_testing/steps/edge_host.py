@@ -19,13 +19,19 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from assistant_testing import edge_host as eh
 from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.registry import step
-from assistant_testing.processes import ManagedProcess, RemoteProcess, ssh_tag_options
+from assistant_testing.processes import (
+    ManagedProcess,
+    RemoteProcess,
+    home_scrubber,
+    ssh_tag_options,
+)
 
 DAEMON = "daemon"
 DAEMON_PORT = 8000
@@ -69,8 +75,19 @@ def _ssh_tunnel_argv(alias: str, *forward: str) -> list[str]:
     ]  # fmt: skip
 
 
-async def _run(ctx: ScenarioContext, name: str, argv: list[str], timeout_s: float) -> str:
-    done = await ctx.processes.run(name, argv, timeout_s=timeout_s)
+async def _scrubber(host: eh.EdgeHost) -> Callable[[str], str]:
+    """Rewrites the edge host's $HOME to `~` in output (asked once, off the event loop)."""
+    return home_scrubber(await asyncio.to_thread(host.home))
+
+
+async def _run(
+    ctx: ScenarioContext,
+    name: str,
+    argv: list[str],
+    timeout_s: float,
+    scrub: Callable[[str], str] | None = None,
+) -> str:
+    done = await ctx.processes.run(name, argv, timeout_s=timeout_s, scrub=scrub)
     if done.returncode != 0:
         raise AssertionError(f"{name} failed (exit {done.returncode}):\n{done.output}")
     return done.output
@@ -115,7 +132,7 @@ async def edge_host_bootstrapped(ctx: ScenarioContext, reachy_mini: str) -> None
     host = host_of(ctx)
     script = (ctx.repo_root / BOOTSTRAP).read_text()
     argv = host.sh(f"exec /bin/bash -c {shlex.quote(script)} edge_host_bootstrap")
-    output = await _run(ctx, "bootstrap", argv, timeout_s=1200)
+    output = await _run(ctx, "bootstrap", argv, timeout_s=1200, scrub=await _scrubber(host))
     found = _READY.findall(output)
     if not found:
         raise AssertionError(f"bootstrap printed no 'edge-host ready' line:\n{output}")
@@ -166,7 +183,7 @@ echo "synced $(git rev-parse HEAD)"
 .venv-assistant/bin/python -c 'import assistant_edge, assistant_link, assistant_robot_reachy; \
 print("imports ok from", assistant_edge.__file__)'
 """
-    output = await _run(ctx, "sync", host.sh(script), timeout_s=600)
+    output = await _run(ctx, "sync", host.sh(script), timeout_s=600, scrub=await _scrubber(host))
     if f"synced {sha}" not in output or "imports ok from" not in output:
         raise AssertionError(f"edge host did not end up on {sha}:\n{output}")
     if "/assistant-edge/src/" not in output:
@@ -312,6 +329,12 @@ async def edge_host_clean(ctx: ScenarioContext) -> None:
 # ---------------------------------------------------------------- EdgeLink across machines
 
 
+FORWARD_FAILED = "remote port forwarding failed"
+"""What ssh logs when the edge host refused our `-R` forward (the port was taken)."""
+FORWARD_SETTLE_S = 1.5
+"""After the port is seen listening: how long our ssh -R gets to report a refused forward."""
+
+
 async def reverse_tunnel(ctx: ScenarioContext, port: int) -> int:
     """`ssh -R` so 127.0.0.1:<returned port> on the edge host reaches 127.0.0.1:`port` here.
 
@@ -339,7 +362,11 @@ async def reverse_tunnel(ctx: ScenarioContext, port: int) -> int:
         while tunnel.running and time.monotonic() < deadline:
             done = await asyncio.to_thread(host.run, listening.format(p=remote), 30)
             if done.returncode == 0:
-                tunnels[port] = remote
+                # Something listens there, but it may be someone else's listener that took the
+                # port first: then OUR ssh -R logs the refusal and exits (ExitOnForwardFailure).
+                await asyncio.sleep(FORWARD_SETTLE_S)
+                if tunnel.running and FORWARD_FAILED not in tunnel.output:
+                    tunnels[port] = remote
                 break
             await asyncio.sleep(0.3)
         if port in tunnels:

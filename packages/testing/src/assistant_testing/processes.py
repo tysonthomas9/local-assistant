@@ -17,6 +17,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -71,6 +72,10 @@ class ManagedProcess:
     env: dict[str, str] | None = None
     cwd: Path | None = None
     lines: list[str] = field(default_factory=list)
+    line_times: list[float] = field(default_factory=list)
+    """`time.monotonic()` when each line of `lines` arrived."""
+    scrub: Callable[[str], str] | None = None
+    """Applied to every output line before it is kept (e.g. the edge host's $HOME -> `~`)."""
     _new_line: asyncio.Event = field(default_factory=asyncio.Event)
     _reader: asyncio.Task[None] | None = None
 
@@ -95,8 +100,12 @@ class ManagedProcess:
         if stream is None:
             return
         while raw := await stream.readline():
-            self.lines.append(raw.decode(errors="replace").rstrip("\n"))
-            self._new_line.set()
+            self._keep(raw.decode(errors="replace").rstrip("\n"))
+        self._new_line.set()
+
+    def _keep(self, line: str) -> None:
+        self.lines.append(self.scrub(line) if self.scrub is not None else line)
+        self.line_times.append(time.monotonic())
         self._new_line.set()
 
     async def wait_for_line(self, pattern: str, timeout_s: float) -> str:
@@ -203,14 +212,24 @@ class ManagedProcess:
 
 
 REMOTE_PGID_MARK = "@@edge-pgid "
-"""First line a remote process prints (from the launcher, before exec): its process group."""
+"""First line a remote process prints (from the launcher, before exec): its process group and
+the edge host's $HOME (so its output can show `~` instead of the user's home path)."""
 
 _REMOTE_LAUNCHER = (
     "use POSIX (); POSIX::setsid(); $| = 1; "
-    'print "' + REMOTE_PGID_MARK.replace("@", "\\@") + '", getpgrp(), "\\n"; '
+    'print "' + REMOTE_PGID_MARK.replace("@", "\\@") + '", getpgrp(), " $ENV{HOME}\\n"; '
     'exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!\\n";'
 )
 """Perl (present on macOS and Linux): new session, report the process group, exec argv."""
+
+
+def home_scrubber(home: str) -> Callable[[str], str]:
+    """Rewrites `home` (a user's home directory) to `~` in a line of output."""
+    home = home.rstrip("/")
+    if not home or home == "/":
+        return lambda line: line
+    pattern = re.compile(re.escape(home) + r"(?=/|\b|$)")
+    return lambda line: pattern.sub("~", line)
 
 
 def sh_word(arg: str) -> str:
@@ -266,11 +285,13 @@ class RemoteProcess(ManagedProcess):
         while raw := await stream.readline():
             line = raw.decode(errors="replace").rstrip("\n")
             if self.remote_pgid is None and line.startswith(REMOTE_PGID_MARK):
-                self.remote_pgid = int(line.removeprefix(REMOTE_PGID_MARK))
+                pgid, _, home = line.removeprefix(REMOTE_PGID_MARK).partition(" ")
+                self.remote_pgid = int(pgid)
+                if home and self.scrub is None:
+                    self.scrub = home_scrubber(home)
                 self._pgid_known.set()
                 continue
-            self.lines.append(line)
-            self._new_line.set()
+            self._keep(line)
         self._new_line.set()
         self._pgid_known.set()
 
@@ -365,8 +386,12 @@ class ProcessGroup:
         stdin: bool = False,
         ssh: str | None = None,
         remote_cwd: str | None = None,
+        scrub: Callable[[str], str] | None = None,
     ) -> ManagedProcess:
         """Start a process. With `stdin=True` steps can type into it (`write_line`).
+
+        `scrub` rewrites each output line before it is kept (remote processes get one that maps
+        the edge host's $HOME to `~` automatically).
 
         With `ssh` (an alias from ~/.ssh/config) it runs on that host instead: `argv`, `env`
         (only these variables) and `remote_cwd` (`~/...` allowed) apply there.
@@ -391,6 +416,7 @@ class ProcessGroup:
             proc=proc,
             env=dict(env) if env is not None else None,
             cwd=cwd,
+            scrub=scrub,
         )
         managed.start_reader()
         self.processes.append(managed)
@@ -443,9 +469,10 @@ class ProcessGroup:
         timeout_s: float = 60.0,
         env: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        scrub: Callable[[str], str] | None = None,
     ) -> CompletedRun:
         """Run a process to completion (it is still stopped on teardown if it hangs)."""
-        managed = await self.start(name, argv, env=env, cwd=cwd)
+        managed = await self.start(name, argv, env=env, cwd=cwd, scrub=scrub)
         try:
             code = await managed.wait(timeout_s)
         except TimeoutError:
