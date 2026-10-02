@@ -54,13 +54,40 @@ The expanded names must be unique.
 ```bash
 uv run pytest e2e -m core            # tier core (hosted CI)
 uv run pytest e2e -m hw              # needs the robot
-uv run pytest e2e -m models          # needs the GPUs and model servers
+uv run pytest e2e -m models          # needs the GPUs and model servers (see below)
 uv run pytest e2e --list-features    # list features, scenarios and steps; run nothing
 scripts/gate.sh                      # the full gate (see the script header)
 ```
 
 Each scenario prints its steps with ✓ (passed), ✗ (failed) or - (not reached). Every process a
 scenario starts is stopped in teardown, even when a step fails.
+
+### The models tier
+
+`models` features use the real models on this PC: Ollama with `reachy-gemma4` (the system
+service at 127.0.0.1:11434) and the speech server `servers/speech` (Parakeet TDT 0.6B v3 STT and
+Qwen3-TTS 1.7B CustomVoice, about 7 GB on GPU1). Once:
+
+```bash
+uv sync --locked --project servers/speech          # its own venv, servers/speech/.venv
+```
+
+The model weights come from the Hugging Face cache (`~/.cache/huggingface/hub`:
+`models--nvidia--parakeet-tdt-0.6b-v3` and `models--Serveurperso--Qwen3-TTS-GGUF`); the server
+runs offline, so download them once with `--online` (see `servers/speech/README.md`). A feature
+uses the speech server already serving on 127.0.0.1:8772 (the gate starts one there) or starts
+one of its own on GPU1 for the scenario. No GPU, a busy GPU1 (less than 8 GB free), missing
+weights or no Ollama fail the features; they are never skipped. To share one server across a
+run, start it first:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 servers/speech/.venv/bin/python -m assistant_speech --port 8772
+uv run pytest e2e -m models
+```
+
+Features with `tier: [hw, models]` also need the robot (run with `-m "hw and models"`). Spoken
+turns write their timings (STT, LLM first token, TTS first audio, input to the speaker's first
+audio, totals) to `artifacts/timings-<name>.json` (`$ASSISTANT_ARTIFACTS_DIR`).
 
 ## Step vocabulary
 
@@ -178,7 +205,7 @@ over 0.4 s fails as "the measurement is starved".
 
 | Step | Arguments | Does |
 |---|---|---|
-| `start_edge_agent` | `id`, `body: console \| reachy = console`, `where: pc \| edge_host = pc`, `wait = true`, `energy_trigger_dbfs: float?`, `within_s = 60` | Starts the edge agent; waits for its BODY line and welcome unless `wait: false` |
+| `start_edge_agent` | `id`, `body: console \| reachy = console`, `where: pc \| edge_host = pc`, `wait = true`, `energy_trigger_dbfs: float?`, `vad_end_ms: int?`, `record = false`, `within_s = 60` | Starts the edge agent; waits for its BODY line and welcome unless `wait: false`. `energy_trigger_dbfs` opens a mic window on a loud voice, `vad_end_ms` closes it after that much quiet once speech was heard; `record` writes each played speech stream to a WAV where the agent runs (`.recordings/`, read and removed by `recorded_reply_transcript_not_empty`) |
 | `edge_body_is` | `client`, `aec: none \| sw \| hw?`, `camera: bool?`, `expressions: list[str]?` | The body's announced capabilities (and the hello the server got); `aec: hw` also checks the XVF3800 report (board found, one far-end reference) |
 | `edge_types` | `client`, `text` | Types a line into the agent (`/ptt down`, `/mute`, ... or text, sent as text.input) |
 | `press_push_to_talk` / `release_push_to_talk` | `client` | `/ptt down` opens a mic window (MIC-OPEN); `/ptt up` closes it (MIC-CLOSE) |
@@ -215,7 +242,7 @@ reachy bodies do; the link client console does not, so use `brain_state_is` with
 
 | Step | Arguments | Does |
 |---|---|---|
-| `start_brain` | `engine: echo \| basic = echo`, `llm: system \| test = system`, `follow_up_s: float?`, `set: map?` (config overrides, e.g. `{llm.max_concurrency: 3}`) | Starts the brain on free loopback ports (EdgeLink and admin) and waits for LISTENING |
+| `start_brain` | `engine: echo \| basic = echo`, `llm: system \| test = system`, `follow_up_s: float?`, `speech = false`, `set: map?` (config overrides, e.g. `{llm.max_concurrency: 3}`) | Starts the brain on free loopback ports (EdgeLink and admin) and waits for LISTENING. `speech: true` (basic engine): voice turns go through the scenario's speech server's STT and replies are spoken by its TTS (`speech_server_running` or `start_speech_server` first); otherwise replies are speak text |
 | `brain_output_clean` | none | No traceback, bus handler failure, BRAIN-ERROR or error log line from the brain |
 | `edge_shows_reply` | `client`, `text: str?`, `containing: str?`, `within_s = 60` | The next reply the edge shows (SAY, from `speak.begin.text`): exactly `text`, or containing `containing` (case-insensitive) |
 | `attention_sequence_is` | `client`, `states: list[str]`, `within_s = 30` | The edge received exactly these `attention` states next, in order |
@@ -232,3 +259,31 @@ reachy bodies do; the link client console does not, so use `brain_state_is` with
 | `llm_request_log` | `priority: bool`, `classes: map?` | Every request carries `priority` (with this value per class), or none does |
 | `start_llm_server` / `kill_llm_server` / `restart_llm_server` | `within_s = 30` | A real `ollama serve` of the scenario's own on a free loopback port (the system model store); killed for real with SIGKILL (runners included), restarted on the same port |
 | `robot_pose_follows` | `client`, `text`, `states: list[str]`, `tolerance_deg = 6`, `max_head_deg = 10` | Types `text`; the body's MOTION lines follow the attention `states`; a sampler on the robot's machine checks each pose within `tolerance_deg` of neutral turned by the state's roll/pitch, and no more than `max_head_deg` from neutral (remembers the start pose for `robot_back_at_rest`) |
+
+### Speech (`steps/speech.py`)
+
+The real speech server (`servers/speech`: Parakeet TDT STT and Qwen3-TTS on GPU1) and spoken
+turns. Voice input is the golden WAVs of `tests/fixtures/audio` (synthetic speech, listed in
+`golden.toml`), fed into the edge agent as real 20 ms mic frames at its mic input point
+(`/feed`), never played through a speaker. Word error rates compare lower-case words without
+punctuation.
+
+| Step | Arguments | Does |
+|---|---|---|
+| `speech_server_running` | none | Uses the speech server serving on 127.0.0.1:8772, else starts one of the scenario's own on GPU1 (fails if GPU1 has less than 8 GB free); checks it runs on a GPU |
+| `start_speech_server` / `stop_speech_server` / `kill_speech_server` / `restart_speech_server` | none | A speech server of the scenario's own on a free loopback port; stopped (SIGTERM) or killed for real (SIGKILL), then restarted on the same port; it must stop or start answering |
+| `ollama_serves` | `model = reachy-gemma4` | The system Ollama answers and has the model |
+| `transcribe_golden_wav` | `name` | The speech server transcribes `tests/fixtures/audio/<name>.wav` (STT time recorded) |
+| `transcript_matches` | `text: str?`, `max_wer = 0.2` | The last transcript matches `text` (default: what the golden WAV or the TTS said) with at most this word error rate |
+| `tts_gives_audio` | `text`, `voice = ryan`, `min_s = 0.5`, `max_s = 30`, `min_voiced = 0.4` | The TTS streams `min_s` to `max_s` seconds of audio, first audio before the end, with at least `min_voiced` of its 20 ms frames above -45 dBFS (first-audio time recorded) |
+| `transcribe_tts_audio` | none | The speech server transcribes the audio of the last `tts_gives_audio` (a round trip) |
+| `speech_server_used_voice` | `voice` | The speech server's latest TTS request (`/requests`) used this voice |
+| `feed_golden_wav` | `client`, `name` | The agent feeds `tests/fixtures/audio/<name>.wav` as mic frames in real time (`/feed`, FEED) |
+| `golden_wav_fed` | `client`, `within_s = 30` | The fed WAV reached its end (FED) |
+| `voice_turn_transcribed` | `client`, `text: str?`, `max_wer = 0.2`, `within_s = 60` | The brain's next TRANSCRIPT matches the fed WAV's text (or `text`); prints the edge's mic windows |
+| `robot_speaks_reply` | `client`, `min_ms = 300`, `within_s = 120`, `wait_done = true` | The next stream that starts playing on the edge: its speak.begin, playback started and progress, and (with `wait_done`) done with at least `min_ms` played; records the time from the user's input (end of the fed speech, or the typed text) to the speaker's first audio |
+| `playback_progress_at_least` | `client`, `ms`, `within_s = 60` | The reply being spoken has played at least `ms` (the edge's playback progress) |
+| `recorded_reply_transcript_not_empty` | `client`, `within_s = 120` | What the edge's speaker was given for the reply (`record: true`) transcribes to non-empty text; prints its WER against the brain's reply text |
+| `barge_in_stops_playback_within` | `client`, `ms` | The edge's local flush on the barge-in (FLUSHED took_ms) took at most `ms`, and it sent vad{start, barge_in, stream_id, played_ms} for the playing stream |
+| `turn_truncated_at_played_ms` | `within_s = 15` | The interrupted turn's log entry has `truncated` at the edge's `played_ms`, less played than sent, and the heard text a strict beginning of the spoken text; the brain printed TURN-TRUNCATED |
+| `timings_recorded` | `name` | Writes the scenario's timings and the turn log's speech and LLM timings to `artifacts/timings-<name>.json` and prints them |

@@ -26,7 +26,14 @@
 #              there. Leftovers after the features FAIL the stage (docs/robot-on-another-machine.md)
 #              Features with `tier: [hw, models]` run here (they need the models too; with
 #              GATE_NO_MODELS=1 they are left out)
-#   h  models  e2e features, tier models without hw: FAILS unless both GPUs and Ollama are available
+#   h  models  e2e features, tier models without hw: FAILS unless both GPUs, Ollama with
+#              reachy-gemma4 and the speech server are available
+#
+# The models (before stage g): the speech server (servers/speech: Parakeet STT + Qwen3-TTS) on
+# 127.0.0.1:8772. If none is serving there, the gate syncs its venv in the checkout under test
+# and starts it on GPU1 (CUDA_VISIBLE_DEVICES=1; it needs 8 GB free there), and stops it after
+# stage h. A server it did not start is used and left alone. Failing to start it fails g and h.
+# Spoken turns write their timings to $ROOT/artifacts (ASSISTANT_ARTIFACTS_DIR).
 #   i  summary PASS/FAIL per stage. Exit 0 = PASS, 1 = FAIL, 3 = INCOMPLETE (a stage opted out)
 #
 # E2E uses only real devices and the real stack (see e2e/features/README.md).
@@ -38,21 +45,34 @@
 #   GATE_NO_MODELS=1  skip stage h   }
 #   LEGACY_PYTHON     python for the legacy suite (default: third_party/speech-to-speech/.venv)
 #   LEGACY_APP_DIR    reachy_mini_conversation_app to link (default: from the main checkout)
+#
+# Gitignored legacy resources are looked up in the main checkout of this repository, this
+# checkout, and (for a clone of a clone) the checkout a local `origin` remote points to and
+# its main checkout.
 set -euo pipefail
 
 ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 MAIN_CHECKOUT="$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")"
 DAEMON_URL="http://127.0.0.1:8000"
 OLLAMA_URL="http://127.0.0.1:11434/v1/models"
+OLLAMA_MODEL="reachy-gemma4"
+SPEECH_PORT=8772
+SPEECH_URL="http://127.0.0.1:$SPEECH_PORT"
+SPEECH_GPU=1
+SPEECH_MIN_FREE_MIB=8000
+SPEECH_PID=""
+SPEECH_STATUS=""
 unset VIRTUAL_ENV || true
 # The uv workspace lives in .venv-assistant; .venv is the legacy root venv (piper, reachy-mini
 # SDK and daemon) and the new stack must never touch it.
 export UV_PROJECT_ENVIRONMENT=.venv-assistant
+export ASSISTANT_ARTIFACTS_DIR="${ASSISTANT_ARTIFACTS_DIR:-$ROOT/artifacts}"
 
 STATE_DIR="$(mktemp -d -t assistant-gate-state.XXXXXX)"
 CLONE_PARENT=""
 CLONE_DIR=""
 cleanup() {
+    if declare -F stop_speech_server >/dev/null; then stop_speech_server; fi
     rm -rf "$STATE_DIR"
     if [[ -n "$CLONE_PARENT" ]]; then rm -rf "$CLONE_PARENT"; fi
 }
@@ -204,6 +224,16 @@ legacy_source() {
     for candidate in "$MAIN_CHECKOUT/$rel" "$ROOT/$rel"; do
         if [[ -e "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
     done
+    # A clone of a clone: the checkout a local `origin` points to, and its main checkout.
+    local origin common
+    origin="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
+    origin="${origin#file://}"
+    if [[ "$origin" == /* && -d "$origin" ]]; then
+        common="$(git -C "$origin" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+        for candidate in "$origin/$rel" "${common:+$(dirname "$common")/$rel}"; do
+            if [[ -n "$candidate" && -e "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
+        done
+    fi
     return 1
 }
 
@@ -312,16 +342,75 @@ models_present() {
     gpus="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)"
     printf 'GPUs: %s (need 2)\n' "${gpus:-0}"
     if [[ "${gpus:-0}" -lt 2 ]]; then ok=1; fi
-    if curl -sf -o /dev/null -m 3 "$OLLAMA_URL"; then
-        printf 'Ollama: %s answering\n' "$OLLAMA_URL"
+    if curl -sf -m 3 "$OLLAMA_URL" | grep -q "\"$OLLAMA_MODEL"; then
+        printf 'Ollama: %s serves %s\n' "$OLLAMA_URL" "$OLLAMA_MODEL"
     else
-        printf 'Ollama: %s not answering\n' "$OLLAMA_URL"
+        printf 'Ollama: %s not answering or without %s\n' "$OLLAMA_URL" "$OLLAMA_MODEL"
+        ok=1
+    fi
+    if curl -sf -o /dev/null -m 3 "$SPEECH_URL/health"; then
+        printf 'speech server: %s answering (%s)\n' "$SPEECH_URL" "$SPEECH_STATUS"
+    else
+        printf 'speech server: %s not answering (%s)\n' "$SPEECH_URL" "$SPEECH_STATUS"
         ok=1
     fi
     return "$ok"
 }
 
+# start_speech_server: use the speech server on $SPEECH_PORT, or sync its venv in the checkout
+# under test and start it on GPU$SPEECH_GPU. Runs in the main shell (sets SPEECH_PID/STATUS).
+start_speech_server() {
+    banner "models: speech server and Ollama"
+    if curl -sf -o /dev/null -m 3 "$SPEECH_URL/health"; then
+        SPEECH_STATUS="already running, not started by the gate"
+        printf 'speech server: %s %s\n' "$SPEECH_URL" "$SPEECH_STATUS"
+        return 0
+    fi
+    local free venv="$WORK/servers/speech/.venv" log="$STATE_DIR/speech.log" waited=0
+    free="$(nvidia-smi --id="$SPEECH_GPU" --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null || true)"
+    printf 'GPU%s: %s MiB free (need %s)\n' "$SPEECH_GPU" "${free:-unknown}" "$SPEECH_MIN_FREE_MIB"
+    if [[ -z "$free" || "$free" -lt "$SPEECH_MIN_FREE_MIB" ]]; then
+        SPEECH_STATUS="GPU$SPEECH_GPU missing or busy (${free:-no} MiB free)"
+        return 1
+    fi
+    if ! (cd "$WORK" && UV_PROJECT_ENVIRONMENT="$venv" uv sync --locked --project servers/speech); then
+        SPEECH_STATUS="uv sync of servers/speech failed"
+        return 1
+    fi
+    (cd "$WORK" && CUDA_VISIBLE_DEVICES="$SPEECH_GPU" exec "$venv/bin/python" -m assistant_speech \
+        --port "$SPEECH_PORT") >"$log" 2>&1 &
+    SPEECH_PID=$!
+    while ! grep -q '^READY ' "$log" 2>/dev/null; do
+        if ! kill -0 "$SPEECH_PID" 2>/dev/null || [[ $waited -ge 300 ]]; then
+            tail -20 "$log"
+            stop_speech_server
+            SPEECH_STATUS="the speech server did not start (see above)"
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    grep '^READY ' "$log"
+    SPEECH_STATUS="started by the gate (pid $SPEECH_PID)"
+}
+
+stop_speech_server() {
+    if [[ -z "$SPEECH_PID" ]]; then return 0; fi
+    if kill -0 "$SPEECH_PID" 2>/dev/null; then
+        kill -TERM "$SPEECH_PID" 2>/dev/null || true
+        local i
+        for i in $(seq 1 30); do kill -0 "$SPEECH_PID" 2>/dev/null || break; sleep 1; done
+        kill -KILL "$SPEECH_PID" 2>/dev/null || true
+        printf 'speech server (pid %s) stopped\n' "$SPEECH_PID"
+    fi
+    SPEECH_PID=""
+}
+
 stage_hw() {
+    if [[ "${GATE_NO_MODELS:-}" != "1" ]] && ! models_present; then
+        note "the [hw, models] features need the models: $SPEECH_STATUS (GATE_NO_MODELS=1 to skip)"
+        return 1
+    fi
     if ! robot_present; then
         note "$(tail -1 "$STATE_DIR/robot-host" 2>/dev/null) (GATE_NO_HW=1 to skip)"
         return 1
@@ -359,7 +448,7 @@ stage_hw() {
 
 stage_models() {
     if ! models_present; then
-        note "needs both GPUs and Ollama at $OLLAMA_URL (GATE_NO_MODELS=1 to skip)"
+        note "needs both GPUs, $OLLAMA_MODEL at $OLLAMA_URL and the speech server: $SPEECH_STATUS (GATE_NO_MODELS=1 to skip)"
         return 1
     fi
     pytest_features "models and not hw"
@@ -385,6 +474,9 @@ else
     run_stage d "real-only check" stage_real_only
     run_stage e "e2e features, tier core" stage_core
     run_stage f "legacy tests (local_backend)" stage_legacy
+    if [[ "${GATE_NO_MODELS:-}" != "1" ]]; then
+        start_speech_server || printf '%sspeech server: %s%s\n' "$RED" "$SPEECH_STATUS" "$RESET"
+    fi
     if [[ "${GATE_NO_HW:-}" == "1" ]]; then
         warn_loud "GATE_NO_HW=1: the robot (hw) features were NOT run."
         INCOMPLETE+=("hw")
@@ -399,6 +491,7 @@ else
     else
         run_stage h "e2e features, tier models" stage_models
     fi
+    stop_speech_server
 fi
 
 banner "i) summary"

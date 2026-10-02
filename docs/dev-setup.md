@@ -42,5 +42,13 @@ the script). Gitignored legacy resources (`.venv`, `reachy_mini_conversation_app
 checkout, so the legacy suite runs against the real legacy environment. Exit codes: 0 pass,
 1 fail, 3 incomplete (`GATE_NO_HW=1` or `GATE_NO_MODELS=1`).
 
+Before the robot (hw) and models stages the gate checks the models: Ollama with
+`reachy-gemma4`, and the speech server (`servers/speech`, see its README) on 127.0.0.1:8772.
+If none is serving there it syncs the speech server's venv and starts one on GPU1, and stops
+it again at the end; a server it did not start is left alone. No GPU, a busy GPU1 or no
+Ollama fail those stages. Timings of the spoken turns are kept in `artifacts/` of the
+checkout the gate was run from. See "The models tier" in `e2e/features/README.md` to run the
+models features by hand.
+
 The hw stage uses the robot wherever it is plugged in. If it is attached to another machine
 (e.g. a Mac), see [Running robot tests with the robot on another machine](robot-on-another-machine.md).
