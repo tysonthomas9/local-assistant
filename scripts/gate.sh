@@ -406,6 +406,21 @@ start_llm_server() {
     if curl -sf -o /dev/null -m 3 "$LLM_URL/v1/models"; then
         LLM_STATUS="already running, not started by the gate"
     else
+        # The legacy stage may have left reachy-gemma4 loaded in the system Ollama on GPU0:
+        # unload it through its API first (as scripts/llm_server.sh does) and give the memory
+        # a moment to come back before measuring.
+        if curl -sf -m 3 http://127.0.0.1:11434/api/ps 2>/dev/null | grep -q "\"name\":\"$LLM_MODEL"; then
+            curl -sf -m 60 http://127.0.0.1:11434/api/generate \
+                -d "{\"model\":\"$LLM_MODEL\",\"keep_alive\":0}" >/dev/null || true
+            printf 'LLM server: unloaded %s from the system Ollama\n' "$LLM_MODEL"
+            local i
+            for i in $(seq 1 30); do
+                curl -sf -m 3 http://127.0.0.1:11434/api/ps 2>/dev/null \
+                    | grep -q "\"name\":\"$LLM_MODEL" || break
+                sleep 1
+            done
+            sleep 2
+        fi
         free="$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null || true)"
         printf 'GPU0: %s MiB free (%s needs %s)\n' "${free:-unknown}" "$LLM_SERVER" "${LLM_NEEDS_MIB[$LLM_SERVER]}"
         if [[ -z "$free" || "$free" -lt "${LLM_NEEDS_MIB[$LLM_SERVER]}" ]]; then
