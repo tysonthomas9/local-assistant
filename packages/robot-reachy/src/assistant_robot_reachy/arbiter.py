@@ -100,6 +100,10 @@ ATTENTION_POSES: dict[str, tuple[float, float]] = {
 head up a little toward the user, thinking tilts it sideways, speaking faces the user. All
 within `MAX_HEAD_DEG` (the rotation is about 7.6 degrees at most)."""
 ATTENTION_MOVE_S = 1.0
+WOKEN_NEUTRAL = np.eye(4)
+"""The head pose wake_up() goes to (the SDK's INIT_HEAD_POSE): neutral after waking."""
+SETTLE_S = 0.6
+SETTLE_PAUSE_S = 0.3
 """Each attention pose is reached over one second (slow, at least `MIN_MOVE_S`)."""
 REST_STATES = ("idle", "muted", "sleeping")
 
@@ -207,8 +211,14 @@ class MotionArbiter:
                 if at_rest:
                     self.mini.enable_motors()
                     self.mini.wake_up()
+                    # wake_up() ends with a quick 20 deg roll and back (0.2 s each): settle
+                    # slowly at its neutral pose before attending from there.
+                    self.mini.goto_target(head=WOKEN_NEUTRAL, duration=SETTLE_S, body_yaw=None)
+                    time.sleep(SETTLE_PAUSE_S)
+                    self._neutral = WOKEN_NEUTRAL.copy()
+                else:
+                    self._neutral = np.array(self.mini.get_current_head_pose(), dtype=float)
                 self._sleep_after = at_rest
-                self._neutral = np.array(self.mini.get_current_head_pose(), dtype=float)
                 self._neutral_t = time.monotonic()
             roll, pitch = ATTENTION_POSES[state]
             target = self._neutral.copy()

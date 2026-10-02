@@ -482,6 +482,10 @@ def _matrix(pose: dict[str, float]) -> list[list[float]]:
     return _rotation(pose)
 
 
+def _degrees(pose: dict[str, float]) -> str:
+    return " ".join(f"{k} {math.degrees(pose[k]):.1f}" for k in ("roll", "pitch", "yaw"))
+
+
 def _mul(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:
     return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
 
@@ -558,6 +562,7 @@ async def robot_pose_follows(
     neutral_samples = [s for s in samples if s["t"] >= start]
     assert neutral_samples, "no sample at the neutral pose"
     neutral = _matrix(neutral_samples[0]["head_pose"])
+    print(f"  neutral head pose: {_degrees(neutral_samples[0]['head_pose'])}")
     for move in posed:
         roll, pitch = ATTENTION_POSES[move["state"]]
         target = _mul(neutral, _matrix({"roll": math.radians(roll), "pitch": math.radians(pitch),
@@ -567,6 +572,7 @@ async def robot_pose_follows(
         reached = after[0]
         error = _angle(target, _matrix(reached["head_pose"]))
         turned = _angle(neutral, _matrix(reached["head_pose"]))
+        print(f"  {move['state']} reached: {_degrees(reached['head_pose'])}")
         print(
             f"  {move['state']}: target roll {roll} pitch {pitch} deg; measured "
             f"{turned:.1f} deg from neutral, {error:.1f} deg off the target"
