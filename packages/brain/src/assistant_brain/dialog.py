@@ -10,18 +10,23 @@ Turn states and the attention the edge is told (through `body.intent` -> BodyCon
 - **Input.** A wake or `vad{start}` opens listening and the brain collects the uplink audio
   (0x01) until `vad{end}`; audio with speech in it becomes a voice turn (silence ends the
   window). `text.input` is a text turn. New input during a turn interrupts it.
-- **Reply.** The engine's reply text goes out as `speak.begin{text}` + `speak.end` when there is
-  no audio (until S8 adds TTS); reply audio as `speak.begin` + 0x02 frames + `speak.end`, and
-  the turn then waits for the edge's playback clock to report the stream `done` (or `flushed`).
+- **Reply.** A voice turn's transcript (`InputTranscript`) becomes the turn's input text. The
+  engine's reply text goes out as `speak.begin{text}` + `speak.end` when there is no audio
+  (no speech server); reply audio as `speak.begin{first sentence}` + 0x02 frames +
+  `speak.end`, and the turn then waits for the edge's playback clock to report the stream
+  `done` (or `flushed`).
 - **Barge-in.** `vad{start, barge_in}` (the edge already flushed its speaker) or new input
-  cancels the running turn (LLM included) and tells the engine how much was heard.
-- **Follow-up.** After a voice turn the brain sends `mic.follow_up{follow_up_s}` and stays
-  listening; a window that ends without speech (or `follow_up_s` + a grace) returns to idle.
+  cancels the running turn (LLM and TTS included) and tells the engine how much was heard
+  (`played_ms`); the engine's cut goes in the turn log (`truncated`, `TURN-TRUNCATED`).
+- **Follow-up.** After a voice turn that was answered the brain sends
+  `mic.follow_up{follow_up_s}` and stays listening; a window that ends without speech (or
+  `follow_up_s` + a grace) returns to idle. A voice turn in which nothing was heard (empty
+  transcript) gets no reply and no window.
 - **Proactive speech** (`speech.request`): spoken at once when idle, queued while a turn or
   window is active and spoken when the session is idle again, dropped while muted or once
   its `ttl_s` has passed.
-- **Errors.** A model server that is down ends the turn with a spoken (speak text) apology and
-  attention back to idle.
+- **Errors.** A model server that is down ends the turn (any reply audio already out is ended
+  first) with a spoken (speak text) apology and attention back to idle.
 """
 
 import asyncio
@@ -39,6 +44,7 @@ from assistant_brain.engine import (
     MIC_RATE,
     EngineSession,
     EngineUnavailable,
+    InputTranscript,
     ReplyAudio,
     ReplyText,
     TurnMetrics,
@@ -124,6 +130,7 @@ class DialogManager:
         self._playback: dict[int, asyncio.Future[str]] = {}
         self._stream = 0
         self._speaking_stream: int | None = None
+        self._metrics: TurnMetrics | None = None
         self.queue: deque[tuple[SpeechRequest, float]] = deque()
 
     # ------------------------------------------------------------ state
@@ -280,6 +287,7 @@ class DialogManager:
         outcome: Literal["finished", "error"] = "finished"
         error: str | None = None
         metrics = TurnMetrics()
+        self._metrics = metrics
         try:
             if request is not None and request.mode == "verbatim":
                 assert request.text is not None
@@ -298,6 +306,7 @@ class DialogManager:
                     text=text if request is None else request.prompt,
                     audio=audio,
                     request_class="proactive" if request is not None else "voice",
+                    assistant=self.session.assistant,
                 )
                 try:
                     await self._reply(record, turn, metrics)
@@ -316,9 +325,21 @@ class DialogManager:
                 }.items()
                 if v is not None
             }
+            record.speech = {
+                k: (round(v, 1) if isinstance(v, float) else v)
+                for k, v in {
+                    "stt_ms": metrics.stt_ms,
+                    "tts_first_audio_ms": metrics.tts_first_audio_ms,
+                    "first_audio_ms": metrics.first_audio_ms,
+                    "voice": metrics.voice,
+                    "tts_requests": metrics.tts_requests or None,
+                }.items()
+                if v is not None
+            }
         await self.bus.publish(TurnFinished(session_id=sid, turn_id=tid))
         self.turns.end(record, outcome, error)
-        if record.kind == "voice" and self.follow_up_s > 0 and not self.muted:
+        answered = bool(record.reply_text)
+        if record.kind == "voice" and answered and self.follow_up_s > 0 and not self.muted:
             await self._open_follow_up()
         else:
             await self._become_idle()
@@ -328,16 +349,31 @@ class DialogManager:
         rate = 0
         sent_ms = 0
         texts: list[str] = []
-        async for event in self.engine.respond(turn, metrics):
-            if isinstance(event, ReplyText):
-                texts.append(event.text)
-                record.reply_text = "".join(texts)
-                continue
-            assert isinstance(event, ReplyAudio)
-            if stream is None:
-                stream, rate = self._new_stream(), event.rate
-                await self._begin(record, stream, rate, "".join(texts) or None)
-            sent_ms += await self._send_audio(stream, event.pcm, rate)
+        events = self.engine.respond(turn, metrics)
+        try:
+            async for event in events:
+                if isinstance(event, InputTranscript):
+                    await self._transcript(record, event.text)
+                    continue
+                if isinstance(event, ReplyText):
+                    texts.append(event.text)
+                    record.reply_text = "".join(texts)
+                    continue
+                assert isinstance(event, ReplyAudio)
+                if stream is None:
+                    stream, rate = self._new_stream(), event.rate
+                    await self._begin(record, stream, rate, "".join(texts).strip() or None)
+                sent_ms += await self._send_audio(stream, event.pcm, rate)
+                record.reply_audio_ms = sent_ms
+        except EngineUnavailable:
+            if stream is not None:  # end the reply that was already playing, then apologise
+                await self._end(stream)
+                await self._wait_played(stream, sent_ms)
+            raise
+        finally:
+            aclose = getattr(events, "aclose", None)
+            if aclose is not None:
+                await aclose()  # a cancelled turn stops the engine's reply (LLM, TTS) now
         reply = "".join(texts).strip()
         record.reply_text = reply
         if stream is None:
@@ -347,6 +383,14 @@ class DialogManager:
         record.reply_audio_ms = sent_ms
         await self._end(stream)
         await self._wait_played(stream, sent_ms)
+
+    async def _transcript(self, record: TurnRecord, text: str) -> None:
+        record.input_text = text
+        emit("TRANSCRIPT", {"text": text}, device=self.session.device_id, turn=record.turn_id)
+        if text:
+            await self.bus.publish(
+                TurnUserText(session_id=self.session.session_id, turn_id=record.turn_id, text=text)
+            )
 
     async def _begin(self, record: TurnRecord, stream: int, rate: int, text: str | None) -> None:
         if self.state != "speaking":
@@ -418,13 +462,24 @@ class DialogManager:
     async def interrupt(self, played_ms: int | None) -> None:
         """Barge-in or new input: cancel the running turn and tell the engine what was heard."""
         record = self.record
+        metrics = self._metrics
         stream = self._speaking_stream
-        if not await self._cancel_turn("interrupted"):
+        if not await self._cancel_turn("interrupted", end=False):
             return
         if stream is not None:
             await self.send(Flush(stream_id=stream))
         await self.engine.interrupt(played_ms)
         if record is not None:
+            if metrics is not None and metrics.truncation is not None:
+                record.truncated = metrics.truncation
+                emit(
+                    "TURN-TRUNCATED",
+                    metrics.truncation,
+                    device=self.session.device_id,
+                    turn=record.turn_id,
+                    played_ms=played_ms,
+                )
+            self.turns.end(record, "interrupted")
             await self.bus.publish(
                 TurnInterrupted(
                     session_id=self.session.session_id,
@@ -433,14 +488,16 @@ class DialogManager:
                 )
             )
 
-    async def _cancel_turn(self, outcome: Literal["interrupted", "abandoned"]) -> bool:
+    async def _cancel_turn(
+        self, outcome: Literal["interrupted", "abandoned"], *, end: bool = True
+    ) -> bool:
         task, self._task = self._task, None
         if task is None or task.done():
             return False
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-        if self.record is not None:
+        if end and self.record is not None:
             self.turns.end(self.record, outcome)
         for waiter in self._playback.values():
             waiter.cancel()

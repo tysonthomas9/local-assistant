@@ -1,0 +1,7 @@
+id = "marvin"
+wake_words = [{ model = "hey_marvin", threshold = 0.4, word = "hey marvin" }]
+voice = { speaker = "Eric" }
+persona = "marvin"                                   # config/personas/marvin.md
+personas = []
+skills = { allow = ["*"], deny = [] }
+memory = { history_turns = 20, summarize_after = 40 }

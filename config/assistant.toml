@@ -23,6 +23,7 @@ announce_devices = ["lite"]
 impl = "basic"                     # "realtime" (HF speech-to-speech) becomes the default in phase 2
 vad_stop_s = 0.2
 smart_turn = true
+speech = true                      # basic engine: STT in, TTS replies ([stt], [tts]: the speech server)
 
 [llm]
 # vLLM is the default server (GPU0, OpenAI-compatible API).

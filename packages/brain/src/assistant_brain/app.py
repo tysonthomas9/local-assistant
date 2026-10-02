@@ -4,10 +4,11 @@
 
 It serves EdgeLink (`[net].edgelink_bind`) and the loopback admin endpoint
 (`[net].admin_bind`), routes each edge's input to its DialogManager and answers with the
-chosen turn engine: `echo` (the basic engine's echo mode, no models) or `basic` (text replies
-from the LLM at `[llm].base_url` through the priority gate). `--host`/`--port` and
-`--admin-port` override the binds (port 0 picks a free port); `--set section.key=value`
-overrides any config key. The first line printed is
+chosen turn engine: `echo` (the basic engine's echo mode, no models) or `basic` (replies
+from the LLM at `[llm].base_url` through the priority gate; with `[engine].speech` the speech
+server's STT (`[stt]`) transcribes voice turns and its TTS (`[tts]`) speaks the replies).
+`--host`/`--port` and `--admin-port` override the binds (port 0 picks a free port);
+`--set section.key=value` overrides any config key. The first line printed is
 `LISTENING url=ws://... admin=http://... engine=...`; the event lines that follow are listed
 in `assistant_brain.console`. Logs go to stderr.
 """
@@ -21,6 +22,8 @@ from pathlib import Path
 
 from assistant_brain.adapters.llm import LlmClient
 from assistant_brain.adapters.priority_gate import PriorityGate
+from assistant_brain.adapters.stt import SttClient
+from assistant_brain.adapters.tts import TtsClient
 from assistant_brain.admin import AdminServer
 from assistant_brain.bus import EventBus
 from assistant_brain.console import emit
@@ -45,10 +48,14 @@ async def serve(config: AssistantConfig, config_dir: Path, engine_mode: str, tok
     turns = TurnLog()
     router = Router(config_dir, config.brain.default_assistant)
     llm: LlmClient | None = None
+    stt: SttClient | None = None
+    tts: TtsClient | None = None
     if engine_mode == "basic":
         gate = PriorityGate(config.llm.max_concurrency, config.llm.reserved_voice_slots)
         llm = LlmClient(config.llm, gate)
-    engine = BasicTurnEngine("echo" if engine_mode == "echo" else "basic", llm)
+        if config.engine.speech:
+            stt, tts = SttClient(config.stt), TtsClient(config.tts)
+    engine = BasicTurnEngine("echo" if engine_mode == "echo" else "basic", llm, stt, tts)
     sessions = SessionManager(
         bus=bus, router=router, engine=engine, turns=turns, follow_up_s=config.brain.follow_up_s
     )
@@ -67,6 +74,8 @@ async def serve(config: AssistantConfig, config_dir: Path, engine_mode: str, tok
     await link.start()
     await admin.start()
     llm_fields = {"llm": config.llm.base_url, "model": config.llm.model} if llm else {}
+    if tts is not None:
+        llm_fields["speech"] = config.tts.base_url
     emit("LISTENING", url=link.url, admin=admin.url, engine=engine.name, **llm_fields)
 
     stop = asyncio.Event()
@@ -98,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         "--engine",
         choices=["echo", "basic"],
         default=None,
-        help="echo (no models) or basic (LLM text replies); default: [engine].impl",
+        help="echo (no models) or basic (LLM, + speech server); default: [engine].impl",
     )
     parser.add_argument("--host", default=None, help="EdgeLink host (default: [net])")
     parser.add_argument("--port", type=int, default=None, help="EdgeLink port (0: any free)")

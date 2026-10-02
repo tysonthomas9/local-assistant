@@ -1,8 +1,11 @@
 """The turn log: one record per turn, kept in memory and served by the admin endpoint.
 
-A record holds the input, the reply, every turn state with its time (ms since the turn
-started), the LLM timings (queued, time to first token, total) and the outcome:
-`finished`, `interrupted`, `error` or `abandoned` (the edge went away).
+A record holds the input (for a voice turn, its STT transcript), the reply, every turn state
+with its time (ms since the turn started), the LLM timings (queued, time to first token,
+total), the speech timings (`speech`: STT, the TTS's first audio, the reply's first audio,
+the voice), what was heard of a reply cut by a barge-in (`truncated`: `played_ms`,
+`heard_text`, ...) and the outcome: `finished`, `interrupted`, `error` or `abandoned` (the
+edge went away).
 """
 
 import time
@@ -31,6 +34,8 @@ class TurnRecord:
     reply_audio_ms: int = 0
     states: list[dict[str, object]] = field(default_factory=list)
     llm: dict[str, object] = field(default_factory=dict)
+    speech: dict[str, object] = field(default_factory=dict)
+    truncated: dict[str, object] | None = None
     outcome: Outcome | None = None
     error: str | None = None
     started_mono: float = field(default_factory=time.monotonic)

@@ -76,6 +76,9 @@ class EngineConfig(Section):
     smart_turn: bool = True
     realtime_url: str | None = None
     """HF speech-to-speech (OpenAI Realtime) endpoint for the `realtime` engine (phase 2)."""
+    speech: bool = True
+    """The basic engine speaks: speech input through `[stt]`, replies as audio through `[tts]`
+    (the speech server). Off: replies are speak text and speech input is not understood."""
 
 
 class LlmPriority(Section):
@@ -115,11 +118,16 @@ class LlmConfig(Section):
 
 
 class SttConfig(Section):
+    """The speech server's speech-to-text (`POST {base_url}/v1/audio/transcriptions`)."""
+
     base_url: str = "http://127.0.0.1:8772"
     model: str = "parakeet-tdt-0.6b-v3"
 
 
 class TtsConfig(Section):
+    """The speech server's text-to-speech (`POST {base_url}/v1/audio/speech`, streamed PCM).
+    The voice is the assistant's (`config/assistants/<id>.toml` `voice.speaker`)."""
+
     base_url: str = "http://127.0.0.1:8772"
     backend: str = "qwen3-ggml"
 
