@@ -520,7 +520,7 @@ async def robot_pose_follows(
     client: str,
     text: str,
     states: list[str],
-    tolerance_deg: float = 5.0,
+    tolerance_deg: float = 6.0,
     max_head_deg: float = 10.0,
     within_s: float = 120.0,
 ) -> None:
@@ -528,8 +528,9 @@ async def robot_pose_follows(
     line with the time its pose was reached). A sampler next to the daemon reads the robot's
     state every 50 ms meanwhile: at each pose the head is within `tolerance_deg` of the
     target (neutral turned by the state's roll/pitch) and closer to it than neutral is, and it
-    never turns more than `max_head_deg` from neutral. The Lite holds a small pose with up to
-    about 4 degrees of steady error (servo backlash, measured), hence the 5 degree default.
+    never turns more than `max_head_deg` from neutral. The Lite holds a small pose with a
+    steady error of up to about 5 degrees measured from the woken neutral (servo backlash plus
+    the neutral reading's own bias; 1.5-4.8 seen), hence the 6 degree default.
     Remembers the pose before (for `robot_back_at_rest`)."""
     _remember_start(ctx, await _robot_state(ctx))
     name = _client_name(client)

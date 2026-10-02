@@ -8,8 +8,8 @@ description: >
   over one second, never more than 10 degrees). A robot at rest wakes up with the SDK's
   wake_up() for the turn (then settles slowly at neutral) and goes back with goto_sleep() and
   motors off at idle. Measured by a sampler next to the daemon (not over the tunnel): every
-  pose within 5 degrees of its target (the Lite holds small poses with up to about 4 degrees
-  of steady error) and closer to it than neutral is.
+  pose within 6 degrees of its target (the Lite holds small poses with up to about 5 degrees
+  of steady error from its woken neutral) and closer to it than neutral is.
 scenarios:
   - name: attention poses follow a real turn and the robot goes back to rest
     steps:

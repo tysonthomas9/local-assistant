@@ -83,6 +83,8 @@ class LlmClient:
             body["tools"] = tools
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
+        if self.config.reasoning_effort:
+            body["reasoning_effort"] = self.config.reasoning_effort
         if self.config.send_priority:
             body["priority"] = getattr(self.config.priority, cls)
         return body

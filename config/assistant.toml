@@ -37,6 +37,7 @@ max_concurrency = 8                # priority gate: requests in flight across al
 reserved_voice_slots = 1           # always keep one slot free for a voice turn
 send_priority = true               # needs vLLM --scheduling-policy priority
 priority = { voice = 0, proactive = 5, background = 10 }
+reasoning_effort = "none"         # no thinking before a spoken reply ("" omits the field)
 
 [stt]
 base_url = "http://127.0.0.1:8772"

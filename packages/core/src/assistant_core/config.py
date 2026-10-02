@@ -101,6 +101,8 @@ class LlmConfig(Section):
     send_priority: bool = True
     """Send `priority` with each request (needs vLLM `--scheduling-policy priority`)."""
     priority: LlmPriority = Field(default_factory=LlmPriority)
+    reasoning_effort: str = "none"
+    """Sent as `reasoning_effort` ("none": no thinking before a spoken reply; "" omits it)."""
 
     @model_validator(mode="after")
     def _reserved_below_max(self) -> Self:
