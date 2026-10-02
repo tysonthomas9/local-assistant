@@ -510,29 +510,35 @@ def _remember_start(ctx: ScenarioContext, state: dict[str, Any]) -> None:
     )
 
 
-NEUTRAL_DEG = 3.0
-"""How close to level (pitch and roll) the head is in the SDK's neutral (wake-up) pose."""
+def _rotation(pose: dict[str, float]) -> list[list[float]]:
+    """The rotation matrix of the daemon's head pose (xyz Euler angles, radians)."""
+    cx, sx = math.cos(pose["roll"]), math.sin(pose["roll"])
+    cy, sy = math.cos(pose["pitch"]), math.sin(pose["pitch"])
+    cz, sz = math.cos(pose["yaw"]), math.sin(pose["yaw"])
+    return [
+        [cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz],
+        [cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz],
+        [-sy, sx * cy, cx * cy],
+    ]
 
 
-def _move_window(
-    before: dict[str, Any], samples: list[dict[str, Any]]
+def head_turn_deg(a: dict[str, float], b: dict[str, float]) -> float:
+    """The angle (degrees) of the rotation between two head poses, whatever its axis."""
+    ra, rb = _rotation(a), _rotation(b)
+    trace = sum(ra[k][i] * rb[k][i] for i in range(3) for k in range(3))
+    return math.degrees(math.acos(max(-1.0, min(1.0, (trace - 1) / 2))))
+
+
+def move_samples(
+    samples: list[dict[str, Any]], t_start: float, t_end: float
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """The reference state of our move and the samples it spans.
-
-    A robot at rest (motors off) does `wake_up()` -> our move from neutral -> neutral ->
-    `goto_sleep()`: the move is what happens between the first and the last sample with the
-    head level, measured from that first level sample. An awake robot moves from `before`.
-    """
-    if before.get("control_mode") != "disabled":
-        return before, samples
-
-    def level(state: dict[str, Any]) -> bool:
-        pose = state["head_pose"]
-        return all(abs(math.degrees(pose[k])) < NEUTRAL_DEG for k in ("pitch", "roll"))
-
-    marks = [i for i, state in enumerate(samples) if level(state)]
-    assert marks, "the head never reached the neutral pose: did wake_up() run?"
-    return samples[marks[0]], samples[marks[0] : marks[-1] + 1]
+    """The pose when the move started (the last sample at or before `t_start`) and the
+    samples taken while it played, all on the robot machine's monotonic clock."""
+    before = [s for s in samples if s["t"] <= t_start]
+    during = [s for s in samples if t_start <= s["t"] <= t_end]
+    assert before, f"no state sample before the move started (t={t_start})"
+    assert during, f"no state sample while the move played ({t_start}..{t_end})"
+    return before[-1], during
 
 
 @step("robot_plays_emotion")
@@ -545,9 +551,11 @@ async def robot_plays_emotion(
     min_antenna_deg: float = 0.0,
 ) -> None:
     """The brain sends `express <emotion>`; the body plays Pollen's recorded `move` to its end
-    (wake_up -> move -> goto_sleep for a robot at rest) and answers ok. Measured from the
-    daemon's state between the first and last sample at neutral: the head turned by at least
-    `min_head_deg` (largest of roll/pitch/yaw) and an antenna by at least `min_antenna_deg`."""
+    (wake_up -> move -> goto_sleep for a robot at rest) and answers ok. Measured by a sampler
+    next to the daemon, over exactly the samples taken while the move played (its MOTION line
+    gives the start and end on the robot machine's monotonic clock), from the pose when it
+    started: the head turned by at least `min_head_deg` (the angle of the rotation, whatever
+    its axis) and an antenna by at least `min_antenna_deg`."""
     before = await _robot_state(ctx)
     _remember_start(ctx, before)
     result, samples = await _during_request(ctx, client, "express", {"name": emotion}, 60)
@@ -569,19 +577,16 @@ async def robot_plays_emotion(
         for s in samples[::5]
     ]
     print(f"pitch/roll every 5th sample (deg): {' '.join(trace)}")
-    ref, window = _move_window(before, samples)
-    head = max(
-        abs(math.degrees(s["head_pose"][k] - ref["head_pose"][k]))
-        for s in window
-        for k in ("roll", "pitch", "yaw")
-    )
+    ref, during = move_samples(samples, played["t_start"], played["t_end"])
+    check_sampling(during, played["t_end"] - played["t_start"])
+    head = max(head_turn_deg(ref["head_pose"], s["head_pose"]) for s in during)
     antenna = max(
         abs(math.degrees(s["antennas_position"][i] - ref["antennas_position"][i]))
-        for s in window
+        for s in during
         for i in (0, 1)
     )
     print(
-        f"{move}: head moved {head:.1f} deg, antennas {antenna:.1f} deg over {len(window)} samples"
+        f"{move}: head turned {head:.1f} deg, antennas {antenna:.1f} deg over {len(during)} samples"
     )
     assert head >= min_head_deg, f"the head moved only {head:.1f} deg (want {min_head_deg})"
     assert antenna >= min_antenna_deg, (

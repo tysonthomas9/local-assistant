@@ -169,8 +169,11 @@ by `scripts/edge_host_bootstrap.sh`, played with `ReachyMini.play_move`). A robo
 to neutral -> `goto_sleep()` -> motors off. Pollen's own tested motions (`wake_up()`,
 `goto_sleep()`, the recorded moves) are the one exception to our limits; every move WE author
 stays small and slow (head at most 10 degrees, antennas at most 20). On any error the arbiter
-ends with `goto_sleep()` and the motors off. `robot_plays_emotion` measures the move from the
-neutral pose (the samples between the first and last time the head is level).
+ends with `goto_sleep()` and the motors off. `robot_plays_emotion` measures with a sampler
+running next to the daemon (20 Hz, on the robot's machine, so no SSH tunnel or PC load is in
+the path), over exactly the samples taken while the move played: the body's MOTION line gives
+the move's start and end on that machine's monotonic clock. Sampling below 8 Hz or with a gap
+over 0.4 s fails as "the measurement is starved".
 
 | Step | Arguments | Does |
 |---|---|---|
@@ -189,7 +192,7 @@ neutral pose (the samples between the first and last time the head is level).
 | `barge_in_reported` | `client`, `stream`, `min_played_ms = 0`, `max_played_ms: int?`, `within_s = 5` | The server got vad{start, barge_in, stream_id, played_ms} |
 | `uplink_audio_live` | `client`, `min_frames: int`, `above_dbfs = -100`, `within_s = 10` | At least `min_frames` mic frames reached the server; the loudest is above `above_dbfs` and the level varies (not digital silence) |
 | `uplink_carries_no_audio` | `client`, `seconds: float` | No mic frame from the edge reaches the server for `seconds` |
-| `robot_plays_emotion` | `client`, `emotion`, `move`, `min_head_deg = 0`, `min_antenna_deg = 0` | express{emotion}; the result is ok, the body's MOTION line names Pollen's `move` played to its end, and from neutral the head turned at least `min_head_deg` (largest of roll/pitch/yaw) and an antenna at least `min_antenna_deg` |
+| `robot_plays_emotion` | `client`, `emotion`, `move`, `min_head_deg = 0`, `min_antenna_deg = 0` | express{emotion}; the result is ok, the body's MOTION line names Pollen's `move` played to its end, and while it played the head turned at least `min_head_deg` from its pose at the start (the rotation angle, any axis) and an antenna at least `min_antenna_deg` |
 | `robot_back_at_rest` | `head_deg = 2`, `antenna_deg = 5` | After the move (and `goto_sleep()` for a robot that was at rest) the head (yaw relative to the body) and antennas are back at their start and the motor mode is what it was |
 | `robot_camera_frame` | `client`, `slot = 1`, `max_side = 640`, `min_bytes = 2000` | snapshot; the server reassembles a whole JPEG on `slot` that fits `max_side` and matches the result |
 | `edge_body_lost` | `client`, `within_s = 10` | The daemon went away: BODY-ERROR from the agent, error{body_unavailable} at the server |

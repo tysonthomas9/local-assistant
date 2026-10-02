@@ -175,8 +175,12 @@ class MotionArbiter:
                 raise MoveIncomplete(
                     f"{move_name}: cancelled={cancelled}, took {took:.2f} s of {move.duration:.2f}"
                 )
+        # t_start/t_end: this machine's monotonic clock, so a sampler next to the daemon can
+        # pick out exactly the samples taken while the move played.
         self.last_move = {"move": move_name, "duration_s": round(move.duration, 2)}
         self.last_move["played_s"] = round(took - INITIAL_GOTO_S, 2)
+        self.last_move["t_start"] = round(started, 3)
+        self.last_move["t_end"] = round(started + took, 3)
         return True
 
     def _moves(self) -> Any:
