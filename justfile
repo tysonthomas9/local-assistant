@@ -36,7 +36,7 @@ gate:
 schema-snapshot:
     UPDATE_SCHEMA_SNAPSHOT=1 uv run pytest tests/contract/test_edgelink_schema.py
 
-# our LLM server: ollama serve on 127.0.0.1:8773, GPU0 only (docs/dev-setup.md)
+# our LLM server on 127.0.0.1:8773, GPU0 only: vLLM by default, [llm] server = "ollama" the fallback (docs/dev-setup.md)
 llm:
     scripts/llm_server.sh
 

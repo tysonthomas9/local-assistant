@@ -3,11 +3,11 @@ tier: models
 description: >
   The voice follows the assistant the wake word chose (config/assistants/<id>.toml
   voice.speaker): after "hey jarvis" the reply is spoken by the speech server as ryan, after
-  "hey marvin" as eric. Real brain, real Ollama reachy-gemma4, real speech server on GPU1.
+  "hey marvin" as eric. Real brain, the real LLM (vLLM by default) reachy-gemma4, real speech server on GPU1.
 scenarios:
   - name: Jarvis speaks as Ryan and Marvin as Eric
     steps:
-      - ollama_serves
+      - llm_serves
       - speech_server_running
       - start_brain: {engine: basic, speech: true, follow_up_s: 0}
       - start_edge_agent: {id: desk}

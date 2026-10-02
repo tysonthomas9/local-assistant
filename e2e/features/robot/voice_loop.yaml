@@ -5,7 +5,7 @@ description: >
   agent as real 20 ms mic frames at its mic input point (right after capture; spec "testing
   rule": voice input). The agent's energy trigger opens a mic window (with its pre-roll) and
   closes it after 700 ms of quiet; the real brain transcribes the utterance (Parakeet on GPU1),
-  asks the real LLM (Ollama reachy-gemma4) and speaks the reply (Qwen3-TTS, voice ryan) on the
+  asks the real LLM (reachy-gemma4, vLLM by default) and speaks the reply (Qwen3-TTS, voice ryan) on the
   robot's speaker. The reply the speaker was given transcribes to non-empty text. The time
   from the end of speech to the speaker's first audio and the turn's timings are written as
   an artifact.
@@ -14,7 +14,7 @@ scenarios:
     steps:
       - robot_host_found
       - code_synced_to_edge_host
-      - ollama_serves
+      - llm_serves
       - speech_server_running
       - start_reachy_daemon
       - start_brain: {engine: basic, speech: true}

@@ -65,8 +65,9 @@ scenario starts is stopped in teardown, even when a step fails.
 ### The models tier
 
 `models` features use the real models on this PC, each on its own GPU: our LLM server
-(`scripts/llm_server.sh`: `ollama serve` with `reachy-gemma4` on GPU0, see `docs/dev-setup.md`,
-"The LLM server"; the system Ollama service is never used) and the speech server `servers/speech` (Parakeet TDT 0.6B v3 STT and
+(`scripts/llm_server.sh`: vLLM by default, Ollama as the fallback (`[llm] server`), serving
+`reachy-gemma4` on GPU0, see `docs/dev-setup.md`, "The LLM server"; the system Ollama service is
+never used) and the speech server `servers/speech` (Parakeet TDT 0.6B v3 STT and
 Qwen3-TTS 1.7B CustomVoice, about 7 GB on GPU1). Once:
 
 ```bash
@@ -83,7 +84,7 @@ or models fail the features; they are never skipped. To share both servers acros
 them first:
 
 ```bash
-scripts/llm_server.sh &
+scripts/llm_server.sh &                    # vLLM (about 21.8 GB of GPU0); --server ollama for the fallback
 CUDA_VISIBLE_DEVICES=1 CUDA_DEVICE_ORDER=PCI_BUS_ID servers/speech/.venv/bin/python -m assistant_speech --port 8772
 uv run pytest e2e -m models
 ```
@@ -261,7 +262,10 @@ reachy bodies do; the link client console does not, so use `brain_state_is` with
 | `llm_gate_never_exceeded` | `max_in_flight` | From the gate's event log: never more requests at once |
 | `voice_request_admitted_first` | none | From the gate's event log: the voice request was admitted before every background request already waiting (and some were) |
 | `llm_request_log` | `priority: bool`, `classes: map?` | Every request carries `priority` (with this value per class), or none does |
-| `start_llm_server` / `kill_llm_server` / `restart_llm_server` | `within_s = 30` | A real LLM server of the scenario's own (`scripts/llm_server.sh`: `ollama serve` on GPU0, the system model store) on a free loopback port; it unloads `reachy-gemma4` from the stack's server first; killed for real with SIGKILL (runners included), restarted on the same port |
+| `start_llm_server` / `kill_llm_server` / `restart_llm_server` | `server: vllm \| ollama?` (start only; default `[llm] server`), `within_s?` (default 600 s for vLLM, 30 s for Ollama) | A real LLM server of the scenario's own (`scripts/llm_server.sh --server ...` on GPU0) on a free loopback port, checked entirely on GPU0; the script frees GPU0 first (unloads `reachy-gemma4` from an Ollama, puts the stack's vLLM to sleep; it is woken again when needed); killed for real with SIGKILL (its process group), restarted on the same port |
+| `llm_server_queue` | `running`, `min_waiting`, `within_s = 60` | The stack's vLLM runs exactly `running` requests and has at least `min_waiting` waiting in its own queue (its `/metrics`) |
+| `voice_overtook_background` | `at_least: int?`, `at_most: int?`, `first = false`, `margin_s = 0.25` | From the brain's LLM request log: how many background requests sent before the voice request got their first token after it (more than `margin_s` later); `first`: no background request still waiting got its first token before it |
+| `llm_parallel_throughput` | `count = 4`, `max_tokens = 300`, `min_tokens: int?` | The scenario's LLM server: one request alone, then `count` at once (unique prompts); each produces at least `min_tokens` (default 80% of `max_tokens`) and together they beat the single stream; the tokens/s and TTFTs go to the timings |
 | `robot_pose_follows` | `client`, `text`, `states: list[str]`, `tolerance_deg = 6`, `max_head_deg = 10` | Types `text`; the body's MOTION lines follow the attention `states`; a sampler on the robot's machine checks each pose within `tolerance_deg` of neutral turned by the state's roll/pitch, and no more than `max_head_deg` from neutral (remembers the start pose for `robot_back_at_rest`) |
 
 ### Speech (`steps/speech.py`)
@@ -276,7 +280,7 @@ punctuation.
 |---|---|---|
 | `speech_server_running` | none | Uses the speech server serving on 127.0.0.1:8772, else starts one of the scenario's own on GPU1 (fails if GPU1 has less than 8 GB free); checks it runs on a GPU |
 | `start_speech_server` / `stop_speech_server` / `kill_speech_server` / `restart_speech_server` | none | A speech server of the scenario's own on a free loopback port; stopped (SIGTERM) or killed for real (SIGKILL), then restarted on the same port; it must stop or start answering |
-| `ollama_serves` | `model = reachy-gemma4` | The stack's LLM server (127.0.0.1:8773, else the scenario's own) answers, has the model and holds it entirely on GPU0 |
+| `llm_serves` | `server: vllm \| ollama?`, `model = reachy-gemma4` | The stack's LLM server (127.0.0.1:8773, else the scenario's own) is the configured kind (or `server`), answers, has the model and holds it entirely on GPU0 (a sleeping vLLM is woken) |
 | `transcribe_golden_wav` | `name` | The speech server transcribes `tests/fixtures/audio/<name>.wav` (STT time recorded) |
 | `transcript_matches` | `text: str?`, `max_wer = 0.2` | The last transcript matches `text` (default: what the golden WAV or the TTS said) with at most this word error rate |
 | `tts_gives_audio` | `text`, `voice = ryan`, `min_s = 0.5`, `max_s = 30`, `min_voiced = 0.4` | The TTS streams `min_s` to `max_s` seconds of audio, first audio before the end, with at least `min_voiced` of its 20 ms frames above -45 dBFS (first-audio time recorded) |

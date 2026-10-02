@@ -1,8 +1,8 @@
 feature: A typed question is answered by the real LLM
 tier: models
 description: >
-  The basic engine in text mode: the real brain asks the real Ollama (reachy-gemma4, the
-  system service) through the priority gate and the reply reaches the real edge agent as speak
+  The basic engine in text mode: the real brain asks the real LLM (reachy-gemma4 on the stack's
+  server, vLLM by default) through the priority gate and the reply reaches the real edge agent as speak
   text, while its attention follows the turn. The turn log records the LLM's queue time, time
   to first token and total time; the request carries the voice class's priority. The session
   keeps the conversation, so a follow-up question can refer to the one before.

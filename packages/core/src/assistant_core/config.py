@@ -94,6 +94,9 @@ class LlmConfig(Section):
 
     impl: Literal["openai"] = "openai"
     """OpenAI-compatible HTTP; the only client there is."""
+    server: Literal["vllm", "ollama"] = "vllm"
+    """The stack's LLM server (`scripts/llm_server.sh`): vLLM by default, Ollama the fallback.
+    Both serve the same model name on the same `base_url`; only vLLM gets `priority`."""
     base_url: str = "http://127.0.0.1:8773/v1"
     model: str = "gemma4-26b"
     ctx: int = Field(default=16384, gt=0)
@@ -102,7 +105,8 @@ class LlmConfig(Section):
     reserved_voice_slots: int = Field(default=1, ge=0)
     """Slots only voice requests may use; must leave at least one for everyone else."""
     send_priority: bool = True
-    """Send `priority` with each request (needs vLLM `--scheduling-policy priority`)."""
+    """Send `priority` with each request when `server` is vllm (it runs
+    `--scheduling-policy priority`); Ollama has no request priority."""
     priority: LlmPriority = Field(default_factory=LlmPriority)
     reasoning_effort: str = "none"
     """Sent as `reasoning_effort` ("none": no thinking before a spoken reply; "" omits it)."""

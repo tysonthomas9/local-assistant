@@ -1,0 +1,20 @@
+# The stack's vLLM (the default LLM server, scripts/llm_server.sh): its own pinned env
+# (servers/vllm/.venv), NOT a member of the uv workspace, so torch and vLLM never enter the
+# brain's or the edge's environment and other vLLM installs on the PC are left alone.
+#
+#   UV_PROJECT_ENVIRONMENT=servers/vllm/.venv uv sync --locked --project servers/vllm
+#
+# Linux x86_64 with CUDA only (the brain PC's GPUs).
+[project]
+name = "assistant-vllm"
+version = "0.1.0"
+description = "Pinned vLLM environment for the stack's LLM server on GPU0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "vllm==0.29.0",
+    "ninja==1.13.2",
+]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]

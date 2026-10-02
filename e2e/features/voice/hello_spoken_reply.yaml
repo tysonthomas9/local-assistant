@@ -1,8 +1,8 @@
 feature: Hello gets a spoken reply on the robot
 tier: [hw, models]
 description: >
-  "hello" typed on the robot's edge agent goes to the real brain (basic engine, real Ollama
-  reachy-gemma4), whose reply is spoken by the real speech server (Qwen3-TTS on GPU1, Jarvis's
+  "hello" typed on the robot's edge agent goes to the real brain (basic engine, the real LLM
+  reachy-gemma4, vLLM by default), whose reply is spoken by the real speech server (Qwen3-TTS on GPU1, Jarvis's
   voice ryan): speak.begin, 0x02 PCM frames, speak.end, played by the robot's speaker with its
   playback clock reporting started, progress and done. What the speaker was given transcribes
   to real words. The time from typing to the speaker's first audio and the turn's STT / LLM /
@@ -12,7 +12,7 @@ scenarios:
     steps:
       - robot_host_found
       - code_synced_to_edge_host
-      - ollama_serves
+      - llm_serves
       - speech_server_running
       - start_reachy_daemon
       - start_brain: {engine: basic, speech: true}

@@ -1,0 +1,42 @@
+feature: Inside vLLM a voice turn overtakes the background requests
+tier: models
+description: >
+  The brain's priority gate (llm/priority_gate) orders requests before they reach the server;
+  this feature checks that vLLM itself keeps the voice turn first once requests queue THERE.
+  The brain may send 31 at once (max_concurrency 32, one voice slot reserved), and the stack's
+  vLLM runs at most 8 (max-num-seqs) with priority scheduling. 24 real background requests
+  (priority 10, 400 tokens each) fill vLLM's 8 running slots and 16 wait in its own queue
+  (read from its /metrics). A typed turn (class voice, priority 0) then gets the first slot that
+  frees, ahead of all 16: no waiting background request gets its first token before it, and at
+  least 8 get theirs only after it (the 8 running requests end together, so up to 7 waiting
+  ones start in the same step as the voice turn and one more in the slot it frees soon after).
+  Without send_priority (every request equal, first come first served) it overtakes none.
+scenarios:
+  - name: with priority the voice turn overtakes the waiting background requests
+    steps:
+      - llm_serves: {server: vllm}
+      - start_brain: {engine: basic, set: {llm.max_concurrency: 32, llm.reserved_voice_slots: 1}}
+      - start_edge_agent: {id: desk}
+      - start_background_llm_requests: {count: 24, max_tokens: 400}
+      - llm_server_queue: {running: 8, min_waiting: 16}
+      - edge_types: {client: desk, text: Say hello in three words.}
+      - edge_shows_reply: {client: desk, within_s: 120}
+      - turn_logged: {kind: text, ttft: true}
+      - llm_requests_done: {count: 25, within_s: 300}
+      - llm_request_log: {priority: true, classes: {voice: 0, background: 10}}
+      - voice_overtook_background: {at_least: 8, first: true}
+      - brain_output_clean
+
+  - name: without priority the voice turn waits its turn
+    steps:
+      - llm_serves: {server: vllm}
+      - start_brain: {engine: basic, set: {llm.max_concurrency: 32, llm.reserved_voice_slots: 1, llm.send_priority: false}}
+      - start_edge_agent: {id: desk}
+      - start_background_llm_requests: {count: 24, max_tokens: 400}
+      - llm_server_queue: {running: 8, min_waiting: 16}
+      - edge_types: {client: desk, text: Say hello in three words.}
+      - edge_shows_reply: {client: desk, within_s: 180}
+      - llm_requests_done: {count: 25, within_s: 300}
+      - llm_request_log: {priority: false}
+      - voice_overtook_background: {at_most: 0}
+      - brain_output_clean

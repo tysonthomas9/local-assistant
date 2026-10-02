@@ -86,6 +86,7 @@ def test_env_is_read_from_os_environ_by_default(
         {"reserved_voice_slots": -1},
         {"impl": "ollama"},
         {"impl": "fake"},
+        {"server": "llama-server"},
     ],
 )
 def test_llm_validation(llm: dict[str, object]) -> None:

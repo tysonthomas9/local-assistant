@@ -26,15 +26,16 @@ smart_turn = true
 speech = true                      # basic engine: STT in, TTS replies ([stt], [tts]: the speech server)
 
 [llm]
-# vLLM is the default server (GPU0, OpenAI-compatible API) from phase 2. Until then the dev and
-# ci profiles run our own Ollama on the same port (scripts/llm_server.sh, model reachy-gemma4).
+# The stack's own LLM server on GPU0 (scripts/llm_server.sh, OpenAI-compatible API): vLLM by
+# default; server = "ollama" falls back to Ollama on the same port with the same model name.
 impl = "openai"
+server = "vllm"
 base_url = "http://127.0.0.1:8773/v1"
 model = "gemma4-26b"
 ctx = 16384
 max_concurrency = 8                # priority gate: requests in flight across all sessions
 reserved_voice_slots = 1           # always keep one slot free for a voice turn
-send_priority = true               # needs vLLM --scheduling-policy priority
+send_priority = true               # vLLM only (its --scheduling-policy priority)
 priority = { voice = 0, proactive = 5, background = 10 }
 reasoning_effort = "none"         # no thinking before a spoken reply ("" omits the field)
 

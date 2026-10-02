@@ -12,7 +12,7 @@ scenarios:
     steps:
       - robot_host_found
       - code_synced_to_edge_host
-      - ollama_serves
+      - llm_serves
       - speech_server_running
       - start_reachy_daemon
       - start_brain: {engine: basic, speech: true}

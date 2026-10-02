@@ -1,7 +1,7 @@
 feature: A dead speech server is spoken about, not hidden
 tier: models
 description: >
-  The brain (basic engine, real Ollama reachy-gemma4) speaks its replies through a real speech
+  The brain (basic engine, the real LLM reachy-gemma4, vLLM by default) speaks its replies through a real speech
   server of the scenario's own on GPU1, which is killed for real (SIGKILL) between two turns.
   The next turn fails fast: the user is told the speech server cannot be reached (speak text),
   the turn log records the error and attention goes back to idle. Once the server is started
@@ -9,7 +9,7 @@ description: >
 scenarios:
   - name: the speech server dies; the turn says so and the next one is spoken once it is back
     steps:
-      - ollama_serves
+      - llm_serves
       - start_speech_server
       - start_brain: {engine: basic, speech: true}
       - start_edge_agent: {id: desk}

@@ -1,15 +1,16 @@
-feature: A dead LLM server is spoken about, not hidden
+feature: A dead vLLM is spoken about, not hidden
 tier: models
 description: >
-  The brain talks to a real `ollama serve` of the scenario's own (the fallback server, same
-  models as the system service, on its own loopback port; turn/vllm_down is the same for vLLM), which is killed for real (SIGKILL) between two turns. The
-  next turn fails fast: the user is told the language model cannot be reached (speak text), the
-  turn log records the error, and attention goes back to idle. Once the server is back, the
-  next turn is answered again. The system Ollama service is never touched.
+  The same as turn/llm_down, on vLLM (the default server): a real vLLM of the scenario's own on
+  GPU0 (scripts/llm_server.sh --server vllm, on its own loopback port; the stack's vLLM sleeps
+  meanwhile) is killed for real (SIGKILL of the API server and its engine core) between two
+  turns. The next turn fails fast: the user is told the language model cannot be reached
+  (speak text), the turn log records the error, and attention goes back to idle. Once vLLM is
+  started again on the same port, the next turn is answered again.
 scenarios:
-  - name: the LLM server dies; the turn says so and the next one works once it is back
+  - name: vLLM dies; the turn says so and the next one works once it is back
     steps:
-      - start_llm_server: {server: ollama}
+      - start_llm_server: {server: vllm}
       - start_brain: {engine: basic, llm: test}
       - start_edge_agent: {id: desk}
       - edge_types: {client: desk, text: "What is the capital of Italy? Answer in one word."}

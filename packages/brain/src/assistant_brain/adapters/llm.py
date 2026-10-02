@@ -1,14 +1,16 @@
 """The LLM adapter: an OpenAI-compatible chat client behind the priority gate.
 
 `POST {base_url}/chat/completions` with `stream: true` (server-sent events), optional `tools`;
-it works unchanged against vLLM (the default from phase 2) and Ollama (now). Every request
+it works unchanged against vLLM (the default server) and Ollama (the fallback). Every request
 first takes a slot from the `PriorityGate` (voice > proactive > background, reserved voice
-slots). With `[llm] send_priority` the request carries vLLM's `priority` field (what the
-OpenAI SDK sends as `extra_body`), from `[llm].priority` for its class.
+slots). With `[llm] send_priority` and `server = "vllm"` the request carries vLLM's `priority`
+field (what the OpenAI SDK sends as `extra_body`), from `[llm].priority` for its class, so the
+server also runs a voice turn before the background requests waiting there.
 
 Each request is recorded in `requests` (without the messages) for the admin endpoint, with its
-time to first token. A server that cannot be reached or answers an error raises
-`LlmUnavailable`.
+time to first token and, on the brain's monotonic clock, when it was sent to the server
+(`sent_s`) and when its first token came (`first_token_s`). A server that cannot be reached or
+answers an error raises `LlmUnavailable`.
 """
 
 import json
@@ -85,7 +87,7 @@ class LlmClient:
             body["max_tokens"] = max_tokens
         if self.config.reasoning_effort:
             body["reasoning_effort"] = self.config.reasoning_effort
-        if self.config.send_priority:
+        if self.config.send_priority and self.config.server == "vllm":
             body["priority"] = getattr(self.config.priority, cls)
         return body
 
@@ -121,6 +123,7 @@ class LlmClient:
             started = time.monotonic()
             result.queued_ms = (started - queued_at) * 1000
             entry["queued_ms"] = round(result.queued_ms, 1)
+            entry["sent_s"] = round(started, 4)
             entry["outcome"] = "running"
             try:
                 async for delta in self._stream(body, result, started):
@@ -137,6 +140,7 @@ class LlmClient:
                 entry["total_ms"] = round(result.total_ms, 1)
                 if result.ttft_ms is not None:
                     entry["ttft_ms"] = round(result.ttft_ms, 1)
+                    entry["first_token_s"] = round(started + result.ttft_ms / 1000, 4)
             entry["outcome"] = "ok"
             entry["finish_reason"] = result.finish_reason
             entry["chars"] = len(result.text)

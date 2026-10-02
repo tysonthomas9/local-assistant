@@ -13,6 +13,7 @@ scenarios:
       - load_config
       - expect_config: {path: llm.impl, equals: openai}
       - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:8773/v1"}
+      - expect_config: {path: llm.server, equals: vllm}
       - expect_config: {path: llm.model, equals: gemma4-26b}
       - expect_config: {path: llm.max_concurrency, equals: 8}
       - expect_config: {path: llm.reserved_voice_slots, equals: 1}
@@ -21,19 +22,21 @@ scenarios:
       - expect_config: {path: llm.priority.background, equals: 10}
       - expect_config: {path: privacy.online_skills, equals: false}
 
-  - name: dev profile uses our Ollama LLM server on loopback
+  - name: dev profile uses our vLLM server on loopback
     steps:
       - load_config: {profile: dev}
       - expect_config: {path: llm.impl, equals: openai}
+      - expect_config: {path: llm.server, equals: vllm}
       - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:8773/v1"}
       - expect_config: {path: llm.model, equals: reachy-gemma4}
       - expect_config: {path: edge.body, equals: console}
       - expect_config: {path: net.edgelink_bind, equals: "127.0.0.1:8770"}
 
-  - name: ci profile uses our Ollama LLM server on loopback
+  - name: ci profile uses our vLLM server on loopback
     steps:
       - load_config: {profile: ci}
       - expect_config: {path: llm.impl, equals: openai}
+      - expect_config: {path: llm.server, equals: vllm}
       - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:8773/v1"}
       - expect_config: {path: llm.model, equals: reachy-gemma4}
       - expect_config: {path: edge.body, equals: console}
@@ -47,6 +50,15 @@ scenarios:
       - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:8774/v1"}
       - expect_config: {path: llm.model, equals: gemma4-26b}
       - expect_config: {path: edge.body, equals: console}
+
+  - name: the Ollama fallback is one config value
+    steps:
+      - load_config:
+          profile: ci
+          env: {ASSISTANT__LLM__SERVER: ollama}
+      - expect_config: {path: llm.server, equals: ollama}
+      - expect_config: {path: llm.base_url, equals: "http://127.0.0.1:8773/v1"}
+      - expect_config: {path: llm.model, equals: reachy-gemma4}
 
   - name: jarvis assistant loads
     steps:

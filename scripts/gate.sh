@@ -33,10 +33,14 @@
 # 127.0.0.1:8772. If none is serving there, the gate syncs its venv in the checkout under test
 # and starts it on GPU1 (CUDA_VISIBLE_DEVICES=1; it needs 8 GB free there), and stops it after
 # stage h. A server it did not start is used and left alone. Failing to start it fails g and h.
-# The LLM likewise: our own server (scripts/llm_server.sh: `ollama serve` on 127.0.0.1:8773,
-# GPU0 only, the system model store read-only), started unless one serves there, loaded once
-# and checked to sit entirely on GPU0, stopped after stage h. The system Ollama service is not
-# used or changed (the launcher only unloads reachy-gemma4 from it). The old assistant (legacy
+# The LLM likewise: our own server (scripts/llm_server.sh on 127.0.0.1:8773, GPU0 only) of the
+# configured kind (`[llm] server` of the ci profile, ASSISTANT__LLM__SERVER overrides it): vLLM
+# by default (servers/vllm/.venv, synced by the launcher; it needs about 21.7 GB free on GPU0),
+# Ollama as the fallback (the system model store read-only). It is started unless one serves
+# there (it must then be that kind), loaded once and checked to sit entirely on GPU0
+# (assistant_testing.llm_server check), and stopped after stage h. A busy GPU0 fails g and h
+# with the processes on it named. The system Ollama service is not used or changed (the
+# launcher only unloads reachy-gemma4 from it). The old assistant (legacy
 # stack: run_app.py, speech-to-speech, run_daemon.py) is stopped first if it runs: it holds
 # the GPUs and the robot.
 # Spoken turns write their timings to $ROOT/artifacts (ASSISTANT_ARTIFACTS_DIR).
@@ -63,6 +67,9 @@ DAEMON_URL="http://127.0.0.1:8000"
 LLM_PORT=8773
 LLM_URL="http://127.0.0.1:$LLM_PORT"
 LLM_MODEL="reachy-gemma4"
+LLM_SERVER=""
+declare -A LLM_NEEDS_MIB=([vllm]=21800 [ollama]=21000)
+declare -A LLM_START_S=([vllm]=600 [ollama]=60)
 LLM_PID=""
 LLM_STATUS=""
 SPEECH_PORT=8772
@@ -386,55 +393,62 @@ stop_legacy_assistant() {
     done
 }
 
-# start_llm_server: use our LLM server on $LLM_PORT, or start scripts/llm_server.sh (GPU0) from
-# the checkout under test; either way reachy-gemma4 is loaded once and must sit entirely on the
-# GPU. Runs in the main shell (sets LLM_PID/STATUS).
+# start_llm_server: use our LLM server on $LLM_PORT, or start scripts/llm_server.sh (GPU0) of
+# the configured kind from the checkout under test; either way reachy-gemma4 is loaded once and
+# must sit entirely on GPU0. Runs in the main shell (sets LLM_SERVER/PID/STATUS).
 start_llm_server() {
-    local log="$STATE_DIR/llm.log" waited=0 ps
-    if curl -sf -o /dev/null -m 3 "$LLM_URL/api/version"; then
+    local log="$STATE_DIR/llm.log" waited=0 free check="$STATE_DIR/llm-check"
+    if ! LLM_SERVER="$(cd "$WORK" && uv run --locked -q python -m assistant_testing.llm_server server)"; then
+        LLM_STATUS="the configured [llm] server could not be read"
+        return 1
+    fi
+    printf 'LLM server: [llm] server = %s\n' "$LLM_SERVER"
+    if curl -sf -o /dev/null -m 3 "$LLM_URL/v1/models"; then
         LLM_STATUS="already running, not started by the gate"
     else
-        (cd "$WORK" && exec scripts/llm_server.sh --port "$LLM_PORT") >"$log" 2>&1 &
+        free="$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null || true)"
+        printf 'GPU0: %s MiB free (%s needs %s)\n' "${free:-unknown}" "$LLM_SERVER" "${LLM_NEEDS_MIB[$LLM_SERVER]}"
+        if [[ -z "$free" || "$free" -lt "${LLM_NEEDS_MIB[$LLM_SERVER]}" ]]; then
+            LLM_STATUS="GPU0 missing or busy (${free:-no} MiB free, $LLM_SERVER needs ${LLM_NEEDS_MIB[$LLM_SERVER]}): $(nvidia-smi --id=0 --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null | paste -sd';' -)"
+            if [[ "$LLM_SERVER" == vllm ]]; then
+                LLM_STATUS="$LLM_STATUS (the fallback is [llm] server = \"ollama\")"
+            fi
+            return 1
+        fi
+        # Its own process group (setsid), so stopping it also stops vLLM's engine core.
+        (cd "$WORK" && exec setsid scripts/llm_server.sh --server "$LLM_SERVER" --port "$LLM_PORT") >"$log" 2>&1 &
         LLM_PID=$!
-        while ! curl -sf -o /dev/null -m 2 "$LLM_URL/api/version"; do
-            if ! kill -0 "$LLM_PID" 2>/dev/null || [[ $waited -ge 60 ]]; then
-                tail -20 "$log"
+        while ! curl -sf -o /dev/null -m 2 "$LLM_URL/v1/models"; do
+            if ! kill -0 "$LLM_PID" 2>/dev/null || [[ $waited -ge ${LLM_START_S[$LLM_SERVER]} ]]; then
+                grep -E 'Error|error|llm server:' "$log" | tail -20
                 stop_llm_server
-                LLM_STATUS="the LLM server did not start (see above)"
+                LLM_STATUS="the $LLM_SERVER server did not start in ${LLM_START_S[$LLM_SERVER]} s (see above)"
                 return 1
             fi
             sleep 1
             waited=$((waited + 1))
         done
-        head -5 "$log" | grep '^llm server:' || true
-        LLM_STATUS="started by the gate (pid $LLM_PID)"
+        grep '^llm server:' "$log" || true
+        LLM_STATUS="$LLM_SERVER started by the gate in ${waited} s (pid $LLM_PID)"
     fi
-    if ! curl -sf -o /dev/null -m 300 "$LLM_URL/api/generate" \
-            -d "{\"model\":\"$LLM_MODEL\",\"prompt\":\"hi\",\"stream\":false,\"options\":{\"num_predict\":1}}"; then
-        LLM_STATUS="$LLM_STATUS; $LLM_MODEL did not load"
+    if ! (cd "$WORK" && uv run --locked -q python -m assistant_testing.llm_server check \
+            --url "$LLM_URL" --model "$LLM_MODEL" --server "$LLM_SERVER") >"$check" 2>&1; then
+        LLM_STATUS="$LLM_STATUS; $(tail -1 "$check")"
         return 1
     fi
-    ps="$(curl -sf -m 5 "$LLM_URL/api/ps" || true)"
-    if ! python3 -c '
-import json, sys
-models = [m for m in json.loads(sys.argv[1] or "{}").get("models", []) if m["name"].startswith(sys.argv[2])]
-sys.exit(0 if models and models[0]["size_vram"] >= models[0]["size"] > 0 else 1)' "$ps" "$LLM_MODEL"; then
-        LLM_STATUS="$LLM_STATUS; $LLM_MODEL is not entirely on the GPU: $ps"
-        return 1
-    fi
-    printf 'LLM server: %s, %s loaded entirely on GPU0\n' "$LLM_STATUS" "$LLM_MODEL"
+    printf 'LLM server: %s; %s\n' "$LLM_STATUS" "$(tail -1 "$check")"
     nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader || true
 }
 
 stop_llm_server() {
     if [[ -z "$LLM_PID" ]]; then return 0; fi
     if kill -0 "$LLM_PID" 2>/dev/null; then
-        kill -TERM "$LLM_PID" 2>/dev/null || true
+        kill -TERM -- "-$LLM_PID" 2>/dev/null || kill -TERM "$LLM_PID" 2>/dev/null || true
         local i
         for i in $(seq 1 30); do kill -0 "$LLM_PID" 2>/dev/null || break; sleep 1; done
-        kill -KILL "$LLM_PID" 2>/dev/null || true
         printf 'LLM server (pid %s) stopped\n' "$LLM_PID"
     fi
+    kill -KILL -- "-$LLM_PID" 2>/dev/null || true   # anything left in its group
     LLM_PID=""
 }
 

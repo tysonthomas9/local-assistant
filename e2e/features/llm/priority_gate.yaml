@@ -1,8 +1,8 @@
 feature: The LLM priority gate keeps voice turns first
 tier: models
 description: >
-  Real requests to the real Ollama through the brain's priority gate with max_concurrency 3 and
-  one slot reserved for voice. Five background requests (started through the admin endpoint)
+  Real requests to the real LLM server (vLLM by default) through the brain's priority gate
+  with max_concurrency 3 and one slot reserved for voice. Five background requests (started through the admin endpoint)
   take the two slots they may use and three wait; a typed turn (class voice) then gets the
   reserved slot at once instead of queuing behind them. The gate's event log shows that no more
   than three requests ever ran at once and that the voice request was admitted before every

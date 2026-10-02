@@ -33,6 +33,7 @@ from array import array
 from pathlib import Path
 from typing import Any
 
+from assistant_testing import llm_server
 from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.registry import step
 from assistant_testing.processes import RemoteProcess
@@ -319,20 +320,26 @@ async def restart_speech_server(ctx: ScenarioContext) -> None:
     _check_health(health)
 
 
-@step("ollama_serves")
-async def ollama_serves(ctx: ScenarioContext, model: str = LLM_MODEL) -> None:
+@step("llm_serves")
+async def llm_serves(
+    ctx: ScenarioContext, server: str | None = None, model: str = LLM_MODEL
+) -> None:
     """The stack's LLM server (`brain.ensure_llm_server`: the one on 127.0.0.1:8773, else the
-    scenario's own) answers, has `model` (default reachy-gemma4) and holds it entirely on GPU0
-    (so GPU1 stays the speech server's)."""
+    scenario's own) answers, is the configured kind (`server` if given must match it: vllm or
+    ollama), serves `model` (default reachy-gemma4) and holds it entirely on GPU0 (so GPU1
+    stays the speech server's)."""
     url = await ensure_llm_server(ctx)
+    kind = ctx.state["llm"]["server"]
+    if server is not None:
+        assert kind == server, f"the stack's LLM server is {kind}, want {server}"
     try:
-        data, _ = await asyncio.to_thread(_request, "GET", f"{url}/api/tags", None)
+        data, _ = await asyncio.to_thread(_request, "GET", f"{url}/v1/models", None)
     except OSError as exc:
         raise AssertionError(f"the LLM server at {url} does not answer: {exc}") from exc
-    names = [m.get("name", "") for m in json.loads(data).get("models", [])]
+    names = [m.get("id", "") for m in json.loads(data).get("data", [])]
     found = [n for n in names if n == model or n.split(":")[0] == model]
     assert found, f"the LLM server at {url} has no {model!r} (it has {names})"
-    print(f"the LLM server at {url} serves {found[0]}")
+    print(f"the LLM server at {url} ({kind}) serves {found[0]}")
 
 
 # ---------------------------------------------------------------- STT and TTS directly
@@ -454,17 +461,18 @@ async def feed_golden_wav(ctx: ScenarioContext, client: str, name: str) -> None:
 
 def _turn_input_time(ctx: ScenarioContext, client: str) -> tuple[float, str] | None:
     """When the user's input ended at the edge: the mic window closing after a fed utterance
-    (end of speech or push-to-talk released), else the typed text.input (SENT)."""
+    (end of speech or push-to-talk released) or the typed text.input (SENT), whichever came
+    last (a scenario may type after a voice turn)."""
     agent = ctx.processes.get(_client_name(client))
     closes = [
         line
         for line in _get_lines(agent, "MIC-CLOSE")
         if line.index > ctx.state.get("fed", {}).get("index", 10**9)
     ]
-    if closes:
+    typed = [line for line in _get_lines(agent, "SENT") if line.fields.get("type") == "text.input"]
+    if closes and not (typed and typed[-1].index > closes[-1].index):
         reason = closes[-1].fields.get("reason")
         return agent.line_times[closes[-1].index], f"end of speech (MIC-CLOSE {reason})"
-    typed = [line for line in _get_lines(agent, "SENT") if line.fields.get("type") == "text.input"]
     if typed:
         return agent.line_times[typed[-1].index], "typed text (SENT text.input)"
     return None
@@ -707,6 +715,10 @@ async def timings_recorded(ctx: ScenarioContext, name: str) -> None:
              "reply_audio_ms": t.get("reply_audio_ms")}
             for t in done
         ]  # fmt: skip
+    llm = (ctx.state.get("brain") or {}).get("llm")
+    if llm is not None:
+        gpu = await asyncio.to_thread(llm_server.server_gpu_mib, llm["url"])
+        timings["llm_server"] = {"server": llm["server"], "url": llm["url"], "gpu_mib": gpu}
     speech = ctx.state.get("speech")
     if speech is not None:
         health = await asyncio.to_thread(_health, speech["url"])

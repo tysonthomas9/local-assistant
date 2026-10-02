@@ -7,12 +7,15 @@ console), so the link and edge steps work against it unchanged (`start_edge_agen
 lines (`assistant_brain.console`) and from its loopback admin endpoint: the turn log, the LLM
 priority gate and the LLM request log.
 
-LLM features use the real Ollama with `reachy-gemma4`, always the stack's own server
-(`scripts/llm_server.sh`: `ollama serve` on GPU0 only, the system model store read-only; the
-system Ollama service is never used). `llm: stack` (the default) uses the one serving on
-127.0.0.1:8773 (the gate starts it there) or else starts one of the scenario's own on a free
-port; `llm: test` uses a separate one the scenario starts and may kill (`start_llm_server`).
-Either way the model must sit entirely on the GPU (`/api/ps`), else the step fails.
+LLM features use the real `reachy-gemma4` on the stack's own LLM server (`scripts/llm_server.sh`
+on GPU0 only: vLLM by default, Ollama with `[llm] server = "ollama"`; the system Ollama service
+is never used). `llm: stack` (the default) uses the one serving on 127.0.0.1:8773 (the gate
+starts it there; it must be the configured kind) or else starts one of the scenario's own on a
+free port; `llm: test` uses a separate one the scenario starts and may kill
+(`start_llm_server`, either kind). Either way the model must sit entirely on GPU0
+(`assistant_testing.llm_server`), else the step fails. A scenario's own server frees GPU0
+first (an Ollama unloads the model, a vLLM sleeps); the stack's vLLM is woken again when a later
+scenario needs it.
 """
 
 import asyncio
@@ -27,7 +30,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Literal
 
-from assistant_testing import edge_host
+from assistant_testing import edge_host, llm_server
 from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.registry import step
 from assistant_testing.processes import ManagedProcess
@@ -51,63 +54,50 @@ from assistant_testing.steps.link import (
     _Link,
 )
 
-STACK_LLM = "http://127.0.0.1:8773"
+STACK_LLM = llm_server.STACK_URL
 """The stack's LLM server (the gate starts it; `scripts/llm_server.sh`)."""
-LLM_MODEL = "reachy-gemma4"
+LLM_MODEL = llm_server.MODEL
 LLM_PROCESS = "llm"
 STACK_LLM_PROCESS = "llm-stack"
-LLM_SERVER_SCRIPT = "scripts/llm_server.sh"
-LLM_LOAD_TIMEOUT_S = 180.0
 
 
-def _llm_up(url: str) -> bool:
-    try:
-        _http("GET", f"{url}/api/version", None, 2)
-    except (OSError, AssertionError):
-        return False
-    return True
+def _server(ctx: ScenarioContext, server: str | None) -> llm_server.ServerKind:
+    """`server`, else the configured `[llm] server` (profile ci, ASSISTANT__LLM__SERVER)."""
+    if server is None:
+        return llm_server.configured_server(ctx.repo_root)
+    if server not in ("vllm", "ollama"):
+        raise AssertionError(f"unknown LLM server {server!r} (vllm or ollama)")
+    return server
 
 
-def _llm_loaded_on_gpu(url: str, model: str = LLM_MODEL) -> str:
-    """Load `model` there (a one-token request) and check it sits entirely in GPU memory;
-    returns a line for the log."""
-    _http("POST", f"{url}/api/generate",
-          {"model": model, "prompt": "hi", "stream": False, "options": {"num_predict": 1}},
-          LLM_LOAD_TIMEOUT_S)  # fmt: skip
-    loaded = _http("GET", f"{url}/api/ps", None, 10).get("models", [])
-    found = [m for m in loaded if m.get("name", "").split(":")[0] == model.split(":")[0]]
-    assert found, f"{model} is not loaded at {url} after a request: {loaded}"
-    size, vram = int(found[0].get("size", 0)), int(found[0].get("size_vram", 0))
-    if size <= 0 or vram < size:
-        raise AssertionError(
-            f"{model} at {url} is not entirely on the GPU ({vram} of {size} bytes in GPU "
-            "memory): GPU0 is short of memory"
-        )
-    return f"{model} at {url}: entirely on the GPU, context {found[0].get('context_length')}"
-
-
-async def _start_llm(ctx: ScenarioContext, name: str, within_s: float) -> str:
-    """A real `ollama serve` (`scripts/llm_server.sh`) of the scenario's own on a free port."""
+async def _start_llm(
+    ctx: ScenarioContext, name: str, server: llm_server.ServerKind, within_s: float | None
+) -> str:
+    """A real LLM server of the scenario's own (`scripts/llm_server.sh --server <server>`) on
+    a free port; up, with `reachy-gemma4` loaded entirely on GPU0."""
     port = _free_port()
     url = f"http://127.0.0.1:{port}"
-    script = str(ctx.repo_root / LLM_SERVER_SCRIPT)
-    await ctx.processes.start(name, [script, "--port", str(port)])
-    await _wait_llm_up(url, within_s)
+    script = str(ctx.repo_root / llm_server.SCRIPT)
+    await ctx.processes.start(name, [script, "--server", server, "--port", str(port)])
+    await _wait_llm_up(url, within_s or llm_server.START_TIMEOUT_S[server])
+    print(await asyncio.to_thread(llm_server.load_and_check, url, LLM_MODEL, server))
     return url
 
 
 async def ensure_llm_server(ctx: ScenarioContext) -> str:
-    """The LLM server of this scenario: the stack's on 127.0.0.1:8773 if it serves, else the
-    scenario's own (stopped in teardown); `reachy-gemma4` checked to be entirely on the GPU."""
+    """The LLM server of this scenario: the stack's on 127.0.0.1:8773 if it serves (it must be
+    the configured kind; a sleeping vLLM is woken), else the scenario's own (stopped in
+    teardown); `reachy-gemma4` checked to be entirely on GPU0."""
     llm = ctx.state.get("llm")
     if llm is not None:
         return llm["url"]
-    if await asyncio.to_thread(_llm_up, STACK_LLM):
+    server = _server(ctx, None)
+    if await asyncio.to_thread(llm_server.up, STACK_LLM):
         url, owned = STACK_LLM, False
+        print(await asyncio.to_thread(llm_server.load_and_check, url, LLM_MODEL, server))
     else:
-        url, owned = await _start_llm(ctx, STACK_LLM_PROCESS, 30.0), True
-    print(await asyncio.to_thread(_llm_loaded_on_gpu, url))
-    ctx.state["llm"] = {"url": url, "owned": owned}
+        url, owned = await _start_llm(ctx, STACK_LLM_PROCESS, server, None), True
+    ctx.state["llm"] = {"url": url, "owned": owned, "server": server}
     return url
 
 
@@ -164,9 +154,15 @@ async def start_brain(
     if follow_up_s is not None:
         overrides["brain.follow_up_s"] = follow_up_s
     if engine == "basic":
-        base = await ensure_llm_server(ctx) if llm == "stack" else _test_llm(ctx)["url"]
+        if llm == "stack":
+            base = await ensure_llm_server(ctx)
+            kind = ctx.state["llm"]["server"]
+        else:
+            base, kind = _test_llm(ctx)["url"], _test_llm(ctx)["server"]
         overrides.setdefault("llm.base_url", f"{base}/v1")
         overrides.setdefault("llm.model", LLM_MODEL)
+        overrides.setdefault("llm.server", kind)
+        ctx.state["brain"]["llm"] = {"url": base, "server": kind}
         overrides.setdefault("engine.speech", speech)
         if speech:
             from assistant_testing.steps.speech import speech_url
@@ -468,6 +464,179 @@ async def llm_request_log(
             assert request.get("priority") == want, f"{request} priority, want {want}"
 
 
+# ---------------------------------------------------------------- the LLM server itself
+
+
+def _brain_llm(ctx: ScenarioContext) -> dict[str, Any]:
+    llm = _brain(ctx).get("llm")
+    if llm is None:
+        raise AssertionError("the brain has no LLM server (start_brain with engine: basic)")
+    return llm
+
+
+def _metrics(url: str) -> dict[str, float]:
+    """vLLM's Prometheus gauges of interest, summed over their labels."""
+    with urllib.request.urlopen(f"{url}/metrics", timeout=5) as response:
+        text = response.read().decode()
+    found: dict[str, float] = {}
+    for line in text.splitlines():
+        for name in ("vllm:num_requests_running", "vllm:num_requests_waiting"):
+            if line.startswith(name + "{") or line.startswith(name + " "):
+                found[name] = found.get(name, 0.0) + float(line.rsplit(" ", 1)[1])
+    return found
+
+
+@step("llm_server_queue")
+async def llm_server_queue(
+    ctx: ScenarioContext, running: int, min_waiting: int, within_s: float = 60.0
+) -> None:
+    """The brain's LLM server (vLLM, its `/metrics`) runs exactly `running` requests and has at
+    least `min_waiting` more waiting in its own queue."""
+    llm = _brain_llm(ctx)
+    assert llm["server"] == "vllm", f"the brain's LLM server is {llm['server']}, not vllm"
+    deadline = time.monotonic() + within_s
+    gauges: dict[str, float] = {}
+    while time.monotonic() < deadline:
+        gauges = await asyncio.to_thread(_metrics, llm["url"])
+        now_running = gauges.get("vllm:num_requests_running", 0)
+        now_waiting = gauges.get("vllm:num_requests_waiting", 0)
+        if now_running == running and now_waiting >= min_waiting:
+            print(f"vLLM at {llm['url']}: {now_running:.0f} running, {now_waiting:.0f} waiting")
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(
+        f"vLLM gauges {gauges}, want {running} running and at least {min_waiting} waiting"
+    )
+
+
+@step("voice_overtook_background")
+async def voice_overtook_background(
+    ctx: ScenarioContext,
+    at_least: int | None = None,
+    at_most: int | None = None,
+    first: bool = False,
+    margin_s: float = 0.25,
+) -> None:
+    """From the LLM request log (the brain's clock): the background requests that were sent to
+    the server BEFORE the voice request but got their first token more than `margin_s` AFTER
+    it, i.e. the ones the voice request overtook inside the server. There are at least
+    `at_least` / at most `at_most` of them. `first`: also none of the background requests
+    still waiting in the server when the voice request was sent (no first token yet) got its
+    first token more than `margin_s` before the voice request's: the voice turn took the first
+    free slot."""
+    requests = await admin(ctx, "/llm/requests")
+    voice = [r for r in requests if r["class"] == "voice"]
+    assert len(voice) == 1, f"want exactly one voice request, got {voice}"
+    v = voice[0]
+    assert v.get("first_token_s") is not None, f"the voice request has no first token: {v}"
+    earlier = [r for r in requests if r["class"] == "background" and r["sent_s"] < v["sent_s"]]
+    overtaken = [
+        r for r in earlier if (r.get("first_token_s") or math.inf) > v["first_token_s"] + margin_s
+    ]
+    for r in sorted(requests, key=lambda r: r.get("first_token_s") or math.inf):
+        token = r.get("first_token_s")
+        print(f"  {r['label'] or r['class']:14} priority {r.get('priority', '-'):>2}  sent "
+              f"{r['sent_s'] - v['sent_s']:+7.2f} s  first token "
+              f"{'-' if token is None else f'{token - v["sent_s"]:+7.2f} s'}")  # fmt: skip
+    print(
+        f"the voice request (TTFT {v.get('ttft_ms')} ms) was sent after {len(earlier)} "
+        f"background requests and overtook {len(overtaken)} of them"
+    )
+    waiting = [r for r in earlier if (r.get("first_token_s") or math.inf) > v["sent_s"]]
+    ahead = [r["label"] for r in waiting if r["first_token_s"] < v["first_token_s"] - margin_s]
+    print(f"{len(waiting)} were still waiting in the server; {len(ahead)} of them went first")
+    if first:
+        assert waiting, "no background request was waiting in the server: nothing to overtake"
+        assert not ahead, f"background requests waiting in the server went first: {ahead}"
+    if at_least is not None:
+        assert len(overtaken) >= at_least, f"overtook {len(overtaken)}, want >= {at_least}"
+    if at_most is not None:
+        assert len(overtaken) <= at_most, f"overtook {len(overtaken)}, want <= {at_most}"
+
+
+THROUGHPUT_PROMPT = (
+    "[{nonce}] Write a long, detailed story about robot number {i} exploring a city at night. "
+    "Keep going for many paragraphs."
+)
+
+
+def _stream_tokens(url: str, model: str, prompt: str, max_tokens: int) -> dict[str, float]:
+    """One streamed chat request: time to first token, completion tokens, seconds."""
+    body = {"model": model, "stream": True, "stream_options": {"include_usage": True},
+            "max_tokens": max_tokens, "reasoning_effort": "none",
+            "messages": [{"role": "user", "content": prompt}]}  # fmt: skip
+    request = urllib.request.Request(
+        f"{url}/v1/chat/completions", data=json.dumps(body).encode(), method="POST"
+    )
+    request.add_header("Content-Type", "application/json")
+    started = time.monotonic()
+    first: float | None = None
+    chunks = 0
+    tokens = 0
+    with urllib.request.urlopen(request, timeout=300) as response:
+        for raw in response:
+            line = raw.decode().strip()
+            if not line.startswith("data:") or line.endswith("[DONE]"):
+                continue
+            chunk = json.loads(line[5:])
+            usage = chunk.get("usage")
+            if usage:
+                tokens = int(usage.get("completion_tokens") or 0)
+            for choice in chunk.get("choices") or []:
+                if (choice.get("delta") or {}).get("content"):
+                    chunks += 1
+                    if first is None:
+                        first = time.monotonic()
+    ended = time.monotonic()
+    return {"ttft_ms": round(((first or ended) - started) * 1000, 1),
+            "tokens": tokens or chunks, "s": ended - started, "started": started,
+            "ended": ended}  # fmt: skip
+
+
+@step("llm_parallel_throughput")
+async def llm_parallel_throughput(
+    ctx: ScenarioContext, count: int = 4, max_tokens: int = 300, min_tokens: int | None = None
+) -> None:
+    """Straight to the brain's LLM server: one real streamed request alone, then `count` at
+    once (each prompt unique, so nothing is reused from the prefix cache; reasoning off). Each
+    must produce at least `min_tokens` (default 80% of `max_tokens`) and the aggregate rate
+    with `count` in parallel must beat the single stream. Recorded under `llm_throughput` in
+    the scenario's timings (`timings_recorded`)."""
+    llm = _brain_llm(ctx)
+    floor = min_tokens if min_tokens is not None else int(max_tokens * 0.8)
+    nonce = f"{time.time_ns():x}"
+
+    def prompt(i: int) -> str:
+        return THROUGHPUT_PROMPT.format(nonce=nonce, i=i)
+
+    single = await asyncio.to_thread(_stream_tokens, llm["url"], LLM_MODEL, prompt(0), max_tokens)
+    runs = await asyncio.gather(*(
+        asyncio.to_thread(_stream_tokens, llm["url"], LLM_MODEL, prompt(i), max_tokens)
+        for i in range(1, count + 1)
+    ))  # fmt: skip
+    wall = max(r["ended"] for r in runs) - min(r["started"] for r in runs)
+    total = sum(int(r["tokens"]) for r in runs)
+    single_rate = single["tokens"] / single["s"]
+    aggregate = total / wall
+    result = {
+        "server": llm["server"], "max_tokens": max_tokens,
+        "single": {"ttft_ms": single["ttft_ms"], "tokens": single["tokens"],
+                   "tokens_per_s": round(single_rate, 1)},
+        "parallel": count, "parallel_tokens": total, "parallel_wall_s": round(wall, 2),
+        "aggregate_tokens_per_s": round(aggregate, 1),
+        "per_stream_tokens_per_s": [round(r["tokens"] / r["s"], 1) for r in runs],
+        "parallel_ttft_ms": [r["ttft_ms"] for r in runs],
+    }  # fmt: skip
+    ctx.state.setdefault("timings", {})["llm_throughput"] = result
+    print(f"LLM throughput ({llm['server']} at {llm['url']}): {json.dumps(result)}")
+    short = [r["tokens"] for r in [single, *runs] if r["tokens"] < floor]
+    assert not short, f"requests ended early ({short} tokens, want >= {floor})"
+    assert aggregate > single_rate, (
+        f"{count} in parallel give {aggregate:.1f} tokens/s, no more than one alone "
+        f"({single_rate:.1f})"
+    )
+
+
 # ---------------------------------------------------------------- a test LLM server
 
 
@@ -481,46 +650,51 @@ def _test_llm(ctx: ScenarioContext) -> dict[str, Any]:
 async def _wait_llm_up(url: str, within_s: float) -> None:
     deadline = time.monotonic() + within_s
     while time.monotonic() < deadline:
-        try:
-            await asyncio.to_thread(_http, "GET", f"{url}/api/version", None, 2)
+        if await asyncio.to_thread(llm_server.up, url):
             return
-        except (OSError, AssertionError):
-            await asyncio.sleep(0.2)
+        await asyncio.sleep(0.5)
     raise AssertionError(f"the LLM server at {url} did not come up in {within_s} s")
 
 
 @step("start_llm_server")
-async def start_llm_server(ctx: ScenarioContext, within_s: float = 30.0) -> None:
-    """Start a real LLM server of the scenario's own (`scripts/llm_server.sh`: `ollama serve` on
-    GPU0, the system model store) on a free loopback port and wait until it answers. It can be
-    killed for real (`kill_llm_server`) without touching the stack's server; it unloads
-    `reachy-gemma4` from the stack's server first, so its copy fits on GPU0."""
-    url = await _start_llm(ctx, LLM_PROCESS, within_s)
-    ctx.state["test_llm"] = {"url": url}
+async def start_llm_server(
+    ctx: ScenarioContext, server: str | None = None, within_s: float | None = None
+) -> None:
+    """Start a real LLM server of the scenario's own (`scripts/llm_server.sh`: `server` vllm or
+    ollama, default the configured `[llm] server`) on GPU0 on a free loopback port, wait until
+    it answers (default 600 s for vLLM, 30 s for Ollama) and check `reachy-gemma4` is loaded
+    entirely on GPU0. It frees GPU0 first (the stack's Ollama unloads the model, the stack's
+    vLLM sleeps) and can be killed for real (`kill_llm_server`) without touching the stack's
+    server."""
+    kind = _server(ctx, server)
+    url = await _start_llm(ctx, LLM_PROCESS, kind, within_s)
+    ctx.state["test_llm"] = {"url": url, "server": kind}
 
 
 @step("kill_llm_server")
 async def kill_llm_server(ctx: ScenarioContext) -> None:
-    """Kill the scenario's LLM server (SIGKILL) and its model runners; its port is closed."""
+    """Kill the scenario's LLM server (SIGKILL) and its children (Ollama's model runner,
+    vLLM's engine core); its port is closed."""
     proc = ctx.processes.get(LLM_PROCESS)
     pgid = proc.pid
     proc.send_signal(signal.SIGKILL)
     await proc.wait(10)
     with contextlib.suppress(ProcessLookupError):
-        os.killpg(pgid, signal.SIGKILL)  # the model runner it spawned (same process group)
+        os.killpg(pgid, signal.SIGKILL)  # the children it spawned (same process group)
     url = _test_llm(ctx)["url"]
-    try:
-        await asyncio.to_thread(_http, "GET", f"{url}/api/version", None, 2)
-    except (OSError, AssertionError):
-        return
-    raise AssertionError(f"the LLM server at {url} still answers after the kill")
+    if await asyncio.to_thread(llm_server.up, url):
+        raise AssertionError(f"the LLM server at {url} still answers after the kill")
+    print(f"the {_test_llm(ctx)['server']} at {url} was killed (SIGKILL)")
 
 
 @step("restart_llm_server")
-async def restart_llm_server(ctx: ScenarioContext, within_s: float = 30.0) -> None:
-    """Start the killed LLM server again on the same port."""
+async def restart_llm_server(ctx: ScenarioContext, within_s: float | None = None) -> None:
+    """Start the killed LLM server again on the same port; the model is loaded entirely on
+    GPU0 again."""
+    llm = _test_llm(ctx)
     await ctx.processes.restart(LLM_PROCESS)
-    await _wait_llm_up(_test_llm(ctx)["url"], within_s)
+    await _wait_llm_up(llm["url"], within_s or llm_server.START_TIMEOUT_S[llm["server"]])
+    print(await asyncio.to_thread(llm_server.load_and_check, llm["url"], LLM_MODEL, llm["server"]))
 
 
 # ---------------------------------------------------------------- the robot
