@@ -338,7 +338,7 @@ class DialogManager:
             }
         await self.bus.publish(TurnFinished(session_id=sid, turn_id=tid))
         self.turns.end(record, outcome, error)
-        answered = bool(record.reply_text)
+        answered = bool(record.reply_text) or record.reply_audio_ms > 0
         if record.kind == "voice" and answered and self.follow_up_s > 0 and not self.muted:
             await self._open_follow_up()
         else:

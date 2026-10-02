@@ -134,6 +134,9 @@ class _Reply:
     metrics: TurnMetrics
     result: ChatResult
     segments: list[_Segment] = field(default_factory=list)
+    answer: dict[str, Any] | None = None
+    """The whole reply as put in the history when the LLM finished (the edge may still be
+    playing it: a barge-in then replaces it with what was heard)."""
 
 
 class EchoSession:
@@ -176,6 +179,7 @@ class LlmSession:
     async def respond(self, turn: UserTurn, metrics: TurnMetrics) -> AsyncIterator[EngineEvent]:
         assistant = turn.assistant or self.info.assistant
         started = time.monotonic()
+        self._reply = None
         text = turn.text
         if not text and turn.audio:
             if self.stt is None:
@@ -216,8 +220,8 @@ class LlmSession:
         finally:
             metrics.llm_total_ms = result.total_ms
             metrics.llm_queued_ms = result.queued_ms
-        self._reply = None
-        self.history += [user, {"role": "assistant", "content": result.text}]
+        reply.answer = {"role": "assistant", "content": result.text}
+        self.history += [user, reply.answer]
 
     async def _llm_text(
         self,
@@ -288,7 +292,8 @@ class LlmSession:
                 await producer
 
     async def interrupt(self, played_ms: int | None) -> None:
-        """Keep only what was heard of the cut reply in the conversation."""
+        """Keep only what was heard of the cut reply in the conversation, whether the LLM was
+        still going or had finished (and the edge was still playing the reply)."""
         reply, self._reply = self._reply, None
         if reply is None or not reply.segments:
             return
@@ -301,7 +306,10 @@ class LlmSession:
             "spoken_text": " ".join(s.text for s in reply.segments),
             "llm_text": reply.result.text,
         }
-        self.history.append(reply.user)
+        if reply.answer is not None and self.history and self.history[-1] is reply.answer:
+            self.history.pop()  # the whole reply, as if heard: only what was heard stays
+        else:
+            self.history.append(reply.user)
         if heard:
             self.history.append({"role": "assistant", "content": heard})
 
