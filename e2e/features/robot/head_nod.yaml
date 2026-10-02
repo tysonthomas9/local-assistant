@@ -1,12 +1,14 @@
 feature: The robot nods when the brain says yes
 tier: hw
 description: >
-  The brain sends express{yes}; the real head pitches by about 8 degrees (the arbiter allows at
-  most 10, slowly) and returns to where it started, and the motors end up disabled as they
-  were. The daemon's own state, sampled during the move, is the measurement. An expression this
-  body has no move for is answered with result ok:false and nothing moves.
+  The brain sends express{yes}; the body plays Pollen's recorded nod yes1 to its end, following
+  the SDK's standard pattern wake_up -> move -> goto_sleep -> motors off (Pollen's tested moves
+  are the exception to our 10 degree head limit). The daemon's own state, sampled during the
+  move, is the measurement: the head pitches well beyond 10 degrees from neutral, and the robot
+  ends in the sleep pose it started in with the motors disabled. An expression this body has no
+  move for is answered with result ok:false and nothing moves.
 scenarios:
-  - name: express yes nods the head and returns it to rest
+  - name: express yes plays the nod yes1 and the robot goes back to sleep
     steps:
       - robot_host_found
       - code_synced_to_edge_host
@@ -14,7 +16,7 @@ scenarios:
       - start_link_server
       - start_edge_agent: {id: lite, body: reachy, where: edge_host}
       - robot_state_read: {control_mode: disabled}
-      - robot_nods: {client: lite, degrees: 8}
+      - robot_plays_emotion: {client: lite, emotion: "yes", move: yes1, min_head_deg: 10}
       - robot_back_at_rest
       - robot_state_read: {control_mode: disabled}
       - edge_output_clean: lite
@@ -27,6 +29,6 @@ scenarios:
       - start_reachy_daemon
       - start_link_server
       - start_edge_agent: {id: lite, body: reachy, where: edge_host}
-      - edge_answers: {client: lite, type: express, fields: {name: sad}, ok: false, error_contains: "no expression"}
+      - edge_answers: {client: lite, type: express, fields: {name: no_firm}, ok: false, error_contains: "no expression"}
       - robot_state_read: {control_mode: disabled}
       - edge_host_clean

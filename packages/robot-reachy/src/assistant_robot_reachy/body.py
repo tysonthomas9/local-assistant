@@ -173,9 +173,10 @@ class ReachyMotion:
     async def express(self, name: str, intensity: float = 1.0) -> bool:
         arbiter = self._arbiter()
         started = time.monotonic()
+        arbiter.last_move = None
         ok = await asyncio.to_thread(arbiter.queue_emotion, name, intensity)
-        emit("MOTION", express=name, intensity=intensity, ok=str(ok).lower(),
-             took_s=f"{time.monotonic() - started:.2f}")  # fmt: skip
+        emit("MOTION", arbiter.last_move or {}, express=name, intensity=intensity,
+             ok=str(ok).lower(), took_s=f"{time.monotonic() - started:.2f}")  # fmt: skip
         return ok
 
     async def look_at(self, target: LookTarget) -> bool:

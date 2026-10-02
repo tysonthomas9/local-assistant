@@ -90,7 +90,7 @@ state() { launchctl print "$job" 2>/dev/null; }
 finish() {
     code=$1
     sleep 0.3
-    [ -n "$tailer" ] && kill "$tailer" 2>/dev/null
+    [ -n "$tailer" ] && kill -KILL "$tailer" 2>/dev/null
     [ -n "$feeder" ] && kill "$feeder" 2>/dev/null
     launchctl bootout "$job" 2>/dev/null
     rm -rf "$dir"
@@ -102,7 +102,9 @@ if ! launchctl bootstrap "gui/$uid" "$plist"; then
     echo "edge_app_run: launchctl bootstrap gui/$uid failed (is this user logged in at the Mac?)" >&2
     finish 4
 fi
-tail -n +1 -f "$log" &
+# The runner stops a job by signalling this script's whole process group: the tail must
+# outlive that, to relay the job's shutdown output (it is killed in finish()).
+(trap '' TERM INT HUP; exec tail -n +1 -f "$log") &
 tailer=$!
 
 pid=""

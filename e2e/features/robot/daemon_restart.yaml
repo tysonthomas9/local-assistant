@@ -4,7 +4,7 @@ description: >
   The real daemon is stopped while the edge agent runs: the agent notices within seconds,
   stops its speaker, tells the brain error{body_unavailable} and keeps its EdgeLink up. When
   the daemon is back the agent reconnects to the robot on its own, and the robot nods again
-  (and returns to rest, motors disabled).
+  (Pollen's yes1, then back to sleep, motors disabled).
 scenarios:
   - name: the daemon is stopped and started again; the body recovers
     steps:
@@ -17,7 +17,7 @@ scenarios:
       - edge_body_lost: {client: lite, within_s: 10}
       - start_reachy_daemon
       - edge_body_recovers: {client: lite, within_s: 60}
-      - robot_nods: {client: lite, degrees: 5}
+      - robot_plays_emotion: {client: lite, emotion: "yes", move: yes1, min_head_deg: 10}
       - robot_back_at_rest
       - client_stayed_connected: lite
       - edge_host_clean

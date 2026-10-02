@@ -149,6 +149,10 @@ async def edge_host_bootstrapped(ctx: ScenarioContext, reachy_mini: str) -> None
         raise AssertionError(f"bootstrap found no robot device on {host.label}")
     if facts.get("os") == "Darwin" and facts.get("app") not in ("built", "kept"):
         raise AssertionError(f"bootstrap did not set up Reachy Edge.app: {facts}")
+    if not facts.get("emotions", "0").isdigit() or int(facts.get("emotions", "0")) == 0:
+        raise AssertionError(
+            f"Pollen's emotions dataset is not cached on {host.label} (the robot's moves): {facts}"
+        )
 
 
 @step("code_synced_to_edge_host")
@@ -375,11 +379,11 @@ async def responsible_process_is_app(ctx: ScenarioContext, process: str = DAEMON
     rows = [host.scrub(line).split("\t") for line in done.stdout.splitlines() if line.strip()]
     if not rows:
         raise AssertionError(f"no processes in group {pgid}: {host.scrub(done.stderr)}")
-    for pid, exe, rpid, responsible in rows:
+    for pid, exe, _arrow, rpid, responsible in rows:
         print(f"{pid} {exe} -> responsible {rpid} {responsible}")
         if not responsible.endswith(APP_EXECUTABLE):
             raise AssertionError(f"{exe} (pid {pid}) is the responsibility of {responsible}")
-    if not any(exe.endswith("python3.12") or "/python" in exe for _, exe, _, _ in rows):
+    if not any("/python" in exe for _, exe, *_ in rows):
         raise AssertionError(f"no Python process inside the app job: {rows}")
 
 

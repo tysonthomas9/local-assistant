@@ -1,18 +1,21 @@
-feature: The robot wiggles its antennas when happy
+feature: The robot moves its antennas when calming
 tier: hw
 description: >
-  The brain sends express{happy}; both real antennas swing about 15 degrees towards upright and
-  back twice (the arbiter allows at most 20), end where they started, and the motors end up
-  disabled as they were.
+  The brain sends express{calming}; the body plays Pollen's recorded move serenity1 (an
+  antennas-only move: the head stays still) to its end, following the SDK's standard pattern
+  wake_up -> move -> goto_sleep -> motors off. Measured from the daemon's state: the antennas
+  swing well beyond 30 degrees from neutral, and the robot ends in the sleep pose it started
+  in with the motors disabled.
 scenarios:
-  - name: express happy wiggles both antennas and returns them
+  - name: express calming plays serenity1 and the robot goes back to sleep
     steps:
       - robot_host_found
       - code_synced_to_edge_host
       - start_reachy_daemon
       - start_link_server
       - start_edge_agent: {id: lite, body: reachy, where: edge_host}
-      - antennas_wiggle: {client: lite, degrees: 15}
+      - robot_state_read: {control_mode: disabled}
+      - robot_plays_emotion: {client: lite, emotion: calming, move: serenity1, min_antenna_deg: 30}
       - robot_back_at_rest
       - robot_state_read: {control_mode: disabled}
       - edge_output_clean: lite

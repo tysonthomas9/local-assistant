@@ -15,7 +15,7 @@
 #   ~/assistant-edge/src/        checkout of that commit; `uv sync` puts the edge packages in
 #                                src/.venv-assistant (UV_PROJECT_ENVIRONMENT)
 #   ~/assistant-edge/cache/uv    uv cache (kept here so the host's own cache is untouched)
-#   ~/assistant-edge/hf/         HF_HOME for the daemon
+#   ~/assistant-edge/hf/         HF_HOME for the daemon and the agent (Pollen's emotions dataset)
 #   ~/assistant-edge/Reachy Edge.app
 #                                macOS only: the app that owns the robot's microphone and camera
 #                                permission (see below); built and signed once
@@ -99,6 +99,24 @@ if [ ! -x "$EDGE/daemon/bin/reachy-mini-daemon" ]; then
     say "reachy-mini-daemon entry point missing in $EDGE/daemon/bin"
     exit 1
 fi
+
+# ---------------------------------------------------------------- Pollen's recorded moves
+# The robot's emotions are Pollen's recorded moves (a Hugging Face dataset). The daemon and the
+# agent run offline (HF_HUB_OFFLINE=1), so it is downloaded here, once, into $HF_HOME.
+EMOTIONS_DATASET="pollen-robotics/reachy-mini-emotions-library"
+emotions_count() {
+    "$DPY" - "$EMOTIONS_DATASET" <<'PY' 2>/dev/null
+import sys
+from reachy_mini.motion.recorded_move import RecordedMoves
+print(len(RecordedMoves(sys.argv[1]).list_moves()))
+PY
+}
+if ! emotions="$(emotions_count)" || [ -z "$emotions" ] || [ "$emotions" = 0 ]; then
+    say "downloading $EMOTIONS_DATASET into $HF_HOME (once)"
+    HF_HUB_OFFLINE=0 HF_HUB_DISABLE_PROGRESS_BARS=1 "$DPY" -c 'import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1], repo_type="dataset")' "$EMOTIONS_DATASET"
+    emotions="$(emotions_count)" || emotions=0
+fi
+say "emotions: $EMOTIONS_DATASET, ${emotions:-0} moves cached"
 
 # ---------------------------------------------------------------- Reachy Edge.app (macOS)
 # macOS grants microphone and camera access to the RESPONSIBLE process of whatever opens them.
@@ -221,6 +239,6 @@ for dev in /dev/cu.usbmodem* /dev/ttyACM*; do
     if [ -e "$dev" ]; then robot="$dev"; break; fi
 done
 
-printf 'edge-host ready: os=%s arch=%s python=%s reachy_mini=%s robot=%s app=%s\n' \
+printf 'edge-host ready: os=%s arch=%s python=%s reachy_mini=%s robot=%s app=%s emotions=%s\n' \
     "$(uname -s)" "$(uname -m)" "$("$DPY" -c 'import platform; print(platform.python_version())')" \
-    "$REACHY_MINI_VERSION" "$robot" "$app"
+    "$REACHY_MINI_VERSION" "$robot" "$app" "${emotions:-0}"

@@ -159,11 +159,28 @@ def test_failed_step_still_stops_processes(pytester: pytest.Pytester, tmp_path: 
         os.kill(pid, 0)
 
 
-def test_reachy_daemon_placeholder_fails_with_a_clear_message(pytester: pytest.Pytester) -> None:
+def test_reachy_daemon_without_a_robot_fails_with_a_clear_message(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from assistant_testing import edge_host
+
+    monkeypatch.delenv("GATE_NO_HW", raising=False)
+    monkeypatch.delenv(edge_host.ENV_VAR, raising=False)
+    monkeypatch.setattr(edge_host, "local_robot", lambda: None)
     pytester.makepyfile("def test_robot(reachy_daemon):\n    assert reachy_daemon\n")
     result = pytester.runpytest("-p", "no:cacheprovider", "-p", "no:asyncio")
     result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(["*NotImplementedError: reachy_daemon is a placeholder*S3*"])
+    result.stdout.fnmatch_lines(["*AssertionError: no robot on this machine*"])
+
+
+def test_reachy_daemon_is_skipped_with_the_hw_tier_off(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GATE_NO_HW", "1")
+    pytester.makepyfile("def test_robot(reachy_daemon):\n    assert reachy_daemon\n")
+    result = pytester.runpytest("-p", "no:cacheprovider", "-p", "no:asyncio", "-rs")
+    result.assert_outcomes(skipped=1)
+    result.stdout.fnmatch_lines(["*GATE_NO_HW=1*"])
 
 
 @step("_test_echo")

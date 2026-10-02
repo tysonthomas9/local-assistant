@@ -89,7 +89,9 @@ Python 3.12, and installs them only if they are missing. Everything else goes in
 - **Tunnel ports.** An `ssh -R` port counts as ours only if, after the port is seen listening,
   our ssh is still running and did not log "remote port forwarding failed" (someone else may
   have taken the port first); otherwise another port is tried.
-- **The daemon** runs WITH media (camera, WebRTC) and no wake-up or sleep motion, started as
+- **The daemon** runs WITH media (camera, WebRTC) and no wake-up or sleep motion of its own
+  (the robot features' moves do `wake_up()` -> a small move -> `goto_sleep()` -> motors off;
+  see the safety rules in `e2e/features/README.md`), started as
   `python -m assistant_robot_reachy.daemon` from the synced checkout. That launcher keeps every
   socket on loopback: the API on `127.0.0.1:8000`, the WebRTC signalling server (upstream:
   `0.0.0.0:8443`) on `127.0.0.1:8443`, and no mDNS announcement (upstream: UDP 5353 on every
@@ -137,3 +139,11 @@ ssh reachy-mac 'pgrep -fl reachy'                  # afterwards: nothing left ru
 
 The robot must not be in use by anything else on the edge host. If a daemon the test did not
 start is already answering on port 8000, the daemon step fails rather than stopping it.
+
+If `edge_body_is aec: hw` fails with every XVF3800 echo-canceller parameter "unreadable",
+the audio board's DSP control has got stuck (seen once on firmware 2.1.2; the board keeps
+answering "retry"). Reboot the audio board alone, with no daemon running and no motion:
+
+```bash
+ssh reachy-mac 'cd ~/assistant-edge/src && .venv-assistant/bin/python -m reachy_mini.media.audio_control_utils REBOOT --values 1'
+```

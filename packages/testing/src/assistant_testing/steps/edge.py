@@ -114,7 +114,13 @@ async def start_edge_agent(
     if energy_trigger_dbfs is not None:
         args += ["--energy-trigger-dbfs", str(energy_trigger_dbfs)]
     # The robot's microphone needs the macOS permission of Reachy Edge.app: run inside it.
-    argv = edge_host_steps.app_argv(f"edge-{id}", args, stdin=True) if in_app else [python, *args]
+    # The reachy body plays Pollen's recorded moves from the edge host's offline HF cache.
+    hf = {k: edge_host_steps.DAEMON_ENV[k] for k in ("HF_HOME", "HF_HUB_OFFLINE")}
+    argv = (
+        edge_host_steps.app_argv(f"edge-{id}", args, env=hf, stdin=True)
+        if in_app
+        else [python, *args]
+    )
     name = _client_name(id)
     if ssh is not None:
         await ctx.processes.start(
@@ -123,7 +129,7 @@ async def start_edge_agent(
             stdin=True,
             ssh=ssh,
             remote_cwd=f"{edge_host.EDGE_DIR}/src",
-            env={"PYTHONUNBUFFERED": "1"},
+            env={"PYTHONUNBUFFERED": "1", **hf},
         )
     else:
         await ctx.processes.start(name, argv, stdin=True, env={"PYTHONUNBUFFERED": "1"})
@@ -160,7 +166,9 @@ async def edge_body_is(
             board = reports[-1].payload or {}
             print(f"XVF3800 echo canceller: {json.dumps(board)}")
             assert board.get("board") == "xvf3800", f"no XVF3800 board: {board}"
-            assert _first(board.get("AEC_NUM_FARENDS")) == 1, f"AEC has no far end: {board}"
+            assert _first(board.get("AEC_NUM_FARENDS")) == 1, f"AEC has no far end: {board}" + (
+                f" (the board's DSP is wedged; {REBOOT_HINT})" if _wedged(board) else ""
+            )
     if camera is not None:
         assert (caps.get("camera") is not None) == camera, f"camera {caps.get('camera')}"
     if expressions is not None:
@@ -176,6 +184,18 @@ async def edge_body_is(
         payload={"type": "hello", "device_id": client},
         what=f"CONNECTED {client}",
     )
+
+
+REBOOT_HINT = (
+    "reboot the audio board, no motion: python -m reachy_mini.media.audio_control_utils"
+    " REBOOT --values 1"
+)
+
+
+def _wedged(board: dict[str, Any]) -> bool:
+    """Every AEC parameter unreadable: the XVF3800's DSP servicer stuck answering "retry"."""
+    values = [v for k, v in board.items() if k.startswith(("AEC_", "PP_"))]
+    return bool(values) and all(str(v).startswith("unreadable") for v in values)
 
 
 def _first(value: Any) -> Any:
@@ -415,7 +435,7 @@ async def _robot_state(ctx: ScenarioContext) -> dict[str, Any]:
 
 
 async def _during_request(
-    ctx: ScenarioContext, client: str, type: str, fields: dict[str, Any]
+    ctx: ScenarioContext, client: str, type: str, fields: dict[str, Any], within_s: float = 20
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Send a request and sample the robot state every ~50 ms until its result arrives."""
     samples: list[dict[str, Any]] = []
@@ -428,7 +448,7 @@ async def _during_request(
 
     sampler = asyncio.create_task(sample())
     try:
-        result = await _request(ctx, client, type, fields, 20)
+        result = await _request(ctx, client, type, fields, within_s)
     finally:
         done.set()
         await sampler
@@ -445,43 +465,78 @@ def _remember_start(ctx: ScenarioContext, state: dict[str, Any]) -> None:
     )
 
 
-@step("robot_nods")
-async def robot_nods(ctx: ScenarioContext, client: str, degrees: float) -> None:
-    """The brain sends `express yes`; the real head pitches by about `degrees` (at most 10)
-    and the edge answers ok. Measured from the daemon's state while it moves."""
-    if not 0 < degrees <= 10:
-        raise AssertionError("robot safety: a nod is at most 10 degrees")
-    before = await _robot_state(ctx)
-    _remember_start(ctx, before)
-    result, samples = await _during_request(
-        ctx, client, "express", {"name": "yes", "intensity": degrees / 10}
-    )
-    assert result.get("ok") is True, f"express yes failed: {result}"
-    start = before["head_pose"]["pitch"]
-    peak = max(abs(math.degrees(s["head_pose"]["pitch"] - start)) for s in samples)
-    print(f"nod: peak pitch change {peak:.1f} deg over {len(samples)} samples")
-    assert peak >= degrees * 0.5, f"the head pitched only {peak:.1f} deg for a {degrees} deg nod"
-    assert peak <= degrees + 3, f"the head pitched {peak:.1f} deg, more than {degrees} + 3"
+NEUTRAL_DEG = 3.0
+"""How close to level (pitch and roll) the head is in the SDK's neutral (wake-up) pose."""
 
 
-@step("antennas_wiggle")
-async def antennas_wiggle(ctx: ScenarioContext, client: str, degrees: float) -> None:
-    """The brain sends `express happy`; both real antennas swing by about `degrees` (at most
-    20) and back, and the edge answers ok."""
-    if not 0 < degrees <= 20:
-        raise AssertionError("robot safety: an antenna wiggle is at most 20 degrees")
+def _move_window(
+    before: dict[str, Any], samples: list[dict[str, Any]]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The reference state of our move and the samples it spans.
+
+    A robot at rest (motors off) does `wake_up()` -> our move from neutral -> neutral ->
+    `goto_sleep()`: the move is what happens between the first and the last sample with the
+    head level, measured from that first level sample. An awake robot moves from `before`.
+    """
+    if before.get("control_mode") != "disabled":
+        return before, samples
+
+    def level(state: dict[str, Any]) -> bool:
+        pose = state["head_pose"]
+        return all(abs(math.degrees(pose[k])) < NEUTRAL_DEG for k in ("pitch", "roll"))
+
+    marks = [i for i, state in enumerate(samples) if level(state)]
+    assert marks, "the head never reached the neutral pose: did wake_up() run?"
+    return samples[marks[0]], samples[marks[0] : marks[-1] + 1]
+
+
+@step("robot_plays_emotion")
+async def robot_plays_emotion(
+    ctx: ScenarioContext,
+    client: str,
+    emotion: str,
+    move: str,
+    min_head_deg: float = 0.0,
+    min_antenna_deg: float = 0.0,
+) -> None:
+    """The brain sends `express <emotion>`; the body plays Pollen's recorded `move` to its end
+    (wake_up -> move -> goto_sleep for a robot at rest) and answers ok. Measured from the
+    daemon's state between the first and last sample at neutral: the head turned by at least
+    `min_head_deg` (largest of roll/pitch/yaw) and an antenna by at least `min_antenna_deg`."""
     before = await _robot_state(ctx)
     _remember_start(ctx, before)
-    result, samples = await _during_request(
-        ctx, client, "express", {"name": "happy", "intensity": degrees / 20}
+    result, samples = await _during_request(ctx, client, "express", {"name": emotion}, 60)
+    assert result.get("ok") is True, f"express {emotion} failed: {result}"
+    motion = [
+        line
+        for line in _get_lines(_agent(ctx, client), "MOTION")
+        if line.fields.get("express") == emotion
+    ]
+    assert motion, f"the body printed no MOTION line for express {emotion}"
+    played = motion[-1].payload or {}
+    print(f"played: {json.dumps(played)} in {motion[-1].fields.get('took_s')} s")
+    assert played.get("move") == move, f"played {played.get('move')!r}, want {move!r}"
+    assert played.get("played_s", 0) >= played.get("duration_s", 1e9) - 0.05, (
+        f"{move} did not run to its end: {played}"
     )
-    assert result.get("ok") is True, f"express happy failed: {result}"
-    for i in (0, 1):
-        start = before["antennas_position"][i]
-        peak = max(abs(math.degrees(s["antennas_position"][i] - start)) for s in samples)
-        print(f"antenna {i}: peak change {peak:.1f} deg")
-        assert peak >= degrees * 0.5, f"antenna {i} moved only {peak:.1f} deg"
-        assert peak <= degrees + 5, f"antenna {i} moved {peak:.1f} deg, more than {degrees} + 5"
+    ref, window = _move_window(before, samples)
+    head = max(
+        abs(math.degrees(s["head_pose"][k] - ref["head_pose"][k]))
+        for s in window
+        for k in ("roll", "pitch", "yaw")
+    )
+    antenna = max(
+        abs(math.degrees(s["antennas_position"][i] - ref["antennas_position"][i]))
+        for s in window
+        for i in (0, 1)
+    )
+    print(
+        f"{move}: head moved {head:.1f} deg, antennas {antenna:.1f} deg over {len(window)} samples"
+    )
+    assert head >= min_head_deg, f"the head moved only {head:.1f} deg (want {min_head_deg})"
+    assert antenna >= min_antenna_deg, (
+        f"the antennas moved only {antenna:.1f} deg (want {min_antenna_deg})"
+    )
 
 
 @step("robot_back_at_rest")
@@ -491,7 +546,7 @@ async def robot_back_at_rest(
     """After the move: head and antennas are back where they started (within `head_deg` /
     `antenna_deg`), and the motors are in the mode they had before (disabled at rest)."""
     before = ctx.state.get("robot_start")
-    assert before is not None, "no move measured; use robot_nods or antennas_wiggle first"
+    assert before is not None, "no move measured; use robot_plays_emotion first"
     after = await _robot_state(ctx)
     for key in ("roll", "pitch", "yaw"):
         diff = abs(math.degrees(after["head_pose"][key] - before["head_pose"][key]))

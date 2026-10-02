@@ -4,6 +4,11 @@ The robot's microphone path is the XVF3800's processed output. Its acoustic echo
 (AEC) uses what the board itself plays as the far-end reference, so it applies to everything
 played through the robot's speaker. `AEC_AECCONVERGED` becomes 1 once the canceller has
 adapted to the room (it needs some far-end audio first).
+
+Seen on firmware 2.1.2: the board's DSP-side control servicer can get stuck answering "retry"
+to every request (AEC, post-processing and audio-manager parameters all unreadable, while
+VERSION and DOA still read). A reboot of the audio board alone clears it, with no motion:
+`python -m reachy_mini.media.audio_control_utils REBOOT --values 1` (no daemon running).
 """
 
 from typing import Any
