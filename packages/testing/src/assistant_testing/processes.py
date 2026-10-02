@@ -10,14 +10,47 @@ stdin, is signalled (STOP/CONT/KILL reach the remote process group) and is stopp
 
 import asyncio
 import contextlib
+import ctypes
 import os
 import re
 import shlex
 import signal
 import subprocess
+import sys
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+RUN_TAG_VAR = "ASSISTANT_TEST_RUN"
+RUN_ID = os.environ.get(RUN_TAG_VAR) or uuid.uuid4().hex[:12]
+"""Tags every ssh process this test run starts (`-o SetEnv=ASSISTANT_TEST_RUN=<id>`), so a sweep
+finds ssh clients and tunnels a crashed runner left behind (`edge_host sweep`)."""
+TEST_SSH_PATTERN = rf"^ssh .*SetEnv={RUN_TAG_VAR}="
+"""pgrep -f pattern for the ssh processes of any test run."""
+
+_PR_SET_PDEATHSIG = 1
+_LIBC = ctypes.CDLL(None, use_errno=True) if sys.platform == "linux" else None
+
+
+def die_with_parent() -> Callable[[], None] | None:
+    """`preexec_fn`: on Linux the child gets SIGTERM when the thread that started it dies, so
+    ssh clients and tunnels never outlive a killed test runner. None (no-op) elsewhere."""
+    if _LIBC is None:
+        return None
+    libc, parent = _LIBC, os.getpid()
+
+    def setup() -> None:
+        libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
+        if os.getppid() != parent:  # the parent died before prctl took effect
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    return setup
+
+
+def ssh_tag_options() -> list[str]:
+    """ssh options that mark a process as started by this test run."""
+    return ["-o", f"SetEnv={RUN_TAG_VAR}={RUN_ID}"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,12 +222,13 @@ def sh_word(arg: str) -> str:
     return shlex.quote(arg)
 
 
-def ssh_argv(ssh: str, script: str, *, tty_free: bool = True) -> list[str]:
+def ssh_argv(ssh: str, script: str, *, tty_free: bool = True, tag: bool = True) -> list[str]:
     """argv that runs the POSIX sh `script` on `ssh` (an alias from ~/.ssh/config).
 
-    The remote login shell may be zsh, so the script always runs under /bin/sh.
+    The remote login shell may be zsh, so the script always runs under /bin/sh. `tag` marks it
+    as a test-run process (the sweep's own ssh calls are untagged).
     """
-    argv = ["ssh", "-o", "BatchMode=yes"]
+    argv = ["ssh", "-o", "BatchMode=yes", *(ssh_tag_options() if tag else [])]
     if tty_free:
         argv.append("-T")
     return [*argv, ssh, "exec /bin/sh -c " + shlex.quote(script)]
@@ -265,13 +299,20 @@ class RemoteProcess(ManagedProcess):
         if self.remote_pgid is None:
             raise RuntimeError(f"{self.name}: remote process group unknown")
         name = sig.name.removeprefix("SIG")
-        done = subprocess.run(self._kill_argv(name), capture_output=True, text=True, timeout=30)
+        done = subprocess.run(
+            self._kill_argv(name),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            preexec_fn=die_with_parent(),
+        )
         if done.returncode != 0:
             raise RuntimeError(f"kill -{name} on {self.ssh} failed: {done.stderr.strip()}")
 
     async def _remote_kill(self, *signals: str) -> None:
         proc = await asyncio.create_subprocess_exec(
             *self._kill_argv(*signals),
+            preexec_fn=die_with_parent(),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
@@ -342,6 +383,7 @@ class ProcessGroup:
             cwd=cwd or self.cwd,
             env={**self.env, **(env or {})},
             start_new_session=True,
+            preexec_fn=die_with_parent(),
         )
         managed = ManagedProcess(
             name=name,
@@ -375,6 +417,7 @@ class ProcessGroup:
             stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
             env=self.env,
             start_new_session=True,
+            preexec_fn=die_with_parent(),
         )
         managed = RemoteProcess(
             name=name,

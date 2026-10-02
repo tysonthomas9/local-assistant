@@ -12,6 +12,7 @@ an `ssh -R` tunnel (S7 replaces the tunnel with TLS and pairing).
 
 import asyncio
 import json
+import random
 import re
 import shlex
 import socket
@@ -24,7 +25,7 @@ from typing import Any
 from assistant_testing import edge_host as eh
 from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.registry import step
-from assistant_testing.processes import ManagedProcess, RemoteProcess
+from assistant_testing.processes import ManagedProcess, RemoteProcess, ssh_tag_options
 
 DAEMON = "daemon"
 DAEMON_PORT = 8000
@@ -58,10 +59,13 @@ def _free_port() -> int:
 
 
 def _ssh_tunnel_argv(alias: str, *forward: str) -> list[str]:
-    """A dedicated SSH connection (not the shared ControlMaster) that only forwards ports."""
+    """A dedicated SSH connection (not the shared ControlMaster) that only forwards ports.
+
+    Tagged as a test-run ssh; it gets SIGTERM if the test runner dies (ProcessGroup.start).
+    """
     return [
-        "ssh", "-S", "none", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=5", "-N", *forward, alias,
+        "ssh", *ssh_tag_options(), "-S", "none", "-o", "BatchMode=yes",
+        "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=5", "-N", *forward, alias,
     ]  # fmt: skip
 
 
@@ -319,13 +323,32 @@ async def reverse_tunnel(ctx: ScenarioContext, port: int) -> int:
     host = host_of(ctx)
     if host.ssh is None:
         return port
-    tunnel = await ctx.processes.start(
-        f"tunnel:link:{port}",
-        _ssh_tunnel_argv(host.ssh, "-R", f"0:127.0.0.1:{port}"),
+    # A port from REVERSE_PORTS (not `-R 0`), so a forward a crashed runner left is findable.
+    listening = (
+        "lsof -nP -iTCP:{p} -sTCP:LISTEN >/dev/null 2>&1 || "
+        "ss -ltn 2>/dev/null | grep -q '127.0.0.1:{p} '"
     )
-    line = await tunnel.wait_for_line(r"Allocated port \d+ for remote forward", 20)
-    match = re.search(r"Allocated port (\d+)", line)
-    assert match is not None
-    tunnels[port] = int(match.group(1))
+    last_output = ""
+    for attempt in range(8):
+        remote = random.choice(eh.REVERSE_PORTS)
+        tunnel = await ctx.processes.start(
+            f"tunnel:link:{port}:{attempt}",
+            _ssh_tunnel_argv(host.ssh, "-R", f"{remote}:127.0.0.1:{port}"),
+        )
+        deadline = time.monotonic() + 20
+        while tunnel.running and time.monotonic() < deadline:
+            done = await asyncio.to_thread(host.run, listening.format(p=remote), 30)
+            if done.returncode == 0:
+                tunnels[port] = remote
+                break
+            await asyncio.sleep(0.3)
+        if port in tunnels:
+            break
+        await tunnel.stop()  # forward refused (port taken there) or never came up: next port
+        last_output = tunnel.output
+    else:
+        raise AssertionError(
+            f"no ssh -R tunnel to {host.label} came up; last output:\n{last_output}"
+        )
     print(f"EdgeLink: {host.label} 127.0.0.1:{tunnels[port]} -> here 127.0.0.1:{port} (ssh -R)")
     return tunnels[port]

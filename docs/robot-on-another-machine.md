@@ -69,10 +69,21 @@ Python 3.12, and installs them only if they are missing. Everything else goes in
 - **Processes** started on the edge host (`ProcessGroup.start(..., ssh=alias)`) run through
   SSH in their own process group. Their output streams back to the PC, steps can type into
   them, and `kill_process` sends real STOP/CONT/KILL to the remote group. Teardown always stops
-  them. After the hw features, the gate also sweeps anything still running from
-  `~/assistant-edge` on that host. If it finds anything, the stage fails.
+  them.
+- **No orphans, even after a crash.** Every ssh process the tests start on the PC (remote
+  launchers, tunnels, one-off commands) carries the tag `-o SetEnv=ASSISTANT_TEST_RUN=<run id>`
+  and, on Linux, a parent-death signal (`PR_SET_PDEATHSIG`), so it exits when the test runner
+  dies, even with `kill -9`. EdgeLink's `ssh -R` forwards use edge-host ports 47000-47999 only.
+  `python -m assistant_testing.edge_host sweep` finds and stops what is left: processes running
+  from `~/assistant-edge` on the edge host, tagged ssh processes on the PC, and sshd listeners
+  in that port range on the edge host. The gate sweeps before the hw features (an earlier run's
+  leftovers are reported and cleaned) and after them; leftovers after the features fail the
+  stage.
 - **The daemon** runs with its API on `127.0.0.1:8000` on the edge host, with no media and no
-  wake-up or sleep motion. The PC reads it through an `ssh -L` tunnel.
+  wake-up or sleep motion. The PC reads it through an `ssh -L` tunnel. Upstream behaviour: the
+  reachy-mini daemon always announces itself over mDNS (UDP 5353, service `reachy_mini`) on the
+  edge host's network, advertising port 8000. The port is bound to loopback, so the
+  announcement points at something the LAN cannot reach.
 - **EdgeLink** stays on `127.0.0.1` on the PC. A process on the edge host reaches it through an
   `ssh -R` tunnel to `127.0.0.1` there. Plain `ws://` never crosses the LAN. S7 replaces the
   tunnel with TLS and pairing.

@@ -21,8 +21,9 @@
 #              (/dev/ttyACM*) if attached here, else on the edge host reached by the SSH alias in
 #              config [test.edge_host] ssh / ASSISTANT_EDGE_HOST (it needs /dev/cu.usbmodem* or
 #              /dev/ttyACM* THERE). Prints which host is used; FAILS if neither has the robot.
-#              Afterwards it sweeps processes left running from ~/assistant-edge on that host
-#              and FAILS if it found any (see docs/robot-on-another-machine.md)
+#              Before and after the features it sweeps leftovers: processes from ~/assistant-edge
+#              on that host, tagged test ssh clients/tunnels on this PC and their sshd forwards
+#              there. Leftovers after the features FAIL the stage (docs/robot-on-another-machine.md)
 #   h  models  e2e features, tier models: FAILS unless both GPUs and Ollama are available
 #   i  summary PASS/FAIL per stage. Exit 0 = PASS, 1 = FAIL, 3 = INCOMPLETE (a stage opted out)
 #
@@ -324,6 +325,10 @@ stage_hw() {
     fi
     local where rc=0 swept
     where="$(sed -E 's/^robot: //' "$STATE_DIR/robot-host" | tail -1)"
+    # Leftovers of an EARLIER run (e.g. a runner killed with -9) are cleaned first and reported,
+    # so they cannot be mistaken for this run's.
+    printf 'pre-run sweep (an earlier run'"'"'s leftovers):\n'
+    uv run --locked python -m assistant_testing.edge_host sweep
     pytest_features hw || rc=$?
     # Teardown must have stopped everything on the robot's machine; anything still running from
     # ~/assistant-edge is stopped now and fails the stage.

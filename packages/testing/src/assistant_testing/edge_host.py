@@ -6,7 +6,8 @@ machine only by an SSH alias (config `[test.edge_host] ssh`, or the env var ASSI
 defined in ~/.ssh/config, so no address or user name is ever in the repo.
 
     python -m assistant_testing.edge_host check   # which host has the robot; exit 1 if none
-    python -m assistant_testing.edge_host sweep   # stop anything left running from the edge dir
+    python -m assistant_testing.edge_host sweep   # stop leftovers: edge-dir processes, test ssh
+                                                  # clients/tunnels here, their forwards there
 
 A robot attached to this machine is always used first. Everything on the edge host lives in
 `~/assistant-edge/` (see scripts/edge_host_bootstrap.sh). EdgeLink and the daemon API stay on
@@ -18,12 +19,13 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from assistant_core.config import load_config
-from assistant_testing.processes import ssh_argv
+from assistant_testing.processes import TEST_SSH_PATTERN, die_with_parent, ssh_argv
 
 ENV_VAR = "ASSISTANT_EDGE_HOST"
 EDGE_DIR = "~/assistant-edge"
@@ -39,6 +41,9 @@ ROBOT_GLOBS = ("/dev/ttyACM*", "/dev/cu.usbmodem*")
 _SWEEP_PATTERN = "[/]assistant-edge/(daemon|src)/"
 """pgrep/pkill -f pattern (an extended regex on macOS and Linux) for processes run from the edge
 dir; `[/]` keeps it from matching the shell that runs it."""
+REVERSE_PORTS = range(47000, 48000)
+"""Edge-host loopback ports for `ssh -R` tunnels (EdgeLink). A listener in this range owned by
+sshd is a test tunnel, so the sweep can find one a crashed runner left behind."""
 
 
 @dataclass(frozen=True)
@@ -55,16 +60,23 @@ class EdgeHost:
     def label(self) -> str:
         return f"edge host {self.ssh!r} (over SSH)" if self.ssh else "this machine"
 
-    def sh(self, script: str) -> list[str]:
-        """argv that runs the POSIX sh `script` on the edge host."""
+    def sh(self, script: str, *, tag: bool = True) -> list[str]:
+        """argv that runs the POSIX sh `script` on the edge host (ssh tagged as a test run)."""
         if self.ssh is None:
             return ["/bin/sh", "-c", script]
-        return ssh_argv(self.ssh, script)
+        return ssh_argv(self.ssh, script, tag=tag)
 
-    def run(self, script: str, timeout_s: float = 60.0) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, script: str, timeout_s: float = 60.0, *, tag: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         """Run `script` there and return its result (stdout and stderr captured)."""
         return subprocess.run(
-            self.sh(script), capture_output=True, text=True, timeout=timeout_s, check=False
+            self.sh(script, tag=tag),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+            preexec_fn=die_with_parent(),
         )
 
 
@@ -107,21 +119,85 @@ def robot_device(host: EdgeHost) -> str | None:
     return done.stdout.strip() or None if done.returncode == 0 else None
 
 
+def _local_test_ssh() -> list[str]:
+    """ssh clients and tunnels of any test run still alive on this machine ("pid argv")."""
+    done = subprocess.run(
+        ["pgrep", "-af", TEST_SSH_PATTERN], capture_output=True, text=True, check=False
+    )
+    return [line for line in done.stdout.splitlines() if line.strip()]
+
+
+_FORWARDS = (
+    'lsof -nP -a -u "$(id -un)" -c sshd -iTCP:{lo}-{hi} -sTCP:LISTEN 2>/dev/null'
+    " | awk 'NR > 1 {{print $2, $1, $9}}' | sort -u"
+)
+
+
+def _edge_forwards(host: EdgeHost) -> list[str]:
+    """sshd listeners for test `ssh -R` tunnels on the edge host ("pid sshd addr:port")."""
+    if host.ssh is None:
+        return []
+    lo, hi = REVERSE_PORTS.start, REVERSE_PORTS.stop - 1
+    done = host.run(_FORWARDS.format(lo=lo, hi=hi), timeout_s=30, tag=False)
+    return [line for line in done.stdout.splitlines() if line.strip()]
+
+
+def _kill_local(lines: list[str]) -> None:
+    pids = [int(line.split()[0]) for line in lines]
+    for sig in ("TERM", "KILL"):
+        alive = [pid for pid in pids if _alive(pid)]
+        if not alive:
+            return
+        subprocess.run(["kill", f"-{sig}", *map(str, alive)], capture_output=True, check=False)
+        time.sleep(2)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def sweep(host: EdgeHost) -> list[str]:
-    """Stop every process still running from the edge dir; return what was found."""
+    """Stop and return every leftover of a test run, wherever it is:
+
+    - processes still running from the edge dir on the edge host;
+    - tagged ssh clients and tunnels on this machine (`-o SetEnv=ASSISTANT_TEST_RUN=...`);
+    - sshd listeners for test `ssh -R` tunnels on the edge host (REVERSE_PORTS).
+
+    Its own ssh calls are untagged, so it never finds itself.
+    """
+    found = [f"edge forward: {line}" for line in _edge_forwards(host)]
+    local = _local_test_ssh()
+    found += [f"this machine: {line}" for line in local]
+    _kill_local(local)
     pattern = shlex.quote(_SWEEP_PATTERN)
     script = (
         f"found=$(pgrep -fl {pattern} || true); "
         f'if [ -n "$found" ]; then printf "%s\\n" "$found"; '
         f"pkill -TERM -f {pattern}; sleep 3; pkill -KILL -f {pattern}; fi; true"
     )
-    done = host.run(script, timeout_s=60)
-    return [line for line in done.stdout.splitlines() if line.strip()]
+    done = host.run(script, timeout_s=60, tag=False)
+    found += [f"edge process: {line}" for line in done.stdout.splitlines() if line.strip()]
+    # The forwards close with their ssh client; kill any sshd that still holds one.
+    deadline = time.monotonic() + 10
+    while (forwards := _edge_forwards(host)) and time.monotonic() < deadline:
+        time.sleep(1)
+    if forwards:
+        pids = " ".join(sorted({line.split()[0] for line in forwards}))
+        host.run(f"kill -TERM {pids} 2>/dev/null; sleep 2; kill -KILL {pids} 2>/dev/null; true",
+                 timeout_s=30, tag=False)  # fmt: skip
+        found += [f"edge forward (killed): {line}" for line in forwards]
+    return found
 
 
 def leftovers(host: EdgeHost) -> list[str]:
     """Processes still running from the edge dir (none after a clean teardown)."""
-    done = host.run(f"pgrep -fl {shlex.quote(_SWEEP_PATTERN)} || true", timeout_s=30)
+    done = host.run(f"pgrep -fl {shlex.quote(_SWEEP_PATTERN)} || true", timeout_s=30, tag=False)
     return [line for line in done.stdout.splitlines() if line.strip()]
 
 
@@ -165,8 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         host = resolve(repo_root)
         found = sweep(host)
         for line in found:
-            print(f"stopped leftover on {host.label}: {line}")
-        print(f"sweep: {len(found)} leftover process(es) on {host.label}")
+            print(f"stopped leftover ({host.label}): {line}")
+        print(f"sweep: {len(found)} leftover process(es) (this machine and {host.label})")
         return 0
     print("usage: python -m assistant_testing.edge_host check|sweep", file=sys.stderr)
     return 2
