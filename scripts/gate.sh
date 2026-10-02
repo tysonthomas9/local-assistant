@@ -241,13 +241,14 @@ legacy_source() {
     for candidate in "$MAIN_CHECKOUT/$rel" "$ROOT/$rel"; do
         if [[ -e "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
     done
-    # A clone of a clone: the checkout a local `origin` points to, and its main checkout.
+    # A clone of a clone: the main checkout of the checkout a local `origin` points to (where
+    # the legacy stack lives), else that checkout itself (a worktree may hold a stray copy).
     local origin common
     origin="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
     origin="${origin#file://}"
     if [[ "$origin" == /* && -d "$origin" ]]; then
         common="$(git -C "$origin" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-        for candidate in "$origin/$rel" "${common:+$(dirname "$common")/$rel}"; do
+        for candidate in "${common:+$(dirname "$common")/$rel}" "$origin/$rel"; do
             if [[ -n "$candidate" && -e "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
         done
     fi

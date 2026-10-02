@@ -29,8 +29,9 @@ capabilities and then:
 - **Energy trigger and end of speech** (`--energy-trigger-dbfs`, standing in for a wake-word
   engine and VAD): a few loud frames open a mic window, with the last `PRE_ROLL_MS` of audio
   sent first so the start of the utterance is not lost; it does not fire while speech plays
-  (the speaker's echo would barge in on itself). With `--vad-end-ms`, a window in which speech
-  was heard closes after that much quiet (`MIC-CLOSE reason=vad_end`).
+  nor for `ECHO_TAIL_MS` after (by capture time: the speaker's echo would barge in on
+  itself). With `--vad-end-ms`, a window in which speech was heard closes after that much
+  quiet (`MIC-CLOSE reason=vad_end`).
 - **Recording** (`--record-dir`): each played speech stream is also written to
   `<dir>/stream-<id>.wav` (what the speaker was given) when it is done or flushed (`RECORDED`).
 - **Typed input.** Any other stdin line is sent as `text.input`.
@@ -96,6 +97,11 @@ MIC_STREAM = 0
 PTT_MAX_S = 30.0
 ENERGY_FRAMES = 3
 """Consecutive loud frames that fire the energy trigger."""
+ECHO_TAIL_MS = 1500
+"""The energy trigger stays off this long after a speech stream is done or flushed, by the
+frames' capture time: the speaker still sounds after the body reports it done (the robot's
+audio pipeline buffers up to about 1.2 s) and frames captured during speech may be read late,
+so its own reply would otherwise fire the trigger and cut the turn it ends."""
 MIC_RATE = 16000
 FRAME_MS = 20
 FRAME_BYTES = MIC_RATE * 2 * FRAME_MS // 1000
@@ -147,6 +153,8 @@ class EdgeAgent:
         self.flushed: set[int] = set()
         self.timers = 0
         self._loud = 0
+        self._echo_until_us = 0
+        """Capture time before which the energy trigger stays off (`ECHO_TAIL_MS`)."""
         self._pre_roll: deque[AudioFrame] = deque(maxlen=PRE_ROLL_MS // FRAME_MS)
         self._feeding: asyncio.Task[None] | None = None
         self._recordings: dict[int, tuple[int, bytearray]] = {}
@@ -386,6 +394,7 @@ class EdgeAgent:
         async for event in self.body.audio.playback_events():
             if event.state in ("done", "flushed"):
                 self.speaking.pop(event.stream_id, None)
+                self._echo_until_us = time.monotonic_ns() // 1000 + ECHO_TAIL_MS * 1000
                 self.voiced.discard(event.stream_id)
                 self._save_recording(event.stream_id)
             emit("PLAYBACK", stream=event.stream_id, state=event.state, played_ms=event.played_ms)
@@ -487,8 +496,13 @@ class EdgeAgent:
         level = dbfs(frame.pcm)
         threshold = self.options.energy_trigger_dbfs
         if self.window is None and threshold is not None and not self.muted:
-            # Not while speech plays: the speaker's own echo would trigger a barge-in.
-            loud = level > threshold and not self.speaking
+            # Not while speech plays, nor its tail: the speaker's own echo would trigger a
+            # barge-in.
+            loud = (
+                level > threshold
+                and not self.speaking
+                and frame.capture_ts_us >= self._echo_until_us
+            )
             self._loud = self._loud + 1 if loud else 0
             self._pre_roll.append(frame)
             if self._loud >= ENERGY_FRAMES:
