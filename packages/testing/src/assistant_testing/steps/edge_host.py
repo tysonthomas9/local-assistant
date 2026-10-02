@@ -248,8 +248,15 @@ async def ensure_reachy_daemon(ctx: ScenarioContext, ready_within_s: float = 120
     return ctx.state["daemon_url"]
 
 
+async def _rest_before_daemon_stops(host: eh.EdgeHost) -> None:
+    if rested := await asyncio.to_thread(eh.rest_robot, host):
+        print(f"robot put to rest before the daemon stopped: {rested}")
+
+
 async def _start_daemon(ctx: ScenarioContext, host: eh.EdgeHost, ready_within_s: float) -> None:
     ready = rf"Uvicorn running on http://127\.0\.0\.1:{DAEMON_PORT}"
+    # Whatever ends the scenario: the motors are disabled before the daemon stops.
+    ctx.processes.before_stop[DAEMON] = lambda: _rest_before_daemon_stops(host)
     if host.ssh is None:
         await ctx.processes.start(
             DAEMON,
@@ -438,6 +445,7 @@ async def stop_reachy_daemon(ctx: ScenarioContext) -> None:
     """Stop the daemon this scenario started (SIGTERM): it shuts down cleanly, stops answering."""
     url = _daemon_url(ctx)
     daemon: ManagedProcess = ctx.processes.get(DAEMON)
+    await _rest_before_daemon_stops(host_of(ctx))
     await daemon.stop(grace_s=20)
     if "Daemon stopped successfully" not in daemon.output:
         raise AssertionError(f"daemon did not report a clean stop:\n{daemon.output[-3000:]}")
@@ -450,15 +458,31 @@ async def stop_reachy_daemon(ctx: ScenarioContext) -> None:
 
 @step("edge_host_clean")
 async def edge_host_clean(ctx: ScenarioContext) -> None:
-    """Stop what this scenario runs on the robot's machine; then nothing from ~/assistant-edge
-    may still be running there (no orphans left by the SSH launcher)."""
+    """Stop what this scenario runs on the robot's machine, the daemon last (so the body can
+    put the robot to rest through it); the motors must then be disabled, and nothing from
+    ~/assistant-edge may still be running there (no orphans left by the SSH launcher).
+
+    Motors left enabled are a failure, and the robot is put to rest (SDK `goto_sleep`, torque
+    off) before the daemon stops: their torque outlives the daemon and would start the next
+    scenario awake."""
     host = host_of(ctx)
-    for proc in ctx.processes.processes:
-        if isinstance(proc, RemoteProcess) or proc.name == DAEMON:
+    procs = [
+        proc
+        for proc in reversed(ctx.processes.processes)
+        if isinstance(proc, RemoteProcess) or proc.name == DAEMON
+    ]
+    for proc in procs:
+        if proc.name != DAEMON:
+            await proc.stop()
+    rested = await asyncio.to_thread(eh.rest_robot, host)
+    for proc in procs:
+        if proc.name == DAEMON:
             await proc.stop()
     left = await asyncio.to_thread(eh.leftovers, host)
     if left:
         raise AssertionError(f"still running on {host.label}: {left}")
+    if rested:
+        raise AssertionError(f"the scenario left the motors enabled (put to rest: {rested})")
 
 
 # ---------------------------------------------------------------- EdgeLink across machines

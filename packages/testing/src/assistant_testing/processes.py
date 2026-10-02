@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -367,12 +367,14 @@ class RemoteProcess(ManagedProcess):
 
 
 class ProcessGroup:
-    """All processes one scenario started. `stop_all` stops them in reverse start order."""
+    """All processes one scenario started. `stop_all` stops them in reverse start order,
+    running a process's `before_stop` hook (if any) just before stopping it."""
 
     def __init__(self, cwd: Path | None = None, env: Mapping[str, str] | None = None) -> None:
         self.cwd = cwd
         self.env = dict(os.environ if env is None else env)
         self.processes: list[ManagedProcess] = []
+        self.before_stop: dict[str, Callable[[], Awaitable[None]]] = {}
 
     async def start(
         self,
@@ -520,6 +522,12 @@ class ProcessGroup:
     async def stop_all(self) -> None:
         errors: list[BaseException] = []
         for managed in reversed(self.processes):
+            hook = self.before_stop.get(managed.name)
+            if hook is not None and managed.running:
+                try:
+                    await hook()
+                except BaseException as exc:  # the process is stopped all the same
+                    errors.append(exc)
             try:
                 await managed.stop()
             except BaseException as exc:  # keep stopping the others

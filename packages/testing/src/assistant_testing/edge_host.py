@@ -209,8 +209,39 @@ def sweep(host: EdgeHost) -> list[str]:
     return [host.scrub(line) for line in _sweep(host)]
 
 
+DAEMON_API = "http://127.0.0.1:8000/api"
+"""The reachy-mini daemon's REST API on the robot's machine (loopback)."""
+_REST_ROBOT = f"""
+api={DAEMON_API}
+curl -s -m 3 -o /dev/null "$api/daemon/status" || exit 0
+mode=$(curl -s -m 3 "$api/motors/status")
+case "$mode" in *'"disabled"'*) exit 0 ;; esac
+echo "motors were $mode"
+curl -s -m 5 -X POST "$api/move/play/goto_sleep" >/dev/null
+i=0
+while [ $i -lt 30 ]; do
+  sleep 0.5; i=$((i + 1))
+  [ "$(curl -s -m 3 "$api/move/running")" = "[]" ] && break
+done
+curl -s -m 5 -X POST "$api/motors/set_mode/disabled" >/dev/null
+curl -s -m 3 "$api/motors/status"
+"""
+
+
+def rest_robot(host: EdgeHost) -> str | None:
+    """If a daemon answers and the motors are not disabled: the SDK's `goto_sleep`, then
+    torque off (the daemon's own REST API). The motors' torque outlives the daemon, so a robot
+    left awake would start the next run awake. Returns what was done, or None."""
+    done = host.run(_REST_ROBOT, timeout_s=60, tag=False)
+    text = " ".join(done.stdout.split())
+    return text or None
+
+
 def _sweep(host: EdgeHost) -> list[str]:
     found = [f"edge forward: {line}" for line in _edge_forwards(host)]
+    # Before any daemon is stopped: a robot left awake goes back to sleep, torque off.
+    if rested := rest_robot(host):
+        found.append(f"robot put to rest: {rested}")
     local = _local_test_ssh()
     found += [f"this machine: {line}" for line in local]
     _kill_local(local)
