@@ -90,8 +90,11 @@ Python 3.12, and installs them only if they are missing. Everything else goes in
   our ssh is still running and did not log "remote port forwarding failed" (someone else may
   have taken the port first); otherwise another port is tried.
 - **The daemon** runs WITH media (camera, WebRTC) and no wake-up or sleep motion of its own
-  (the robot features' moves do `wake_up()` -> a small move -> `goto_sleep()` -> motors off;
-  see the safety rules in `e2e/features/README.md`), started as
+  (the robot features play Pollen's recorded moves as `wake_up()` -> move -> `goto_sleep()`
+  -> motors off; Pollen's own motions are the one exception to our 10 degree head limit, see
+  the safety rules in `e2e/features/README.md`). The bootstrap caches Pollen's emotions
+  dataset in `~/assistant-edge/hf` (the daemon and the agent run with HF_HUB_OFFLINE=1). It is
+  started as
   `python -m assistant_robot_reachy.daemon` from the synced checkout. That launcher keeps every
   socket on loopback: the API on `127.0.0.1:8000`, the WebRTC signalling server (upstream:
   `0.0.0.0:8443`) on `127.0.0.1:8443`, and no mDNS announcement (upstream: UDP 5353 on every

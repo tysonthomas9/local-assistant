@@ -162,14 +162,15 @@ device) or `reachy` (the real robot through the reachy-mini SDK; runs where the 
 `where: edge_host`, on macOS inside Reachy Edge.app, and needs the daemon). Robot moves are measured from the daemon's
 `/api/state/full`, sampled while the robot moves.
 
-Robot safety: every move WE author is small and slow (a nod at most 10 degrees of head, a
-wiggle at most 20 degrees of antenna), and nothing moves unless the robot is detected. A robot
-at rest (motors off) follows the SDK's standard pattern: `wake_up()` -> our move from neutral
--> back to neutral -> `goto_sleep()` -> motors off. The SDK's own `wake_up()` and
-`goto_sleep()` are the one exception to the 10 degree head limit (they travel between the
-sleep pose and neutral). On any error the arbiter ends with `goto_sleep()` and the motors off.
-`robot_nods` / `antennas_wiggle` measure the move from the neutral pose (the samples between
-the first and last time the head is level); an awake robot moves from, and back to, its pose.
+Robot safety: nothing moves unless the robot is detected. Expressions are Pollen's recorded
+emotion moves (dataset `pollen-robotics/reachy-mini-emotions-library`, cached on the edge host
+by `scripts/edge_host_bootstrap.sh`, played with `ReachyMini.play_move`). A robot at rest
+(motors off) follows the SDK's standard pattern: `wake_up()` -> the move from neutral -> back
+to neutral -> `goto_sleep()` -> motors off. Pollen's own tested motions (`wake_up()`,
+`goto_sleep()`, the recorded moves) are the one exception to our limits; every move WE author
+stays small and slow (head at most 10 degrees, antennas at most 20). On any error the arbiter
+ends with `goto_sleep()` and the motors off. `robot_plays_emotion` measures the move from the
+neutral pose (the samples between the first and last time the head is level).
 
 | Step | Arguments | Does |
 |---|---|---|
@@ -188,9 +189,8 @@ the first and last time the head is level); an awake robot moves from, and back 
 | `barge_in_reported` | `client`, `stream`, `min_played_ms = 0`, `max_played_ms: int?`, `within_s = 5` | The server got vad{start, barge_in, stream_id, played_ms} |
 | `uplink_audio_live` | `client`, `min_frames: int`, `above_dbfs = -100`, `within_s = 10` | At least `min_frames` mic frames reached the server; the loudest is above `above_dbfs` and the level varies (not digital silence) |
 | `uplink_carries_no_audio` | `client`, `seconds: float` | No mic frame from the edge reaches the server for `seconds` |
-| `robot_nods` | `client`, `degrees: float` (at most 10) | express{yes}; measured from neutral, the sampled head pitch peaks between half of `degrees` and `degrees` + 3, and the result is ok |
-| `antennas_wiggle` | `client`, `degrees: float` (at most 20) | express{happy}; measured from neutral, both antennas swing between half of `degrees` and `degrees` + 5, and the result is ok |
-| `robot_back_at_rest` | `head_deg = 2`, `antenna_deg = 5` | After the move (and `goto_sleep()` for a robot that was at rest) the head and antennas are back at their start and the motor mode is what it was |
+| `robot_plays_emotion` | `client`, `emotion`, `move`, `min_head_deg = 0`, `min_antenna_deg = 0` | express{emotion}; the result is ok, the body's MOTION line names Pollen's `move` played to its end, and from neutral the head turned at least `min_head_deg` (largest of roll/pitch/yaw) and an antenna at least `min_antenna_deg` |
+| `robot_back_at_rest` | `head_deg = 2`, `antenna_deg = 5` | After the move (and `goto_sleep()` for a robot that was at rest) the head (yaw relative to the body) and antennas are back at their start and the motor mode is what it was |
 | `robot_camera_frame` | `client`, `slot = 1`, `max_side = 640`, `min_bytes = 2000` | snapshot; the server reassembles a whole JPEG on `slot` that fits `max_side` and matches the result |
 | `edge_body_lost` | `client`, `within_s = 10` | The daemon went away: BODY-ERROR from the agent, error{body_unavailable} at the server |
 | `edge_body_recovers` | `client`, `within_s = 30` | The agent reconnected its body on its own (BODY-OK) |
