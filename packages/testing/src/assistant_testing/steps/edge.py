@@ -539,21 +539,42 @@ async def robot_plays_emotion(
     )
 
 
+def _rest_pose(state: dict[str, Any]) -> dict[str, float]:
+    """Head roll/pitch, head yaw relative to the body, and the antennas, in degrees."""
+    pose = state["head_pose"]
+    return {
+        "roll": math.degrees(pose["roll"]),
+        "pitch": math.degrees(pose["pitch"]),
+        "yaw_to_body": math.degrees(pose["yaw"] - (state.get("body_yaw") or 0.0)),
+        "antenna0": math.degrees(state["antennas_position"][0]),
+        "antenna1": math.degrees(state["antennas_position"][1]),
+    }
+
+
 @step("robot_back_at_rest")
 async def robot_back_at_rest(
     ctx: ScenarioContext, head_deg: float = 2.0, antenna_deg: float = 5.0
 ) -> None:
-    """After the move: head and antennas are back where they started (within `head_deg` /
-    `antenna_deg`), and the motors are in the mode they had before (disabled at rest)."""
+    """After the move the robot is in the pose it started in (for a robot at rest: the sleep
+    pose, after `goto_sleep()`) within `head_deg` / `antenna_deg`, and the motors are in the
+    mode they had before (disabled at rest). The head's yaw is compared relative to the body,
+    since `goto_sleep()` may also turn the body back straight."""
     before = ctx.state.get("robot_start")
     assert before is not None, "no move measured; use robot_plays_emotion first"
     after = await _robot_state(ctx)
-    for key in ("roll", "pitch", "yaw"):
-        diff = abs(math.degrees(after["head_pose"][key] - before["head_pose"][key]))
-        assert diff <= head_deg, f"head {key} is {diff:.1f} deg off its start pose"
-    for i in (0, 1):
-        diff = abs(math.degrees(after["antennas_position"][i] - before["antennas_position"][i]))
-        assert diff <= antenna_deg, f"antenna {i} is {diff:.1f} deg off its start"
+    start, end = _rest_pose(before), _rest_pose(after)
+    print(
+        "pose before -> after (deg): "
+        + ", ".join(f"{k} {start[k]:.1f} -> {end[k]:.1f}" for k in start)
+        + f", body yaw {math.degrees(before.get('body_yaw') or 0):.1f}"
+        + f" -> {math.degrees(after.get('body_yaw') or 0):.1f}"
+    )
+    for key, limit in (("roll", head_deg), ("pitch", head_deg), ("yaw_to_body", head_deg)):
+        diff = abs(end[key] - start[key])
+        assert diff <= limit, f"head {key} is {diff:.1f} deg off its start pose"
+    for key in ("antenna0", "antenna1"):
+        diff = abs(end[key] - start[key])
+        assert diff <= antenna_deg, f"{key} is {diff:.1f} deg off its start"
     assert after.get("control_mode") == before.get("control_mode"), (
         f"motors {after.get('control_mode')!r}, were {before.get('control_mode')!r}"
     )
