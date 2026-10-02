@@ -6,8 +6,10 @@ description: >
   speaking -> idle, and the body shows each state with a small, slow head pose from neutral
   (listening: pitch -5 degrees; thinking: roll 7, pitch -3; speaking: neutral; each reached
   over one second, never more than 10 degrees). A robot at rest wakes up with the SDK's
-  wake_up() for the turn and goes back with goto_sleep() and motors off at idle. Measured by a
-  sampler next to the daemon (not over the tunnel): every pose within 2.5 degrees of its target.
+  wake_up() for the turn (then settles slowly at neutral) and goes back with goto_sleep() and
+  motors off at idle. Measured by a sampler next to the daemon (not over the tunnel): every
+  pose within 4 degrees of its target (the Lite holds small poses with about 3 degrees of
+  steady error) and closer to it than neutral is.
 scenarios:
   - name: attention poses follow a real turn and the robot goes back to rest
     steps:

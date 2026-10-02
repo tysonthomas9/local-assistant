@@ -520,15 +520,16 @@ async def robot_pose_follows(
     client: str,
     text: str,
     states: list[str],
-    tolerance_deg: float = 2.5,
+    tolerance_deg: float = 4.0,
     max_head_deg: float = 10.0,
     within_s: float = 120.0,
 ) -> None:
     """Type `text` to the agent; its head follows the turn's attention `states` (each a MOTION
     line with the time its pose was reached). A sampler next to the daemon reads the robot's
     state every 50 ms meanwhile: at each pose the head is within `tolerance_deg` of the
-    target (neutral turned by the state's roll/pitch), and it never turns more than
-    `max_head_deg` from neutral. Remembers the pose before (for `robot_back_at_rest`)."""
+    target (neutral turned by the state's roll/pitch) and closer to it than neutral is, and it
+    never turns more than `max_head_deg` from neutral. The Lite holds a small pose with about
+    3 degrees of steady error (servo backlash, measured), hence the 4 degree default. Remembers the pose before (for `robot_back_at_rest`)."""
     _remember_start(ctx, await _robot_state(ctx))
     name = _client_name(client)
     agent = ctx.processes.get(name)
@@ -587,6 +588,12 @@ async def robot_pose_follows(
             f"{turned:.1f} deg from neutral, {error:.1f} deg off the target"
         )
         assert error <= tolerance_deg, f"{move['state']}: {error:.1f} deg off its target pose"
+        commanded = _angle(neutral, target)
+        if commanded > tolerance_deg:  # a head that stayed put must not pass: it turned toward it
+            assert error < commanded, (
+                f"{move['state']}: the head is no closer to its pose ({error:.1f} deg off) than "
+                f"neutral is ({commanded:.1f} deg)"
+            )
     end = moves[-1].get("t_reached", samples[-1]["t"])
     during = [s for s in samples if start <= s["t"] <= end]
     peak = max(_angle(neutral, _matrix(s["head_pose"])) for s in during)
