@@ -100,7 +100,7 @@ device id. Messages are checked by containment: the listed `fields` must be in t
 | Step | Arguments | Does |
 |---|---|---|
 | `start_link_server` | `accept_opus: bool = false`, `token: str` | "start the link server console" |
-| `start_link_client` | `id: str`, `token: str?`, `proto: str?`, `opus: bool = false`, `speak_text: bool = false`, `wait: bool = true` | "start a link client "<id>" [with token] [with proto]"; waits for its welcome unless `wait: false` |
+| `start_link_client` | `id: str`, `token: str?`, `proto: str?`, `opus: bool = false`, `speak_text: bool = false`, `wait: bool = true`, `where: pc \| edge_host = pc` | "start a link client "<id>" [with token] [with proto]"; waits for its welcome unless `wait: false`. `where: edge_host` runs it on the robot's machine (see below) |
 | `server_connected` | `client: str`, `fields: map?`, `within_s = 5` | The server accepted the client's hello (containing `fields`) |
 | `client_sends` | `client`, `type`, `fields: map?` | "client "<id>" sends <type> <fields>" |
 | `server_receives` | `type`, `client: str?`, `fields: map?`, `within_s = 5` | "the server receives <type>" |
@@ -128,5 +128,25 @@ device id. Messages are checked by containment: the listed `fields` must be in t
 | `client_reconnects_within` | `client`, `seconds: float` | "client "<id>" reconnects within <s> s": a new welcome and a new server session |
 | `client_retries_with_backoff` | `client`, `min_retries = 1` | Every printed retry delay is 0.5 s doubling to 10 s, within ±20 % jitter |
 | `wait` | `seconds: float` | Lets real time pass |
+
+### The robot's machine (`steps/edge_host.py`)
+
+The robot may be plugged into another machine, the **edge host**, reached by an SSH alias
+(`[test.edge_host] ssh` in `config/assistant.toml`, or `ASSISTANT_EDGE_HOST`); a robot attached
+to this PC is always used first. Processes started there run through SSH but behave like local
+ones: their output streams back, steps type into them, `kill_process` signals reach the
+remote process group, and teardown stops them. The daemon API (`ssh -L`) and EdgeLink
+(`ssh -R`) stay on 127.0.0.1 at both ends. See `docs/robot-on-another-machine.md`.
+
+| Step | Arguments | Does |
+|---|---|---|
+| `robot_host_found` | none | Picks the machine with the robot and prints it; fails (never skips) if neither this PC nor the edge host has its USB serial device |
+| `edge_host_bootstrapped` | `reachy_mini: str` | Runs `scripts/edge_host_bootstrap.sh` there (installs once, then only validates) and checks the pinned reachy-mini version and the robot device |
+| `code_synced_to_edge_host` | none | `git push`es this checkout's HEAD to the edge host over SSH, checks it out in `~/assistant-edge/src` and `uv sync`s only the edge packages |
+| `start_reachy_daemon` | `ready_within_s = 90` | Starts the real reachy-mini daemon there (API on 127.0.0.1, no media, no wake-up/sleep motion); fails if a daemon it did not start already answers |
+| `daemon_status_is` | `state = running`, `version: str?` | `GET /api/daemon/status` (through the tunnel): state, backend ready, no error |
+| `robot_state_read` | `control_mode: str?` | `GET /api/state/full`: head pose, body yaw, both antennas (and the motor mode) |
+| `stop_reachy_daemon` | none | SIGTERM; the daemon reports a clean stop and stops answering |
+| `edge_host_clean` | none | Stops this scenario's processes on the edge host; nothing from `~/assistant-edge` may still run there |
 
 Later tasks add `start` (brain), `start_edge`, `expect_message` and the robot and model steps.

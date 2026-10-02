@@ -2,13 +2,19 @@
 
 Each process runs in its own session (process group), so stopping it also stops anything it
 spawned. `ProcessGroup.stop_all` is called by the feature runner's teardown, whatever happens.
+
+`ProcessGroup.start(..., ssh="alias")` runs the process on another machine (the edge host the
+robot is plugged into) through SSH instead: the same object streams its output back, takes
+stdin, is signalled (STOP/CONT/KILL reach the remote process group) and is stopped in teardown.
 """
 
 import asyncio
 import contextlib
 import os
 import re
+import shlex
 import signal
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -163,6 +169,141 @@ class ManagedProcess:
         return self.proc.returncode
 
 
+REMOTE_PGID_MARK = "@@edge-pgid "
+"""First line a remote process prints (from the launcher, before exec): its process group."""
+
+_REMOTE_LAUNCHER = (
+    "use POSIX (); POSIX::setsid(); $| = 1; "
+    'print "' + REMOTE_PGID_MARK.replace("@", "\\@") + '", getpgrp(), "\\n"; '
+    'exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!\\n";'
+)
+"""Perl (present on macOS and Linux): new session, report the process group, exec argv."""
+
+
+def sh_word(arg: str) -> str:
+    """Quote one argument for a POSIX shell; a leading `~/` stays relative to $HOME."""
+    if arg == "~":
+        return '"$HOME"'
+    if arg.startswith("~/"):
+        return '"$HOME"/' + shlex.quote(arg[2:])
+    return shlex.quote(arg)
+
+
+def ssh_argv(ssh: str, script: str, *, tty_free: bool = True) -> list[str]:
+    """argv that runs the POSIX sh `script` on `ssh` (an alias from ~/.ssh/config).
+
+    The remote login shell may be zsh, so the script always runs under /bin/sh.
+    """
+    argv = ["ssh", "-o", "BatchMode=yes"]
+    if tty_free:
+        argv.append("-T")
+    return [*argv, ssh, "exec /bin/sh -c " + shlex.quote(script)]
+
+
+def remote_command(
+    argv: Sequence[str], *, cwd: str | None = None, env: Mapping[str, str] | None = None
+) -> str:
+    """The sh script that launches `argv` remotely in its own process group."""
+    env_words = [f"{k}={sh_word(v)}" for k, v in (env or {}).items()]
+    words = " ".join(sh_word(a) for a in argv)
+    cd = f"cd {sh_word(cwd)} || exit 97; " if cwd else ""
+    launcher = shlex.quote(_REMOTE_LAUNCHER)
+    return f"{cd}exec /usr/bin/env {' '.join(env_words)} perl -e {launcher} -- {words}"
+
+
+@dataclass
+class RemoteProcess(ManagedProcess):
+    """A process on the edge host, run through `ssh`; `proc` is the local ssh client.
+
+    Signals and stop go to the remote process group (`kill -SIG -- -pgid` over SSH).
+    """
+
+    ssh: str = ""
+    command: tuple[str, ...] = ()
+    remote_cwd: str | None = None
+    remote_env: dict[str, str] | None = None
+    remote_pgid: int | None = None
+    _pgid_known: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def _read(self) -> None:
+        stream = self.proc.stdout
+        if stream is None:
+            return
+        while raw := await stream.readline():
+            line = raw.decode(errors="replace").rstrip("\n")
+            if self.remote_pgid is None and line.startswith(REMOTE_PGID_MARK):
+                self.remote_pgid = int(line.removeprefix(REMOTE_PGID_MARK))
+                self._pgid_known.set()
+                continue
+            self.lines.append(line)
+            self._new_line.set()
+        self._new_line.set()
+        self._pgid_known.set()
+
+    async def wait_started(self, timeout_s: float) -> None:
+        """Wait until the remote launcher reported the process group."""
+        try:
+            await asyncio.wait_for(self._pgid_known.wait(), timeout_s)
+        except TimeoutError:
+            raise TimeoutError(
+                f"{self.name}: no process group from {self.ssh} within {timeout_s}s; "
+                f"output:\n{self.output}"
+            ) from None
+        if self.remote_pgid is None:
+            raise RuntimeError(
+                f"{self.name}: could not start on {self.ssh} (ssh exit "
+                f"{self.proc.returncode}); output:\n{self.output}"
+            )
+
+    def _kill_argv(self, *signals: str) -> list[str]:
+        pgid = self.remote_pgid
+        script = "; ".join(f"kill -{sig} -- -{pgid} 2>/dev/null" for sig in signals) + "; true"
+        return ssh_argv(self.ssh, script)
+
+    def send_signal(self, sig: signal.Signals) -> None:
+        """Send a real signal to the remote process group (SIGKILL, SIGSTOP, SIGCONT, ...)."""
+        if self.remote_pgid is None:
+            raise RuntimeError(f"{self.name}: remote process group unknown")
+        name = sig.name.removeprefix("SIG")
+        done = subprocess.run(self._kill_argv(name), capture_output=True, text=True, timeout=30)
+        if done.returncode != 0:
+            raise RuntimeError(f"kill -{name} on {self.ssh} failed: {done.stderr.strip()}")
+
+    async def _remote_kill(self, *signals: str) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            *self._kill_argv(*signals),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            await asyncio.wait_for(proc.wait(), 30)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+
+    async def stop(self, grace_s: float = 10.0) -> int | None:
+        """SIGTERM the remote group, SIGKILL it after `grace_s`; then end the ssh client."""
+        if self.remote_pgid is not None:
+            if self.running:
+                await self._remote_kill("TERM", "CONT")
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self.proc.wait(), grace_s)
+            await self._remote_kill("KILL")  # stragglers of the group, always
+        if self.running:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(self.proc.wait(), 5)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                await self.proc.wait()
+        if self._reader is not None:
+            await self._reader
+        return self.proc.returncode
+
+
 class ProcessGroup:
     """All processes one scenario started. `stop_all` stops them in reverse start order."""
 
@@ -181,8 +322,18 @@ class ProcessGroup:
         ready_line: str | None = None,
         ready_timeout: float = 30.0,
         stdin: bool = False,
+        ssh: str | None = None,
+        remote_cwd: str | None = None,
     ) -> ManagedProcess:
-        """Start a process. With `stdin=True` steps can type into it (`write_line`)."""
+        """Start a process. With `stdin=True` steps can type into it (`write_line`).
+
+        With `ssh` (an alias from ~/.ssh/config) it runs on that host instead: `argv`, `env`
+        (only these variables) and `remote_cwd` (`~/...` allowed) apply there.
+        """
+        if ssh is not None:
+            return await self._start_remote(
+                name, argv, ssh, env, remote_cwd, ready_line, ready_timeout, stdin
+            )
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
@@ -201,6 +352,42 @@ class ProcessGroup:
         )
         managed.start_reader()
         self.processes.append(managed)
+        if ready_line is not None:
+            await managed.wait_for_line(ready_line, ready_timeout)
+        return managed
+
+    async def _start_remote(
+        self,
+        name: str,
+        argv: Sequence[str],
+        ssh: str,
+        env: Mapping[str, str] | None,
+        remote_cwd: str | None,
+        ready_line: str | None,
+        ready_timeout: float,
+        stdin: bool,
+    ) -> ManagedProcess:
+        local = ssh_argv(ssh, remote_command(argv, cwd=remote_cwd, env=env))
+        proc = await asyncio.create_subprocess_exec(
+            *local,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
+            env=self.env,
+            start_new_session=True,
+        )
+        managed = RemoteProcess(
+            name=name,
+            argv=tuple(local),
+            proc=proc,
+            ssh=ssh,
+            command=tuple(argv),
+            remote_cwd=remote_cwd,
+            remote_env=dict(env) if env is not None else None,
+        )
+        managed.start_reader()
+        self.processes.append(managed)
+        await managed.wait_started(30)
         if ready_line is not None:
             await managed.wait_for_line(ready_line, ready_timeout)
         return managed
@@ -233,6 +420,17 @@ class ProcessGroup:
         old = self.get(name)
         if old.running:
             raise RuntimeError(f"{name} is still running (pid {old.pid}); kill or stop it first")
+        if isinstance(old, RemoteProcess):
+            return await self.start(
+                name,
+                old.command,
+                env=old.remote_env,
+                ready_line=ready_line,
+                ready_timeout=ready_timeout,
+                stdin=old.proc.stdin is not None,
+                ssh=old.ssh,
+                remote_cwd=old.remote_cwd,
+            )
         return await self.start(
             name,
             old.argv,

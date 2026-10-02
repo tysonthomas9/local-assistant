@@ -1,0 +1,55 @@
+feature: The robot's machine is ready for the robot tests
+tier: hw
+description: >
+  The real Reachy Mini may be plugged into another machine (the edge host, reached by an SSH
+  alias) instead of this PC; a robot attached to this PC is used first. The edge host is
+  bootstrapped (or validated) with scripts/edge_host_bootstrap.sh, gets the exact commit under
+  test by git push over SSH and `uv sync`s the edge packages. The real reachy-mini daemon is
+  started there with its API on 127.0.0.1, read through an SSH tunnel, and stopped again; the
+  robot does not move (motors stay disabled). A real EdgeLink client then runs on the edge
+  host and talks to a link server on this PC through an `ssh -R` tunnel, loopback on both ends.
+scenarios:
+  - name: bootstrap, start the daemon, read the robot, stop the daemon
+    steps:
+      - robot_host_found
+      - edge_host_bootstrapped: {reachy_mini: "1.10.0"}
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - daemon_status_is: {state: running, version: "1.10.0"}
+      - robot_state_read: {control_mode: disabled}
+      - stop_reachy_daemon
+      - edge_host_clean
+
+  - name: an edge-host link client talks to the PC's link server through an SSH tunnel
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_link_server
+      - start_link_client: {id: lite, where: edge_host}
+      - server_connected: {client: lite}
+      - client_sends: {client: lite, type: wake, fields: {word: hey jarvis, score: 0.9}}
+      - server_receives: {client: lite, type: wake, fields: {word: hey jarvis}}
+      - server_sends: {client: lite, type: attention, fields: {state: listening}}
+      - client_receives: {client: lite, type: attention, fields: {state: listening}}
+      - client_sends_frame: {client: lite, kind: mic_pcm, bytes: 3200}
+      - server_receives_frame: {client: lite, kind: mic_pcm, bytes: 3200}
+      - edge_host_clean
+
+  - name: real signals reach the edge-host process; killed, it is gone and restarts
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_link_server
+      - start_link_client: {id: lite, where: edge_host}
+      - kill_process: {process: lite, signal_name: STOP}
+      # really frozen on the edge host: the heartbeat drops it (10-17 s plus a 2 s close timeout)
+      - server_disconnects: {client: lite, within_s: 20, not_before_s: 10}
+      - kill_process: {process: lite, signal_name: CONT}
+      - client_reconnects_within: {client: lite, seconds: 12}
+      - client_sends: {client: lite, type: text.input, fields: {text: still here}}
+      - server_receives: {client: lite, type: text.input, fields: {text: still here}}
+      - kill_process: {process: lite}
+      - server_disconnects: {client: lite, within_s: 10}
+      - restart_process: {process: lite}
+      - server_connected: {client: lite, within_s: 30}
+      - edge_host_clean

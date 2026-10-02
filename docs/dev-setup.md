@@ -41,3 +41,6 @@ the script). Gitignored legacy resources (`.venv`, `reachy_mini_conversation_app
 `third_party`, `voices`, `local_backend/models`) are symlinked into the clone from the main
 checkout, so the legacy suite runs against the real legacy environment. Exit codes: 0 pass,
 1 fail, 3 incomplete (`GATE_NO_HW=1` or `GATE_NO_MODELS=1`).
+
+The hw stage uses the robot wherever it is plugged in. If it is attached to another machine
+(e.g. a Mac), see [Running robot tests with the robot on another machine](robot-on-another-machine.md).

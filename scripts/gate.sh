@@ -17,8 +17,12 @@
 #              running stack, SearXNG, ...) is missing. A failing legacy test is rerun ONCE:
 #              a pass is reported as FLAKY, a second failure FAILS. SKIP only when the legacy
 #              venv is missing.
-#   g  hw      e2e features, tier hw: FAILS if the robot is missing (/dev/ttyACM0; S3 adds the
-#              daemon check)
+#   g  hw      e2e features, tier hw. The robot is used where it is plugged in: on this PC
+#              (/dev/ttyACM*) if attached here, else on the edge host reached by the SSH alias in
+#              config [test.edge_host] ssh / ASSISTANT_EDGE_HOST (it needs /dev/cu.usbmodem* or
+#              /dev/ttyACM* THERE). Prints which host is used; FAILS if neither has the robot.
+#              Afterwards it sweeps processes left running from ~/assistant-edge on that host
+#              and FAILS if it found any (see docs/robot-on-another-machine.md)
 #   h  models  e2e features, tier models: FAILS unless both GPUs and Ollama are available
 #   i  summary PASS/FAIL per stage. Exit 0 = PASS, 1 = FAIL, 3 = INCOMPLETE (a stage opted out)
 #
@@ -292,14 +296,11 @@ stage_legacy() {
     return "$rc"
 }
 
+# robot_present: a robot on this PC, else one on the configured edge host (over SSH). Prints
+# which host is used (assistant_testing.edge_host check).
 robot_present() {
-    # S1: the robot counts as present when its USB serial device exists. S3 adds the daemon check.
-    if [[ -e /dev/ttyACM0 ]]; then
-        printf 'robot: /dev/ttyACM0 present (daemon check arrives with S3)\n'
-        return 0
-    fi
-    printf 'robot: /dev/ttyACM0 missing\n'
-    return 1
+    uv run --locked python -m assistant_testing.edge_host check | tee "$STATE_DIR/robot-host"
+    return "${PIPESTATUS[0]}"
 }
 
 models_present() {
@@ -318,10 +319,21 @@ models_present() {
 
 stage_hw() {
     if ! robot_present; then
-        note "robot not found: no /dev/ttyACM0 (GATE_NO_HW=1 to skip)"
+        note "$(tail -1 "$STATE_DIR/robot-host" 2>/dev/null) (GATE_NO_HW=1 to skip)"
         return 1
     fi
-    pytest_features hw
+    local where rc=0 swept
+    where="$(sed -E 's/^robot: //' "$STATE_DIR/robot-host" | tail -1)"
+    pytest_features hw || rc=$?
+    # Teardown must have stopped everything on the robot's machine; anything still running from
+    # ~/assistant-edge is stopped now and fails the stage.
+    swept="$(uv run --locked python -m assistant_testing.edge_host sweep | tee /dev/stderr | tail -1)"
+    note "$(cat "$STATE_DIR/note" 2>/dev/null); robot $where"
+    if [[ "$swept" != "sweep: 0 "* ]]; then
+        note "$(cat "$STATE_DIR/note"); LEFTOVERS: $swept"
+        return 1
+    fi
+    return "$rc"
 }
 
 stage_models() {

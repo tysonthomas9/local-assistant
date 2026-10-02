@@ -69,3 +69,10 @@ expressions = "config/bodies/reachy.toml"
 otlp = ""
 log_level = "info"
 capture_content = false
+
+[test.edge_host]
+# The robot tests (tier hw) run the device side on the machine the robot is plugged into.
+# A robot attached to this machine is always used first; otherwise the tests reach the edge host
+# through this SSH alias (define it in ~/.ssh/config; never put addresses or user names here).
+# The env var ASSISTANT_EDGE_HOST overrides it. See docs/robot-on-another-machine.md.
+ssh = "reachy-mac"

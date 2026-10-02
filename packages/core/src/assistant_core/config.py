@@ -151,6 +151,18 @@ class ObservabilityConfig(Section):
     capture_content: bool = False
 
 
+class EdgeHostConfig(Section):
+    ssh: str = ""
+    """SSH alias (from ~/.ssh/config) of the machine the robot is plugged into, when it is not
+    this one. Empty: the robot is local. The env var ASSISTANT_EDGE_HOST overrides it."""
+
+
+class HarnessConfig(Section):
+    """`[test]`: test-harness settings (read by assistant_testing, never by the runtime)."""
+
+    edge_host: EdgeHostConfig = Field(default_factory=EdgeHostConfig)
+
+
 class AssistantConfig(BaseSettings):
     """The whole runtime config. Build it with `load_config`."""
 
@@ -175,6 +187,7 @@ class AssistantConfig(BaseSettings):
     skills: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Per-skill settings, e.g. `[skills.weather]`; each skill validates its own table."""
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    test: HarnessConfig = Field(default_factory=HarnessConfig)
 
     @classmethod
     def settings_customise_sources(

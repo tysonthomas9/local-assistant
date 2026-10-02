@@ -22,9 +22,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from assistant_contracts.frames import FrameKind
+from assistant_testing import edge_host
 from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.registry import step
 from assistant_testing.processes import ManagedProcess
+from assistant_testing.steps import edge_host as edge_host_steps
 
 SERVER = "server"
 DEV_TOKEN = "e2e-dev-token"
@@ -175,21 +177,44 @@ async def start_link_client(
     opus: bool = False,
     speak_text: bool = False,
     wait: bool = True,
+    where: Literal["pc", "edge_host"] = "pc",
 ) -> None:
     """Start a link client console (a real LinkClient) that dials the server.
 
     `wait` (default) waits for its welcome; with `wait: false` the scenario checks it.
+    `where: edge_host` runs it on the robot's machine from the synced checkout (see
+    `code_synced_to_edge_host`), dialling 127.0.0.1 there through an `ssh -R` tunnel.
     """
     link = _link(ctx)
-    argv = [sys.executable, "-m", "assistant_link.client", "--console", "--device-id", id]
-    argv += ["--url", f"ws://127.0.0.1:{link.port}/edge/v1", "--token", token or link.token]
+    port, python, ssh = link.port, sys.executable, None
+    if where == "edge_host":
+        host = edge_host_steps.host_of(ctx)
+        if host.ssh is not None:
+            if ctx.state.get("edge_sha") is None:
+                raise AssertionError(
+                    "code not synced to the edge host; use code_synced_to_edge_host"
+                )
+            port = await edge_host_steps.reverse_tunnel(ctx, link.port)
+            python, ssh = f"{edge_host.REMOTE_VENV}/bin/python", host.ssh
+    argv = [python, "-m", "assistant_link.client", "--console", "--device-id", id]
+    argv += ["--url", f"ws://127.0.0.1:{port}/edge/v1", "--token", token or link.token]
     if proto is not None:
         argv += ["--proto", proto]
     if opus:
         argv.append("--opus")
     if speak_text:
         argv.append("--speak-text")
-    await ctx.processes.start(_client_name(id), argv, stdin=True)
+    if ssh is not None:
+        await ctx.processes.start(
+            _client_name(id),
+            argv,
+            stdin=True,
+            ssh=ssh,
+            remote_cwd=f"{edge_host.EDGE_DIR}/src",
+            env={"PYTHONUNBUFFERED": "1"},
+        )
+    else:
+        await ctx.processes.start(_client_name(id), argv, stdin=True)
     if wait:
         await _expect(ctx, _client_name(id), {"WELCOME"}, 30, what="WELCOME")
 
