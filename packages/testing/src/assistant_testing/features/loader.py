@@ -5,7 +5,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -81,7 +81,8 @@ def _expand(
 class _FeatureSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     feature: str = Field(min_length=1)
-    tier: Tier
+    tier: Tier | Annotated[list[Tier], Field(min_length=1)]
+    """One tier, or a list such as `[hw, models]`: the scenarios need all of them."""
     description: str = Field(min_length=1)
     scenarios: list[_ScenarioSpec] = Field(min_length=1)
 
@@ -106,9 +107,15 @@ class Scenario:
 class Feature:
     path: Path
     name: str
-    tier: Tier
+    tiers: tuple[Tier, ...]
+    """Every tier this feature needs; each becomes a pytest marker."""
     description: str
     scenarios: tuple[Scenario, ...]
+
+    @property
+    def tier(self) -> str:
+        """The tier as written: `core`, or `[hw, models]` for several."""
+        return self.tiers[0] if len(self.tiers) == 1 else f"[{', '.join(self.tiers)}]"
 
 
 def _line_of(node: yaml.Node | None, loc: Sequence[int | str]) -> int:
@@ -188,7 +195,7 @@ def load_feature(path: Path) -> Feature:
     return Feature(
         path=path,
         name=spec.feature,
-        tier=spec.tier,
+        tiers=tuple(dict.fromkeys([spec.tier] if isinstance(spec.tier, str) else spec.tier)),
         description=spec.description,
         scenarios=tuple(scenarios),
     )

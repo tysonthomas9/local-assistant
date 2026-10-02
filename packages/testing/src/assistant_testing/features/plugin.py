@@ -1,9 +1,9 @@
 """pytest plugin: every scenario in `**/features/**/*.yaml` becomes one test item.
 
 Registered through the `pytest11` entry point, so it is active wherever assistant-testing is
-installed. The feature's `tier` becomes a marker (`core`, `hw` or `models`), so
-`pytest e2e -m hw` runs only the robot features. `--list-features` prints the features and
-their steps without running anything.
+installed. The feature's `tier` becomes a marker (`core`, `hw` or `models`; a list such as
+`[hw, models]` adds each), so `pytest e2e -m hw` runs only the robot features.
+`--list-features` prints the features and their steps without running anything.
 """
 
 import asyncio
@@ -65,7 +65,8 @@ class FeatureFile(pytest.File):
                 self, name=scenario.name, feature=self.feature, scenario=scenario
             )
             item.add_marker("feature")
-            item.add_marker(self.feature.tier)
+            for tier in self.feature.tiers:
+                item.add_marker(tier)
             items.append(item)
         return items
 

@@ -24,7 +24,9 @@
 #              Before and after the features it sweeps leftovers: processes from ~/assistant-edge
 #              on that host, tagged test ssh clients/tunnels on this PC and their sshd forwards
 #              there. Leftovers after the features FAIL the stage (docs/robot-on-another-machine.md)
-#   h  models  e2e features, tier models: FAILS unless both GPUs and Ollama are available
+#              Features with `tier: [hw, models]` run here (they need the models too; with
+#              GATE_NO_MODELS=1 they are left out)
+#   h  models  e2e features, tier models without hw: FAILS unless both GPUs and Ollama are available
 #   i  summary PASS/FAIL per stage. Exit 0 = PASS, 1 = FAIL, 3 = INCOMPLETE (a stage opted out)
 #
 # E2E uses only real devices and the real stack (see e2e/features/README.md).
@@ -97,10 +99,11 @@ run_stage() {
     printf '%s-> %s %s%s\n' "$BOLD" "${RESULT[$id]}" "${NOTE[$id]}" "$RESET"
 }
 
-# pytest_features <marker>: run one tier; "no tests collected" (exit 5) means 0 features.
+# pytest_features <marker expression>: run one tier; "no tests collected" (exit 5) means 0
+# features.
 pytest_features() {
     local marker="$1" out rc passed
-    out="$STATE_DIR/pytest-$marker.log"
+    out="$STATE_DIR/pytest-${marker// /_}.log"
     set +e
     uv run --locked pytest e2e -m "$marker" -v -p no:cacheprovider 2>&1 | tee "$out"
     rc=${PIPESTATUS[0]}
@@ -338,7 +341,10 @@ stage_hw() {
     trap 'uv run --locked python -m assistant_testing.edge_host unlock || true' EXIT
     printf 'pre-run sweep (an earlier run'"'"'s leftovers):\n'
     uv run --locked python -m assistant_testing.edge_host sweep
-    pytest_features hw || rc=$?
+    # `tier: [hw, models]` features run here, under the robot lock and sweeps.
+    local marker="hw"
+    if [[ "${GATE_NO_MODELS:-}" == "1" ]]; then marker="hw and not models"; fi
+    pytest_features "$marker" || rc=$?
     # Teardown must have stopped everything on the robot's machine; anything still running from
     # ~/assistant-edge is stopped now and fails the stage.
     uv run --locked python -m assistant_testing.edge_host sweep | tee "$STATE_DIR/sweep"
@@ -356,7 +362,7 @@ stage_models() {
         note "needs both GPUs and Ollama at $OLLAMA_URL (GATE_NO_MODELS=1 to skip)"
         return 1
     fi
-    pytest_features models
+    pytest_features "models and not hw"
 }
 
 stage_skipped_hw() { note "GATE_NO_HW=1"; return 77; }

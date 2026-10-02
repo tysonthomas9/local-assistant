@@ -68,6 +68,10 @@ class LinkHandler(Protocol):
         """
         ...
 
+    async def on_welcomed(self, conn: Connection) -> None:
+        """The `welcome` is queued: the handler may now send state (attention, timers, ...)."""
+        ...
+
     async def on_message(self, conn: Connection, message: Envelope) -> None: ...
 
     async def on_frame(self, conn: Connection, frame: Frame) -> None: ...
@@ -213,6 +217,7 @@ class LinkServer:
             await previous.close(1000, "replaced by a new connection")
         conn.start()
         await conn.send(welcome)
+        await self.handler.on_welcomed(conn)
         try:
             await conn.receive_loop(
                 lambda m: self.handler.on_message(conn, m),

@@ -257,6 +257,9 @@ class ServerConsole:
             audio=WelcomeAudio(opus=self.accept_opus, speak_text=caps.speak_text),
         )
 
+    async def on_welcomed(self, conn: Connection) -> None:
+        del conn  # the console sends only what is typed
+
     async def on_message(self, conn: Connection, message: Envelope) -> None:
         emit("RECV", dump_message(message), device=conn.device_id, type=message.type)
 
