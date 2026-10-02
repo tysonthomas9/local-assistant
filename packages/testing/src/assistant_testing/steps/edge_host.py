@@ -147,6 +147,8 @@ async def edge_host_bootstrapped(ctx: ScenarioContext, reachy_mini: str) -> None
         raise AssertionError(f"reachy-mini {facts.get('reachy_mini')} there, want {reachy_mini}")
     if facts.get("robot", "none") == "none":
         raise AssertionError(f"bootstrap found no robot device on {host.label}")
+    if facts.get("os") == "Darwin" and facts.get("app") not in ("built", "kept"):
+        raise AssertionError(f"bootstrap did not set up Reachy Edge.app: {facts}")
 
 
 @step("code_synced_to_edge_host")
@@ -257,7 +259,11 @@ async def _start_daemon(ctx: ScenarioContext, host: eh.EdgeHost, ready_within_s:
         return
     if ctx.state.get("edge_sha") is None:
         raise AssertionError("code not synced to the edge host; use code_synced_to_edge_host")
-    argv = [f"{eh.REMOTE_VENV}/bin/python", "-m", DAEMON_MODULE, *DAEMON_ARGS]
+    args = ["-m", DAEMON_MODULE, *DAEMON_ARGS]
+    if await is_mac(host):  # camera and microphone: inside Reachy Edge.app
+        argv = app_argv(DAEMON, args, env=DAEMON_ENV)
+    else:
+        argv = [f"{eh.REMOTE_VENV}/bin/python", *args]
     await ctx.processes.start(
         DAEMON,
         argv,
@@ -295,6 +301,86 @@ async def _daemon_tunnel(ctx: ScenarioContext, host: eh.EdgeHost) -> None:
             await asyncio.sleep(0.3)
     ctx.state["daemon_url"] = url
     print(f"daemon API on {host.label} reached through ssh -L at {url}")
+
+
+# ---------------------------------------------------------------- Reachy Edge.app (macOS)
+
+
+APP_RUN = "~/assistant-edge/src/scripts/edge_app_run.sh"
+"""Runs a module of the synced checkout inside Reachy Edge.app as a per-run LaunchAgent."""
+APP_EXECUTABLE = "Reachy Edge.app/Contents/MacOS/reachy-edge"
+_OS: dict[str | None, str] = {}
+
+
+async def is_mac(host: eh.EdgeHost) -> bool:
+    """Whether the robot's machine runs macOS (asked once per host)."""
+    if host.ssh not in _OS:
+        done = await asyncio.to_thread(host.run, "uname -s", 30)
+        _OS[host.ssh] = done.stdout.strip()
+    return _OS[host.ssh] == "Darwin"
+
+
+def app_argv(
+    name: str, args: list[str], *, env: dict[str, str] | None = None, stdin: bool = False
+) -> list[str]:
+    """argv (run over SSH) that runs `python <args>` inside Reachy Edge.app on a macOS edge
+    host. The app (built by edge_host_bootstrap.sh) is the process macOS holds responsible for
+    the camera and microphone; its output streams back, after an `APP-JOB pid=` line."""
+    argv = ["/bin/sh", APP_RUN, name, *(["--stdin"] if stdin else [])]
+    for key, value in (env or {}).items():
+        argv += ["-e", f"{key}={value}"]
+    return [*argv, "--", *args]
+
+
+def app_job_pgid(proc: ManagedProcess) -> int | None:
+    """The process group of the app job behind `proc` (from its `APP-JOB` line), if any."""
+    for line in proc.lines:
+        if line.startswith("APP-JOB "):
+            fields = dict(f.split("=", 1) for f in line.split()[1:] if "=" in f)
+            pid = fields.get("pid", "")
+            return int(pid) if pid.isdigit() else None
+    return None
+
+
+_RESPONSIBLE = """
+import ctypes, os, subprocess, sys
+lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+lib.responsibility_get_pid_responsible_for_pid.argtypes = [ctypes.c_int]
+def path(pid):
+    buf = ctypes.create_string_buffer(4096)
+    n = lib.proc_pidpath(pid, buf, 4096)
+    return buf.value.decode() if n > 0 else "?"
+pids = subprocess.run(["pgrep", "-g", sys.argv[1]], capture_output=True, text=True).stdout
+for pid in pids.split():
+    rpid = lib.responsibility_get_pid_responsible_for_pid(int(pid))
+    print(pid, path(int(pid)), "->", rpid, path(rpid), sep="\t")
+"""
+
+
+@step("responsible_process_is_app")
+async def responsible_process_is_app(ctx: ScenarioContext, process: str = DAEMON) -> None:
+    """macOS: every process of `process` (`daemon` or `client:<id>`) has Reachy Edge.app as
+    its responsible process, so the app's camera and microphone permission applies (and
+    the shared Python needs none)."""
+    host = host_of(ctx)
+    if not await is_mac(host):
+        print(f"{host.label} is not macOS: no responsible-process rule")
+        return
+    pgid = app_job_pgid(ctx.processes.get(process))
+    if pgid is None:
+        raise AssertionError(f"{process} was not started inside Reachy Edge.app (no APP-JOB line)")
+    python = '"$HOME"/assistant-edge/src/.venv-assistant/bin/python'
+    script = f"{python} -c {shlex.quote(_RESPONSIBLE)} {pgid}"
+    done = await asyncio.to_thread(host.run, script, 30)
+    rows = [host.scrub(line).split("\t") for line in done.stdout.splitlines() if line.strip()]
+    if not rows:
+        raise AssertionError(f"no processes in group {pgid}: {host.scrub(done.stderr)}")
+    for pid, exe, rpid, responsible in rows:
+        print(f"{pid} {exe} -> responsible {rpid} {responsible}")
+        if not responsible.endswith(APP_EXECUTABLE):
+            raise AssertionError(f"{exe} (pid {pid}) is the responsibility of {responsible}")
+    if not any(exe.endswith("python3.12") or "/python" in exe for _, exe, _, _ in rows):
+        raise AssertionError(f"no Python process inside the app job: {rows}")
 
 
 def _daemon_url(ctx: ScenarioContext) -> str:

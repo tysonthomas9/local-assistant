@@ -141,10 +141,11 @@ remote process group, and teardown stops them. The daemon API (`ssh -L`) and Edg
 | Step | Arguments | Does |
 |---|---|---|
 | `robot_host_found` | none | Picks the machine with the robot and prints it; fails (never skips) if neither this PC nor the edge host has its USB serial device |
-| `edge_host_bootstrapped` | `reachy_mini: str` | Runs `scripts/edge_host_bootstrap.sh` there (installs once, then only validates) and checks the pinned reachy-mini version and the robot device |
+| `edge_host_bootstrapped` | `reachy_mini: str` | Runs `scripts/edge_host_bootstrap.sh` there (installs once, then only validates) and checks the pinned reachy-mini version, the robot device and, on macOS, Reachy Edge.app |
 | `code_synced_to_edge_host` | none | `git push`es this checkout's HEAD to the edge host over SSH, checks it out in `~/assistant-edge/src` and `uv sync`s only the edge packages |
-| `start_reachy_daemon` | `ready_within_s = 120` | Starts the real reachy-mini daemon there WITH media (`python -m assistant_robot_reachy.daemon` from the synced checkout: API on 127.0.0.1, WebRTC signalling on 127.0.0.1:8443, no mDNS; no wake-up/sleep motion); fails if a daemon it did not start already answers |
+| `start_reachy_daemon` | `ready_within_s = 120` | Starts the real reachy-mini daemon there WITH media (`python -m assistant_robot_reachy.daemon` from the synced checkout, on macOS inside Reachy Edge.app: API on 127.0.0.1, WebRTC signalling on 127.0.0.1:8443, no mDNS; no wake-up/sleep motion); fails if a daemon it did not start already answers |
 | `reachy_daemon_running` | `ready_within_s = 120` | Reuses a daemon that already answers there, else starts one as above; teardown stops only one it started (the `reachy_daemon` pytest fixture does the same) |
+| `responsible_process_is_app` | `process = daemon` (or `client:<id>`) | macOS: every process of it has Reachy Edge.app as its responsible process (the owner of the camera and microphone permission); no-op elsewhere |
 | `daemon_ports_on_loopback` | `listening: list[int]?` (default 8000, 8443) | `lsof` of the daemon's process group: every socket is on 127.0.0.1 / [::1] at both ends (no `*`, no LAN address, no mDNS 5353) and it LISTENs on 127.0.0.1 at each port |
 | `daemon_status_is` | `state = running`, `version: str?` | `GET /api/daemon/status` (through the tunnel): state, backend ready, no error |
 | `robot_state_read` | `control_mode: str?` | `GET /api/state/full`: head pose, body yaw, both antennas (and the motor mode) |
@@ -158,7 +159,7 @@ process is `client:<id>`, so the link steps above (`server_sends`, `server_recei
 `kill_process`, `restart_process`, `client_reconnects_within`, ...) work on it too. `body` is
 `console` (prints what it would do; its speaker is a real-time playback clock with no sound
 device) or `reachy` (the real robot through the reachy-mini SDK; runs where the robot is,
-`where: edge_host`, and needs the daemon). Robot moves are measured from the daemon's
+`where: edge_host`, on macOS inside Reachy Edge.app, and needs the daemon). Robot moves are measured from the daemon's
 `/api/state/full`, sampled while the robot moves; the arbiter limits a nod to 10 degrees and a
 wiggle to 20, always returns to the start pose and leaves the motors as they were.
 

@@ -52,9 +52,12 @@ EDGE_PACKAGES = ("assistant-edge", "assistant-robot-reachy")
 """What `uv sync` installs on the edge host: the edge/robot packages and their deps only."""
 ROBOT_GLOBS = ("/dev/ttyACM*", "/dev/cu.usbmodem*")
 """Serial devices of a USB-attached Reachy Mini (Linux, macOS)."""
-_SWEEP_PATTERN = "[/]assistant-edge/(daemon|src)/"
+_SWEEP_PATTERN = "[/]assistant-edge/(daemon|src|Reachy Edge[.]app)/"
 """pgrep/pkill -f pattern (an extended regex on macOS and Linux) for processes run from the edge
-dir; `[/]` keeps it from matching the shell that runs it."""
+dir (Reachy Edge.app included); `[/]` keeps it from matching the shell that runs it."""
+APP_JOB_PREFIX = "com.assistant.reachy-edge."
+"""Label prefix of the per-run LaunchAgents that run code inside Reachy Edge.app (macOS)."""
+_APP_JOBS = "launchctl list 2>/dev/null | awk '$3 ~ /^com[.]assistant[.]reachy-edge[.]/ {print $3}'"
 REVERSE_PORTS = range(47000, 48000)
 """Edge-host loopback ports for `ssh -R` tunnels (EdgeLink). A listener in this range owned by
 sshd is a test tunnel, so the sweep can find one a crashed runner left behind."""
@@ -196,7 +199,8 @@ def _alive(pid: int) -> bool:
 def sweep(host: EdgeHost) -> list[str]:
     """Stop and return every leftover of a test run, wherever it is:
 
-    - processes still running from the edge dir on the edge host;
+    - LaunchAgents of Reachy Edge.app jobs on a macOS edge host (unloaded), and processes
+      still running from the edge dir there;
     - tagged ssh clients and tunnels on this machine (`-o SetEnv=ASSISTANT_TEST_RUN=...`);
     - sshd listeners for test `ssh -R` tunnels on the edge host (REVERSE_PORTS).
 
@@ -210,6 +214,14 @@ def _sweep(host: EdgeHost) -> list[str]:
     local = _local_test_ssh()
     found += [f"this machine: {line}" for line in local]
     _kill_local(local)
+    # App jobs first: unloading a LaunchAgent stops its whole process group.
+    jobs = (
+        f'for label in $({_APP_JOBS}); do echo "$label"; '
+        'launchctl bootout "gui/$(id -u)/$label" 2>/dev/null; done; '
+        f'rm -rf "$HOME/assistant-edge/run/{APP_JOB_PREFIX}"*; true'
+    )
+    done = host.run(jobs, timeout_s=60, tag=False)
+    found += [f"edge app job: {line}" for line in done.stdout.splitlines() if line.strip()]
     pattern = shlex.quote(_SWEEP_PATTERN)
     script = (
         f"found=$(pgrep -fl {pattern} || true); "
@@ -231,8 +243,10 @@ def _sweep(host: EdgeHost) -> list[str]:
 
 
 def leftovers(host: EdgeHost) -> list[str]:
-    """Processes still running from the edge dir (none after a clean teardown)."""
-    done = host.run(f"pgrep -fl {shlex.quote(_SWEEP_PATTERN)} || true", timeout_s=30, tag=False)
+    """Processes still running from the edge dir, and app jobs still loaded (none after a
+    clean teardown)."""
+    script = f"pgrep -fl {shlex.quote(_SWEEP_PATTERN)}; {_APP_JOBS}; true"
+    done = host.run(script, timeout_s=30, tag=False)
     return [host.scrub(line) for line in done.stdout.splitlines() if line.strip()]
 
 

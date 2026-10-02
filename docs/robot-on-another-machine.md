@@ -95,14 +95,34 @@ Python 3.12, and installs them only if they are missing. Everything else goes in
   `0.0.0.0:8443`) on `127.0.0.1:8443`, and no mDNS announcement (upstream: UDP 5353 on every
   interface). The hw feature `robot/daemon_connect.yaml` checks it with `lsof`. The PC reads
   the API through an `ssh -L` tunnel.
-- **macOS camera and microphone permission (once).** macOS asks the *responsible* process for
-  camera and microphone access; for anything started over SSH that is `sshd`, which can never
-  be granted, so the camera fails and the microphone records silence. The daemon and the
-  reachy edge agent therefore start through `assistant_robot_reachy.own_permissions`, which
-  makes the venv's Python responsible for itself. The first run shows a prompt on the Mac's
-  screen ("python3.12" would like to access the camera / microphone): someone at the Mac
-  clicks **Allow** once (or enables Python under System Settings > Privacy & Security >
-  Camera and Microphone). Until then the daemon hangs while opening the robot's sound card.
+- **Reachy Edge.app owns the camera and microphone (macOS).** macOS grants camera and
+  microphone access to the *responsible* process of whatever opens them. For anything started
+  over SSH that is `sshd`, which can never be granted, so the camera fails and the microphone
+  records silence. `scripts/edge_host_bootstrap.sh` therefore builds `~/assistant-edge/Reachy
+  Edge.app` (bundle id `com.assistant.reachy-edge`, no Dock icon, usage text "Reachy Mini
+  robot: voice and camera"). Its executable is a small compiled launcher that starts the synced
+  venv's Python with the requested module as a child and stays alive, so the app stays
+  responsible for it. The tests run the daemon and the reachy edge agent inside the app through
+  `scripts/edge_app_run.sh`: a per-run LaunchAgent (`com.assistant.reachy-edge.<run>.<name>.<pid>`)
+  in the logged-in user's GUI session, whose output streams back over SSH and whose stdin is
+  fed through a FIFO. The feature `robot/daemon_connect.yaml` checks that both report Reachy
+  Edge as their responsible process.
+  - **Granting (once).** The first run shows "Reachy Edge would like to access the microphone"
+    and then "... the camera" on the Mac's screen; someone at the Mac clicks **Allow** on both.
+    The user must be logged in at the Mac (the LaunchAgent runs in that session).
+  - **Signed once.** The app is ad-hoc signed and rebuilt only when its launcher source or
+    Info.plist changes (the bootstrap keeps a hash of both); a re-sign changes its code hash and
+    macOS would ask again. Our Python code lives outside the bundle, so code syncs never touch
+    it, and a uv reinstall of Python does not affect the grant.
+  - **Python needs no permission.** The shared uv `python3.12` is never the responsible
+    process; leave it off (or remove it) under Privacy & Security.
+  - **Revoking.** System Settings > Privacy & Security > Microphone (and > Camera): switch off
+    or remove "Reachy Edge". To reset it from a terminal: `tccutil reset Microphone
+    com.assistant.reachy-edge` and `tccutil reset Camera com.assistant.reachy-edge`.
+  - **Leftovers.** The sweep unloads any `com.assistant.reachy-edge.*` LaunchAgent a crashed
+    run left behind.
+- **Xcode command-line tools** are needed once on the Mac to compile the launcher
+  (`xcode-select --install`); the bootstrap fails with that hint if they are missing.
 - **EdgeLink** stays on `127.0.0.1` on the PC. A process on the edge host reaches it through an
   `ssh -R` tunnel to `127.0.0.1` there. Plain `ws://` never crosses the LAN. S7 replaces the
   tunnel with TLS and pairing.

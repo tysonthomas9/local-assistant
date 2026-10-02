@@ -7,7 +7,9 @@ description: >
   address, no mDNS. The real edge agent with the reachy body starts there, connects to the
   robot through the reachy-mini SDK (audio straight from the robot's XVF3800 sound card, whose
   hardware echo canceller is on; camera frames from the daemon) and dials the link server on
-  this PC. Nothing moves: the motors stay disabled. Without the daemon (no robot) the reachy
+  this PC. On a macOS edge host both run inside "Reachy Edge.app", which macOS holds
+  responsible for them, so the app's one-time microphone and camera grant applies (the shared
+  Python needs no permission). Nothing moves: the motors stay disabled. Without the daemon (no robot) the reachy
   body refuses to start, so nothing can move.
 scenarios:
   - name: the daemon runs with media, all on loopback; the reachy body connects
@@ -19,6 +21,8 @@ scenarios:
       - start_edge_agent: {id: lite, body: reachy, where: edge_host}
       - daemon_status_is: {state: running, version: "1.10.0"}
       - daemon_ports_on_loopback
+      - responsible_process_is_app: {process: daemon}
+      - responsible_process_is_app: {process: "client:lite"}
       - edge_body_is: {client: lite, aec: hw, camera: true, expressions: ["yes", happy]}
       - robot_state_read: {control_mode: disabled}
       - edge_output_clean: lite

@@ -11,16 +11,14 @@ unchanged; two of its functions are wrapped before its normal entry point runs):
   skipped, since nothing on the LAN may use this daemon;
 - the HTTP API: pass `--fastapi-host 127.0.0.1` (the default for the Lite anyway).
 
-On macOS the daemon is started as its own privacy (TCC) identity (`own_permissions`), so its
-camera works when it is started over SSH.
+On a macOS edge host the tests start it inside "Reachy Edge.app" (scripts/edge_app_run.sh),
+the process macOS holds responsible for its camera and microphone use.
 """
 
-import os
 import sys
 from typing import Any
 
 SIGNALLING_HOST = "127.0.0.1"
-_CHILD_FLAG = "ASSISTANT_DAEMON_CHILD"
 
 
 def _patch_loopback() -> None:
@@ -55,12 +53,6 @@ def _patch_loopback() -> None:
 
 
 def main() -> int:
-    if sys.platform == "darwin" and not os.environ.get(_CHILD_FLAG):
-        from assistant_robot_reachy.own_permissions import run
-
-        os.environ[_CHILD_FLAG] = "1"
-        code = run([sys.executable, "-m", "assistant_robot_reachy.daemon", *sys.argv[1:]])
-        return code if code >= 0 else 128 - code
     _patch_loopback()
     from reachy_mini.daemon.app.main import main as daemon_main
 

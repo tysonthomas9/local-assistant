@@ -33,7 +33,6 @@ from assistant_testing.steps.link import (
     _type,
 )
 
-OWN_PERMISSIONS = "assistant_robot_reachy.own_permissions"
 DAEMON_LOOPBACK_PORTS = (8000, 8443)
 LOOPBACK_HOSTS = ("127.0.0.1", "[::1]", "localhost")
 
@@ -90,15 +89,16 @@ async def start_edge_agent(
 ) -> None:
     """Start the real edge agent with a real body; it dials the link server console.
 
-    `body: reachy` runs on the robot's machine (`where: edge_host`) from the synced checkout,
-    as its own macOS privacy identity (so it may use the robot's microphone over SSH), and
-    needs the daemon (`start_reachy_daemon`). `wait` (default) waits until the body started
-    and the link welcomed the agent.
+    `body: reachy` runs on the robot's machine (`where: edge_host`) from the synced checkout;
+    on a macOS edge host inside "Reachy Edge.app" (the owner of the microphone and camera
+    permission, see scripts/edge_app_run.sh). It needs the daemon (`start_reachy_daemon`).
+    `wait` (default) waits until the body started and the link welcomed the agent.
     """
     link = _link(ctx)
     if body == "reachy" and where != "edge_host":
         raise AssertionError("the reachy body runs where the robot is: use where: edge_host")
     port, python, ssh = link.port, sys.executable, None
+    in_app = False
     if where == "edge_host":
         host = edge_host_steps.host_of(ctx)
         if host.ssh is not None:
@@ -108,12 +108,13 @@ async def start_edge_agent(
                 )
             port = await edge_host_steps.reverse_tunnel(ctx, link.port)
             python, ssh = f"{edge_host.REMOTE_VENV}/bin/python", host.ssh
-    argv = [python, "-m", "assistant_edge", "--device-id", id, "--body", body]
-    argv += ["--url", f"ws://127.0.0.1:{port}/edge/v1", "--token", link.token]
+            in_app = body == "reachy" and await edge_host_steps.is_mac(host)
+    args = ["-m", "assistant_edge", "--device-id", id, "--body", body]
+    args += ["--url", f"ws://127.0.0.1:{port}/edge/v1", "--token", link.token]
     if energy_trigger_dbfs is not None:
-        argv += ["--energy-trigger-dbfs", str(energy_trigger_dbfs)]
-    if body == "reachy":
-        argv = [python, "-m", OWN_PERMISSIONS, "--", *argv]
+        args += ["--energy-trigger-dbfs", str(energy_trigger_dbfs)]
+    # The robot's microphone needs the macOS permission of Reachy Edge.app: run inside it.
+    argv = edge_host_steps.app_argv(f"edge-{id}", args, stdin=True) if in_app else [python, *args]
     name = _client_name(id)
     if ssh is not None:
         await ctx.processes.start(
@@ -567,7 +568,9 @@ async def daemon_ports_on_loopback(
     the WebRTC signalling port (8443); nothing on mDNS (5353)."""
     host = edge_host_steps.host_of(ctx)
     daemon = ctx.processes.get(edge_host_steps.DAEMON)
-    pgid = daemon.remote_pgid if isinstance(daemon, RemoteProcess) else daemon.proc.pid
+    pgid = edge_host_steps.app_job_pgid(daemon)  # inside Reachy Edge.app (macOS)
+    if pgid is None:
+        pgid = daemon.remote_pgid if isinstance(daemon, RemoteProcess) else daemon.proc.pid
     assert pgid is not None, "the daemon's process group is unknown"
     assert daemon.running, "the daemon this scenario started is not running"
     # -F: machine-readable fields (p pid, P protocol, n name, T tcp state); no user column.
