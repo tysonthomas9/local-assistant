@@ -18,6 +18,7 @@ scenarios:
       - server_receives: {client: lite, type: vad, fields: {state: start}}
       - uplink_audio_live: {client: lite, min_frames: 100}
       - release_push_to_talk: lite
+      - server_receives: {client: lite, type: vad, fields: {state: end}}
       - uplink_carries_no_audio: {client: lite, seconds: 1}
       - edge_output_clean: lite
       - edge_host_clean

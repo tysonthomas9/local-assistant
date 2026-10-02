@@ -417,9 +417,21 @@ async def uplink_audio_live(
 
 @step("uplink_carries_no_audio")
 async def uplink_carries_no_audio(ctx: ScenarioContext, client: str, seconds: float) -> None:
-    """For `seconds`, no mic frame from the edge reaches the server (no open mic window)."""
+    """For `seconds`, no mic frame from the edge reaches the server (no open mic window).
+
+    Once the server has received the edge's `vad {state: end}`, the window is closed: no frame
+    may follow that line, so the check counts from it (not from when this step starts)."""
     server = ctx.processes.get(SERVER)
     start = len(server.lines) - 1
+    ends = [
+        line.index
+        for line in _get_lines(server, "RECV")
+        if line.fields.get("device") == client
+        and line.fields.get("type") == "vad"
+        and (line.payload or {}).get("state") == "end"
+    ]
+    if ends:
+        start = min(start, ends[-1])
     await asyncio.sleep(seconds)
     frames = _mic_frames(ctx, client, after_index=start)
     assert not frames, f"{len(frames)} mic frames reached the server: {frames[0].text}"
