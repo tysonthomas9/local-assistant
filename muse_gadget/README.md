@@ -353,12 +353,12 @@ has heard about 96 ms of it in a row. When you start talking:
 - If the reply is playing, it's a barge-in: the robot keeps talking for 350 ms
   (`--barge-in-stop-ms N`), fades out over 80 ms, drops the rest of the reply (it closes the bridge
   stream, so Muse's turn ends) and your words are the next turn.
-- If the reply hasn't started yet (your words are being transcribed or Muse is thinking), it's a
-  continuation: that reply is dropped unspoken, and when you finish, what you said before and what
-  you just said go to Muse as one turn. This also covers being cut off at a pause. If the new sound
-  was too short to be a turn (a cough), the earlier words are sent on their own.
+- If the reply hasn't started yet (your words are being transcribed or Muse is thinking), nothing
+  is cancelled: Muse can't take back a message once it has it, so its answer is kept. If you're
+  still talking when the answer is ready, the robot waits until you've finished (it never starts
+  talking over you), plays the answer, and then your new words are the next turn.
 
-The log shows `move stopped by user speech`, `barge-in after ...` and `continuation: ...` lines
+The log shows `move stopped by user speech`, `barge-in after ...` and `reply held ... until you finished` lines
 (lengths and timings only). After a reply played with nobody talking, it shows how close the
 robot's own voice came (`peak VAD`, against the 0.5 threshold). `--no-barge-in` goes back to
 half-duplex: the mic is off from the end of what you say until the reply has played, and moves
