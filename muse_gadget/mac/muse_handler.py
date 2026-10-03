@@ -20,8 +20,12 @@ Early speech-to-text: when the speaker pauses, the utterance so far is transcrib
 STT thread. If the pause turns out to be the end (no more speech before the end silence), that text
 is the turn's text, so it's ready at end of speech instead of a pass later. The pass covers the whole
 utterance up to the pause (only the trailing silence is missing), and a check pass over the full
-utterance runs after the turn and logs whether the texts match (yes/no only). Transcripts go to the app
-only through `_emit_transcript` (its UI/JSON-RPC push, never logged). They are not put on the
+utterance runs once the reply starts and logs whether the texts match (yes/no only).
+MUSE_STT_FULL_PASS=1 (run_poc.sh --stt-full-pass) turns the pause passes off: the text always comes
+from one pass over the full utterance, after the end silence. Either way the utterance's boundaries
+are the VAD's alone: a pause pass only transcribes, it never ends or splits an utterance.
+
+Transcripts go to the app only through `_emit_transcript` (its UI/JSON-RPC push, never logged). They are not put on the
 output queue as AdditionalOutputs unless transcript logging is turned on (`log_transcripts=True`,
 or MUSE_LOG_TRANSCRIPTS=1 from `run_app.py --log-transcripts`), because the app logs those at INFO
 as `role=... content=<text>`. MuseHandler's own log lines hold only lengths and timings.
@@ -132,6 +136,7 @@ class MuseHandler(ConversationHandler):
         robot_tools_port: Optional[int] = None,
         barge_in: Optional[bool] = None,
         barge_in_stop_ms: Optional[int] = None,
+        stt_full_pass: Optional[bool] = None,
     ) -> None:
         super().__init__()
         self.deps = deps
@@ -171,6 +176,9 @@ class MuseHandler(ConversationHandler):
         self._echo_peak = 0.0  # highest VAD score while the robot spoke (self-interrupt margin)
         self._echo_open = False
         self._early: Optional[tuple[asyncio.Future, int]] = None  # (STT pass at a pause, speech windows)
+        if stt_full_pass is None:
+            stt_full_pass = os.environ.get("MUSE_STT_FULL_PASS") == "1"
+        self.stt_full_pass = stt_full_pass  # no pause passes: the text is from the full utterance
         self._busy = False
         self._busy_until = 0.0
         self._speak_lock = asyncio.Lock()
@@ -339,7 +347,9 @@ class MuseHandler(ConversationHandler):
     def _transcribe_early(self) -> None:
         """At a pause, transcribe the utterance so far, so the text is ready if the pause is the end."""
         seg = self.segmenter
-        if self.transcriber is None or not seg.in_speech or seg.silence_run < EARLY_AFTER_WINDOWS:
+        if self.stt_full_pass or self.transcriber is None or not seg.in_speech:
+            return
+        if seg.silence_run < EARLY_AFTER_WINDOWS:
             return
         if seg.speech_windows < seg.min_speech_windows:
             return

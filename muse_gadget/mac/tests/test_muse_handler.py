@@ -440,12 +440,12 @@ def test_end_silence_default_and_env(monkeypatch):
     import muse_vad
 
     monkeypatch.delenv(muse_vad.END_SILENCE_ENV, raising=False)
-    assert muse_vad.end_silence_from_env() == 0.5 == muse_vad.END_SILENCE_S
+    assert muse_vad.end_silence_from_env() == 0.8 == muse_vad.END_SILENCE_S
     monkeypatch.setenv(muse_vad.END_SILENCE_ENV, "0.3")
     assert muse_vad.end_silence_from_env() == 0.3
     for bad in ("abc", "0", "9"):
         monkeypatch.setenv(muse_vad.END_SILENCE_ENV, bad)
-        assert muse_vad.end_silence_from_env() == 0.5
+        assert muse_vad.end_silence_from_env() == 0.8
 
 
 # ------------------------------------------------------------------ barge-in and early speech-to-text
@@ -505,7 +505,7 @@ def test_barge_in_stops_the_reply_and_the_new_utterance_is_the_next_turn(caplog)
 
     async def main():
         startup = await started(handler)
-        await paced(handler, np.concatenate([burst(0.6), quiet(0.7)]))
+        await paced(handler, np.concatenate([burst(0.6), quiet(1.0)]))
         for _ in range(200):
             if handler._armed:
                 break
@@ -515,7 +515,7 @@ def test_barge_in_stops_the_reply_and_the_new_utterance_is_the_next_turn(caplog)
         assert not cleared, "quiet room: no barge-in"
         await paced(handler, burst(0.15, seed=3))
         assert not cleared, "it keeps speaking for the stop delay"
-        await paced(handler, np.concatenate([burst(0.4, seed=4), quiet(0.7)]))
+        await paced(handler, np.concatenate([burst(0.4, seed=4), quiet(1.0)]))
         assert cleared, "stopped"
         fade = handler.output_queue.get_nowait()
         for _ in range(500):
@@ -551,7 +551,7 @@ def test_no_self_barge_in_when_only_the_robot_is_heard(caplog):
 
     async def main():
         startup = await started(handler)
-        await paced(handler, np.concatenate([burst(0.6), quiet(0.7)]))
+        await paced(handler, np.concatenate([burst(0.6), quiet(1.0)]))
         for _ in range(200):
             if handler._armed:
                 break
@@ -580,7 +580,7 @@ def test_text_is_ready_at_end_of_speech_from_the_pause_pass(caplog):
     async def main():
         startup = await started(handler)
         # A short pause (not the end), more speech, then the end.
-        await paced(handler, np.concatenate([burst(0.5), quiet(0.25), burst(0.5, seed=5), quiet(0.8)]))
+        await paced(handler, np.concatenate([burst(0.5), quiet(0.25), burst(0.5, seed=5), quiet(1.1)]))
         for _ in range(300):
             if spoken and any("matches the full pass" in r.getMessage() for r in caplog.records):
                 break
@@ -656,3 +656,86 @@ def test_a_pause_pass_is_dropped_when_its_utterance_is():
         return after_quiet, after_closed
 
     assert asyncio.run(main()) == (None, None)
+
+
+def speech_with_pauses() -> np.ndarray:
+    """Talk, short pauses (under the end silence), a long pause (the end), then talk again."""
+    return np.concatenate([quiet(0.3), burst(0.6), quiet(0.3), burst(0.4, seed=6), quiet(0.6), burst(0.5, seed=7),
+                           quiet(1.2), burst(0.7, seed=8), quiet(1.2)])
+
+
+def utterances_seen(stt_full_pass: bool) -> tuple[list[np.ndarray], int]:
+    """The utterances MuseHandler queued as turns, and how many STT calls it made."""
+    calls: list[int] = []
+
+    def slow_transcribe(audio):
+        calls.append(audio.size)
+        time.sleep(0.05)
+        return "x"
+
+    handler = muse_handler.MuseHandler(FakeDeps(), bridge=BridgeClient("http://127.0.0.1:9"),
+                                       transcriber=slow_transcribe, synthesizer=tone,
+                                       segmenter=UtteranceSegmenter(EnergyVad()), barge_in=False,
+                                       stt_full_pass=stt_full_pass)
+    turns: list[np.ndarray] = []
+
+    async def record(utterance, speech_ended=None, early=None):
+        if early is not None:
+            await early
+        turns.append(utterance)
+
+    handler._run_turn = record
+
+    async def main():
+        startup = await started(handler)
+        await paced(handler, speech_with_pauses())
+        await asyncio.sleep(0.2)
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+
+    asyncio.run(main())
+    return turns, len(calls)
+
+
+def test_pause_passes_never_end_or_split_an_utterance():
+    """The utterance boundaries are the VAD's alone, with or without speech-to-text at pauses."""
+    vad_only = UtteranceSegmenter(EnergyVad()).feed(speech_with_pauses())
+    with_pauses, pause_calls = utterances_seen(stt_full_pass=False)
+    full_pass, full_calls = utterances_seen(stt_full_pass=True)
+    assert len(vad_only) == 2
+    for got in (with_pauses, full_pass):
+        assert len(got) == len(vad_only)
+        assert all(np.array_equal(a, b) for a, b in zip(got, vad_only))
+    assert pause_calls > 2, "pause passes ran (at the short pauses and the ends)"
+    assert full_calls == 0, "--stt-full-pass: no pause passes (the turn itself does the one full pass)"
+
+
+def test_stt_full_pass_uses_one_pass_over_the_whole_utterance(caplog, monkeypatch):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setenv("MUSE_STT_FULL_PASS", "1")
+    bridge = SlowStream(gap_s=0.1, lines=[{"text": "Hi."}])
+    spoken: list[str] = []
+    heard: list[int] = []
+    handler = barge_handler(bridge.url, spoken, heard, barge_in=False)
+    assert handler.stt_full_pass
+
+    async def main():
+        startup = await started(handler)
+        await paced(handler, np.concatenate([burst(0.5), quiet(0.25), burst(0.5, seed=5), quiet(1.1)]))
+        for _ in range(300):
+            if spoken:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+
+    try:
+        asyncio.run(main())
+    finally:
+        bridge.close()
+    logs = [r.getMessage() for r in caplog.records]
+    assert len(heard) == 1 and heard[0] > 16000, "one pass, over both bursts"
+    ready = [m for m in logs if m.startswith("MuseHandler: end of speech to text ready")]
+    assert len(ready) == 1 and ready[0].endswith("(transcribed after the end silence)")
+    assert not [m for m in logs if "matches the full pass" in m]

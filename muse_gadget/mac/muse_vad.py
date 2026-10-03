@@ -100,7 +100,7 @@ def make_vad() -> Vad:
 
 # Quiet time that ends an utterance (run_poc.sh --end-silence sets MUSE_END_SILENCE). Shorter is a
 # faster turn; too short cuts the user off at a pause.
-END_SILENCE_S = 0.5
+END_SILENCE_S = 0.8
 END_SILENCE_ENV = "MUSE_END_SILENCE"
 
 

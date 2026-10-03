@@ -43,7 +43,7 @@ def test_good_end_silence_accepted_and_passed_to_the_app(value):
                           capture_output=True, text=True, timeout=10)
     assert done.returncode == 2 and "--volume must be 0-100" in done.stderr
     text = SCRIPT.read_text()
-    assert re.search(r"(^|[; ])end_silence=0\.5;", text, re.M), "default 0.5 s"
+    assert re.search(r"(^|[; ])end_silence=0\.8;", text, re.M), "default 0.8 s"
     assert "-e MUSE_END_SILENCE=$end_silence" in text
 
 
@@ -104,3 +104,14 @@ def test_barge_in_is_on_by_default_and_can_be_turned_off():
     assert re.search(r"(^|[; ])barge_in=1; barge_stop_ms=350;", text, re.M)
     assert "--no-barge-in) barge_in=0;" in text
     assert "-e MUSE_BARGE_IN=$barge_in -e MUSE_BARGE_IN_STOP_MS=$barge_stop_ms" in text
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="run_poc.sh is not in the gadget image")
+def test_stt_full_pass_flag_reaches_the_app():
+    import subprocess
+    done = subprocess.run(["bash", str(SCRIPT), "--stt-full-pass", "--volume", "101"],
+                          capture_output=True, text=True, timeout=10)
+    assert done.returncode == 2 and "--volume must be 0-100" in done.stderr, "the option was accepted"
+    text = SCRIPT.read_text()
+    assert re.search(r"(^|[; ])stt_full_pass=0;", text, re.M), "off by default"
+    assert "--stt-full-pass) stt_full_pass=1;" in text and "-e MUSE_STT_FULL_PASS=$stt_full_pass" in text
