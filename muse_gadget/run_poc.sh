@@ -58,6 +58,9 @@ case $tts in qwen3|kokoro|say) ;; *) echo "run_poc: --tts must be qwen3, kokoro 
 case $instruct in *[!A-Za-z0-9\ ,.\'!?-]*) echo "run_poc: --instruct may only use letters, digits, spaces and , . ' ! ? -" >&2; exit 2 ;; esac
 [ "${#instruct}" -le 200 ] || { echo "run_poc: --instruct is longer than 200 characters" >&2; exit 2; }
 case $volume in ''|*[!0-9]*) echo "run_poc: --volume must be 0-100" >&2; exit 2 ;; esac
+for opt in "duration=$duration" "lock-timeout=$lock_timeout" "mic-log=$mic_log"; do
+    case ${opt#*=} in ''|*[!0-9]*) echo "run_poc: --${opt%%=*} must be a whole number of seconds (0 or more)" >&2; exit 2 ;; esac
+done
 [ "$volume" -le 100 ] || { echo "run_poc: --volume must be 0-100" >&2; exit 2; }
 case $voice in *[!A-Za-z0-9_]*) echo "run_poc: unsupported voice name: $voice" >&2; exit 2 ;; esac
 for a in "${app_args[@]}"; do
@@ -232,6 +235,7 @@ rsh "umask 077; mkdir -p $M/run && printf 'MUSE_ROBOT_TOOLS_SECRET=%s\n' \
     || { log "could not write the robot-tools secret on $HOST"; exit 1; }
 if [ "$fake" = 1 ]; then
     log "starting the fake echo bridge"
+    bridge_started=1   # before starting, so cleanup stops a half-started bridge
     rsh "cd $M/mac && echo \$\$ > ../run/fake-bridge.$RUN.pid && exec ../app/.venv/bin/python fake_bridge.py" \
         < /dev/null 2>&1 | scrub | sed -u 's/^/[bridge] /' &
     pids+=($!)
@@ -239,10 +243,10 @@ else
     [ -x "$ROOT/mac_gadget.sh" ] || { log "muse_gadget/mac_gadget.sh missing (task 1); try --fake-bridge"; exit 1; }
     log "starting the Muse gadget (mac_gadget.sh start)"
     [ "$style_hint" = 1 ] && log "style hint on: the bridge's short note goes before your words"
+    bridge_started=1   # before starting, so cleanup stops a half-started bridge (stop is idempotent)
     MUSE_STYLE_HINT_ON=$style_hint MUSE_ROBOT_TOOLS_RUN=$RUN MUSE_ROBOT_TOOLS_PORT=$TOOLS_PORT \
-        "$ROOT/mac_gadget.sh" start || { bridge_started=1; exit 1; }
+        "$ROOT/mac_gadget.sh" start || exit 1
 fi
-bridge_started=1
 for _ in $(seq 1 60); do
     health="$(rsh 'curl -s -m 3 http://127.0.0.1:48080/health')" && [ -n "$health" ] && break
     sleep 1
@@ -281,7 +285,7 @@ EOF
     tts_env="$tts_env -e MUSE_TTS_INSTRUCT_FILE=$INSTRUCT_FILE"
 fi
 log "starting the conversation app with MuseHandler (tts $tts)"
-start_job app "-e HF_HOME=~/assistant-edge/muse-app/hf -e HF_HUB_OFFLINE=1 -e MUSE_BRIDGE_URL=http://127.0.0.1:48080 -e MUSE_MIC_LOG=$mic_log -e MUSE_LOG_TRANSCRIPTS=$log_transcripts \
+start_job app "-e HF_HOME=~/assistant-edge/muse-app/hf -e HF_HUB_OFFLINE=1 -e MUSE_BRIDGE_URL=http://127.0.0.1:48080 -e MUSE_MIC_LOG='$mic_log' -e MUSE_LOG_TRANSCRIPTS=$log_transcripts \
 $tts_env -e MUSE_ROBOT_TOOLS_SECRET_FILE=$TOOLS_FILE -e MUSE_ROBOT_TOOLS_PORT=$TOOLS_PORT \
 -- $M/mac/exec_python.py $M/app/.venv/bin/python $M/mac/run_app.py --no-camera ${app_args[*]:-}"
 app_ssh=${pids[-1]}

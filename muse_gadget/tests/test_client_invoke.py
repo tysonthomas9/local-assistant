@@ -183,7 +183,52 @@ def test_env_switch_turns_it_off(monkeypatch):
 def test_parse():
     p = client_invoke.parse(invoke("x", "reachy.look", '{"direction": "up"}', timeout_ms=0))
     assert p == client_invoke.Invoke("x", "reachy.look", {"direction": "up"}, None)
-    assert client_invoke.parse(invoke("x", "device.health", None)).params == {}
+    assert client_invoke.parse(invoke("x", "device.health", None)).params is None
+    assert client_invoke.parse(invoke("x", "device.health", "")).params is None
+    omitted = invoke("x", "device.health")
+    del omitted["payload"]["params_json"]
+    assert client_invoke.parse(omitted).params == {}
     assert client_invoke.parse(invoke("x", "device.health", 5)).params is None
     assert client_invoke.parse(invoke("x", "device.health", timeout_ms=True)).timeout_ms is None
     assert client_invoke.parse({"event": "link.invoke"}) is None
+
+
+def test_client_invoke_first_then_link_invoke_runs_once(monkeypatch):
+    monkeypatch.delenv(client_invoke.ENV, raising=False)
+
+    async def scenario():
+        session, vm, sub, calls, tools, finish = await started()
+        await vm.events(invoke("r-1", "reachy.dance", '{"move": "simple_nod"}'))
+        got = await wait_results(vm, 1)
+        assert [r["id"] for r in got] == ["r-1"]
+        await vm.chunk(vm.control, encode_message(
+            {"method": "link.invoke", "id": "r-1", "command": "reachy.dance", "params": {"move": "simple_nod"}}))
+        got = await wait_results(vm, 2)
+        assert [r["id"] for r in got] == ["r-1"]
+        assert tools.calls == [("reachy.dance", {"move": "simple_nod"})]
+        await finish()
+
+    asyncio.run(scenario())
+
+
+def test_explicit_empty_params_refused_but_omitted_runs(monkeypatch):
+    monkeypatch.delenv(client_invoke.ENV, raising=False)
+
+    async def scenario():
+        session, vm, sub, calls, tools, finish = await started()
+        omitted = invoke("p-4", "reachy.dance")
+        del omitted["payload"]["params_json"]
+        await vm.events(invoke("p-1", "reachy.dance", None),
+                        invoke("p-2", "reachy.dance", ""),
+                        invoke("p-3", "reachy.dance", {"move": "simple_nod"}),
+                        omitted)
+        got = await wait_results(vm, 4)
+        by_id = {r["id"]: r for r in got}
+        assert set(by_id) == {"p-1", "p-2", "p-3", "p-4"}
+        for refused in ("p-1", "p-2", "p-3"):
+            assert by_id[refused]["ok"] is False and by_id[refused]["error"]
+        assert by_id["p-4"]["ok"] is True
+        assert tools.calls == [("reachy.dance", {})]   # only the omitted one ran
+        await finish()
+
+    asyncio.run(scenario())

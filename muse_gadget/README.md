@@ -252,8 +252,8 @@ For turns the gadget sends itself, Muse asks for a command with a `client.invoke
 
 - Only the commands above and `device.health` run, through the same `RestrictedExecutor`; anything
   else (`system.run`, `file.*`, `device.ota`, unknown names) and `params_json` that isn't a JSON
-  object get an error result.
-- Each `invoke_id` is answered once, also across `link.invoke`. Events without a usable
+  object (including an explicit `null` or `""`; only an omitted field means `{}`) get an error result.
+- Each `invoke_id` is answered once, whichever of `client.invoke` and `link.invoke` came first. Events without a usable
   `command_id`/`invoke_id` are ignored. At most 4 commands run at a time, as upstream.
 - Events are seen only while a subscription is open, i.e. during a `/turn`.
 - The log has `client.invoke command=<name> id=<id>` and `... ok=True|False`, never message text.

@@ -59,11 +59,11 @@ def parse(event: dict) -> Invoke | None:
     invoke_id, command = payload.get("invoke_id"), payload.get("command_id")
     if safe_name(invoke_id) == "invalid" or safe_name(command) == "invalid":
         return None
+    # Omitted params_json means no parameters. An explicit null, "" or non-string is refused,
+    # so a broken request can't turn into e.g. a random dance.
     raw = payload.get("params_json", "{}")
     params = None
-    if raw is None or raw == "":
-        params = {}
-    elif isinstance(raw, str) and len(raw) <= MAX_PARAMS_JSON:
+    if isinstance(raw, str) and raw and len(raw) <= MAX_PARAMS_JSON:
         try:
             decoded = json.loads(raw)
         except ValueError:

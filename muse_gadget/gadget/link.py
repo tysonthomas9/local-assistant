@@ -124,10 +124,12 @@ class RobotLinkSession(LinkSession):
         self._client_invoke = client_invoke.enabled()
 
     async def _invoke(self, message: dict) -> None:
-        # Upstream link.invoke handling, unchanged; the id is remembered so a
-        # client.invoke with the same id isn't run a second time.
-        if isinstance(message.get("id"), str):
-            self._seen_invokes.add(message["id"])
+        # Upstream link.invoke handling. Ids are shared with client.invoke, so the
+        # same request never runs twice, whichever path delivered it first.
+        invoke_id = message.get("id")
+        if isinstance(invoke_id, str) and not self._seen_invokes.add(invoke_id):
+            log.info("link.invoke duplicate ignored id=%s", client_invoke.safe_name(invoke_id))
+            return
         await super()._invoke(message)
 
     def on_client_invoke(self, event: dict) -> None:
