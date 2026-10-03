@@ -1,5 +1,5 @@
 feature: Barge-in cuts a spoken reply on the robot, and the brain forgets what was not heard
-tier: [hw, models]
+tier: [sim, hw, models]
 description: >
   The real brain speaks a long reply (real LLM, real TTS on GPU1) on the robot's speaker.
   Push-to-talk during it is a barge-in: the edge stops its speaker within 200 ms (its own

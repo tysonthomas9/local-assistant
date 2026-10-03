@@ -165,6 +165,7 @@ def test_reachy_daemon_without_a_robot_fails_with_a_clear_message(
     from assistant_testing import edge_host
 
     monkeypatch.delenv("GATE_NO_HW", raising=False)
+    monkeypatch.delenv("GATE_ROBOT", raising=False)
     monkeypatch.delenv(edge_host.ENV_VAR, raising=False)
     monkeypatch.setattr(edge_host, "local_robot", lambda: None)
     pytester.makepyfile("def test_robot(reachy_daemon):\n    assert reachy_daemon\n")
@@ -181,6 +182,90 @@ def test_reachy_daemon_is_skipped_with_the_hw_tier_off(
     result = pytester.runpytest("-p", "no:cacheprovider", "-p", "no:asyncio", "-rs")
     result.assert_outcomes(skipped=1)
     result.stdout.fnmatch_lines(["*GATE_NO_HW=1*"])
+
+
+def test_reachy_daemon_is_skipped_on_a_sim_only_gate(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GATE_NO_HW", raising=False)
+    monkeypatch.setenv("GATE_ROBOT", "sim")
+    pytester.makepyfile("def test_robot(reachy_daemon):\n    assert reachy_daemon\n")
+    result = pytester.runpytest("-p", "no:cacheprovider", "-p", "no:asyncio", "-rs")
+    result.assert_outcomes(skipped=1)
+    result.stdout.fnmatch_lines(["*GATE_ROBOT=sim*"])
+
+
+_TIERED = """\
+feature: x
+tier: [sim, hw]
+description: d
+scenarios:
+  - name: on both robots
+    steps:
+      - _test_echo: {value: 1}
+  - name: on the robot only
+    tier: hw
+    steps:
+      - _test_echo: {value: 2}
+  - name: with the models
+    tier: [sim, hw, models]
+    steps:
+      - _test_echo: {value: 3}
+"""
+
+
+def test_scenario_tier_overrides_the_feature_tier(tmp_path: Path) -> None:
+    feature = load_feature(_write(tmp_path, _TIERED))
+    assert feature.tiers == ("sim", "hw")
+    assert [s.tiers for s in feature.scenarios] == [
+        ("sim", "hw"),
+        ("hw",),
+        ("sim", "hw", "models"),
+    ]
+
+
+@pytest.mark.parametrize("tier", ["sim", "[sim, models]", "[sim, core]"])
+def test_sim_without_hw_is_refused(tmp_path: Path, tier: str) -> None:
+    path = _write(
+        tmp_path,
+        f"""\
+        feature: x
+        tier: {tier}
+        description: d
+        scenarios:
+          - name: s
+            steps:
+              - _test_echo: {{value: 1}}
+        """,
+    )
+    with pytest.raises(FeatureError, match=r"f\.yaml:2: tier sim needs hw too"):
+        load_feature(path)
+
+
+def test_sim_and_hw_collect_one_item_per_robot(pytester: pytest.Pytester) -> None:
+    pytester.makepyprojecttoml(
+        '[tool.pytest.ini_options]\nasyncio_default_fixture_loop_scope = "function"\n'
+    )
+    feature = pytester.path / "features" / "f.yaml"
+    feature.parent.mkdir()
+    feature.write_text(_TIERED)
+    sim = pytester.runpytest_inprocess(
+        "features", "-p", "no:cacheprovider", "--co", "-q", "-m", "sim"
+    )
+    sim.stdout.fnmatch_lines(
+        ["*::on both robots[[]sim[]]", "*::with the models[[]sim[]]", "*2/5 tests collected*"]
+    )
+    hw = pytester.runpytest_inprocess(
+        "features", "-p", "no:cacheprovider", "--co", "-q", "-m", "hw and not models"
+    )
+    hw.stdout.fnmatch_lines(
+        ["*::on both robots[[]hw[]]", "*::on the robot only", "*2/5 tests collected*"]
+    )
+    # A [sim, hw] item is on one robot: never selected by the other robot's marker.
+    both = pytester.runpytest_inprocess(
+        "features", "-p", "no:cacheprovider", "--co", "-q", "-m", "sim and hw"
+    )
+    both.stdout.fnmatch_lines(["*no tests collected*"])
 
 
 @step("_test_echo")

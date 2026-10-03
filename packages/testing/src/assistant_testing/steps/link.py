@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from assistant_contracts.frames import FrameKind
-from assistant_testing import edge_host
+from assistant_testing import edge_host, sim
 from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.registry import step
 from assistant_testing.processes import ManagedProcess
@@ -251,9 +251,12 @@ async def kill_process(
 @step("restart_process")
 async def restart_process(ctx: ScenarioContext, process: str) -> None:
     """Start a killed process again with the same command line (the server: same port;
-    `daemon`: the reachy-mini daemon, ready when its API serves)."""
+    `daemon`: the reachy-mini daemon, ready when its API serves; the simulated one once its
+    robot is at rest)."""
     name = "daemon" if process == "daemon" else _process_name(process)
     ready = {SERVER: r"^LISTENING ", "daemon": r"Uvicorn running on "}.get(name)
+    if ctx.sim and name == "daemon":
+        ready = sim.DAEMON_READY  # the simulated robot is at rest, as it starts
     await ctx.processes.restart(name, ready_line=ready, ready_timeout=120 if ready else 30)
     # The new process prints from line 0 again: what was consumed belonged to the old one.
     _link(ctx).consumed.pop(name, None)

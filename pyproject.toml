@@ -29,6 +29,11 @@ dev = [
     "ruff>=0.7",
     "rust-just>=1.36",
 ]
+# The simulated robot (tier sim): Pollen's daemon with `--sim` needs MuJoCo, pinned to what
+# reachy-mini 1.10.0 asks for (its `mujoco` extra). Only the sim env has it:
+# `UV_PROJECT_ENVIRONMENT=.venv-sim uv sync --locked --no-default-groups --group sim`
+# (python -m assistant_testing.sim prepare does that).
+sim = ["mujoco==3.3.0"]
 
 [tool.uv]
 package = false
@@ -84,13 +89,14 @@ addopts = [
     "--import-mode=importlib",
     "--strict-markers",
     "-p", "pytester",
-    "-m", "not (hw or models or bench or locality or online)",
+    "-m", "not (sim or hw or models or bench or locality or online)",
 ]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "unit: pure logic that is hard to reach end to end (runs in the gate's unit stage)",
     "core: feature tier core: real code, no robot, GPU or network",
+    "sim: feature tier sim: the simulated robot (Pollen's daemon in MuJoCo) on this PC",
     "hw: feature tier hw: needs the robot attached",
     "models: feature tier models: needs both GPUs and the model servers",
     "bench: latency benchmarks (brain PC only)",

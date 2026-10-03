@@ -98,7 +98,8 @@ async def start_edge_agent(
     """Start the real edge agent with a real body; it dials the link server console.
 
     `body: reachy` runs on the robot's machine (`where: edge_host`) from the synced checkout;
-    on a macOS edge host inside "Reachy Edge.app" (the owner of the microphone and camera
+    on the simulated robot from this checkout, on this PC; on a macOS edge host inside
+    "Reachy Edge.app" (the owner of the microphone and camera
     permission, see scripts/edge_app_run.sh). It needs the daemon (`start_reachy_daemon`).
     `wait` (default) waits until the body started and the link welcomed the agent.
     `energy_trigger_dbfs` opens a mic window on a loud enough voice (standing in for a
@@ -171,7 +172,13 @@ async def start_edge_agent(
             env={"PYTHONUNBUFFERED": "1", **hf},
         )
     else:
-        await ctx.processes.start(name, argv, stdin=True, env={"PYTHONUNBUFFERED": "1"})
+        # The simulated robot's processes share its own HOME (no ~/.asoundrc of a real robot;
+        # the watchdog's heartbeat next to the sim daemon's) and the offline HF cache.
+        sim_side = ctx.sim and where == "edge_host"
+        env = edge_host_steps.sim_robot(ctx).env if sim_side else {"PYTHONUNBUFFERED": "1"}
+        await ctx.processes.start(name, argv, stdin=True, env=env)
+        if sim_side:
+            edge_host_steps.sim_robot(ctx).agents.add(name)
     if wait:
         line = await _expect(ctx, name, {"BODY"}, within_s, what="BODY (the body started)")
         if line.fields.get("kind") != body:

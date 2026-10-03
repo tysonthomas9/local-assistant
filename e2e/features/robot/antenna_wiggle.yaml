@@ -1,5 +1,5 @@
 feature: The robot moves its antennas when calming
-tier: hw
+tier: [sim, hw]
 description: >
   The brain sends express{calming}; the body plays Pollen's recorded move serenity1 (an
   antennas-only move: the head stays still) to its end, following the SDK's standard pattern

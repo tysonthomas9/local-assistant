@@ -6,7 +6,12 @@ syncs the code under test there and starts one (with media, every socket on loop
 yields the daemon's base URL as reachable from here (through an `ssh -L` tunnel for an edge
 host) and on teardown stops only what it started. When the robot or the daemon is unavailable
 it FAILS the test, never skips it (tier `hw` means the robot is required) unless the gate runs
-with GATE_NO_HW=1, which skips it.
+without the physical robot (GATE_ROBOT=sim or GATE_NO_HW=1), which skips it.
+
+`reachy_sim` is the same for the simulated Reachy Mini (`assistant_testing.sim`): Pollen's
+daemon with `--sim` on this PC, its virtual sound card plugged in. It always starts its own
+(it fails if a daemon already answers on this PC) and stops everything it started. When the
+sim cannot run here (no .venv-sim, PipeWire or MuJoCo) it FAILS, never skips.
 """
 
 import asyncio
@@ -24,6 +29,8 @@ def reachy_daemon(request: pytest.FixtureRequest) -> Iterator[str]:
     """The base URL of a running real Reachy Mini daemon."""
     if os.environ.get("GATE_NO_HW") == "1":
         pytest.skip("GATE_NO_HW=1: the hardware tier is off")
+    if os.environ.get("GATE_ROBOT") == "sim":
+        pytest.skip("GATE_ROBOT=sim: the physical robot is off")
     from assistant_testing.features.context import ScenarioContext
     from assistant_testing.steps import edge_host as steps
 
@@ -34,6 +41,26 @@ def reachy_daemon(request: pytest.FixtureRequest) -> Iterator[str]:
         if steps.host_of(ctx).ssh is not None:
             await steps.code_synced_to_edge_host(ctx)
         return await steps.ensure_reachy_daemon(ctx)
+
+    with asyncio.Runner() as runner:
+        try:
+            yield runner.run(start())
+        finally:
+            runner.run(ctx.aclose())
+
+
+@pytest.fixture
+def reachy_sim(request: pytest.FixtureRequest) -> Iterator[str]:
+    """The base URL of a running simulated Reachy Mini daemon (on this PC)."""
+    from assistant_testing.features.context import ScenarioContext
+    from assistant_testing.steps import edge_host as steps
+
+    ctx = ScenarioContext(repo_root=request.config.rootpath, feature_path=request.path, robot="sim")
+
+    async def start() -> str:
+        await steps.robot_host_found(ctx)
+        await steps.start_reachy_daemon(ctx)
+        return ctx.state["daemon_url"]
 
     with asyncio.Runner() as runner:
         try:

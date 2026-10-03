@@ -1,6 +1,7 @@
 # Python
 .venv/
 .venv-assistant/
+.venv-sim/
 __pycache__/
 *.pyc
 .pytest_cache/

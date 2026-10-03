@@ -1,5 +1,5 @@
 feature: The edge agent survives a daemon restart
-tier: hw
+tier: [sim, hw]
 description: >
   The real daemon is stopped while the edge agent runs: the agent notices within seconds,
   stops its speaker, tells the brain error{body_unavailable} and keeps its EdgeLink up. When

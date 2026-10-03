@@ -1,4 +1,4 @@
-E2E uses only real devices and the real stack: the real Reachy Mini, real brain and edge processes over real EdgeLink, and real models. No fakes, mocks, stubs, simulators, recorded replies or monkeypatching. Faults are injected for real.
+E2E uses only real devices and the real stack: the real Reachy Mini, real brain and edge processes over real EdgeLink, and real models. No fakes, mocks, stubs, recorded replies or monkeypatching. Faults are injected for real. The one simulator is Pollen's own simulated Reachy Mini (tier `sim`, below): it is for iteration only, and every scenario that runs on it also runs on the real robot with the same assertions.
 
 # E2E feature files
 
@@ -6,7 +6,11 @@ Each YAML file here is one feature. Every scenario in it becomes one pytest item
 plugin in `packages/testing` (`assistant_testing.features`). Scenarios drive **real** code
 and processes. A scenario that needs the robot is tier `hw`, and one that needs the GPUs and
 model servers is tier `models`. A scenario that needs both lists both (`tier: [hw, models]`):
-it gets both markers, and the gate runs it in the hw stage (under the edge-host lock).
+it gets both markers, and the gate runs it in the hw stage (under the edge-host lock). A robot
+scenario the simulated robot can run too is `[sim, hw]` (or `[sim, hw, models]`): it becomes
+two items, `name[sim]` (markers `sim`, and `models` if listed) and `name[hw]` (`hw`, ...), the
+same steps and assertions on each robot. `sim` without `hw` is refused: the sim never replaces
+the robot. A scenario may set its own `tier:`, which replaces the feature's.
 
 The rule is enforced. `scripts/gate.sh` runs a "real-only check"
 (`python -m assistant_testing.real_only`) before the e2e stages, and the feature
@@ -18,7 +22,7 @@ Wherever a step takes a `body` argument, it must be a real body type: `reachy` o
 
 ```yaml
 feature: EdgeLink handshake          # short name
-tier: core                           # core | hw | models, or a list such as [hw, models]
+tier: core                           # core | sim | hw | models, or a list such as [sim, hw]
 description: A device connects to the brain and is welcomed.
 scenarios:
   - name: device says hello
@@ -53,10 +57,12 @@ The expanded names must be unique.
 
 ```bash
 uv run pytest e2e -m core            # tier core (hosted CI)
+uv run pytest e2e -m sim             # the simulated robot on this PC (see below)
 uv run pytest e2e -m hw              # needs the robot
 uv run pytest e2e -m models          # needs the GPUs and model servers (see below)
 uv run pytest e2e --list-features    # list features, scenarios and steps; run nothing
-scripts/gate.sh                      # the full gate (see the script header)
+scripts/gate.sh                      # the full gate, both robots (see the script header)
+GATE_ROBOT=sim scripts/gate.sh       # iterating: the simulated robot only (exits 3, incomplete)
 ```
 
 Each scenario prints its steps with ✓ (passed), ✗ (failed) or - (not reached). Every process a
@@ -91,7 +97,61 @@ uv run pytest e2e -m models
 
 Features with `tier: [hw, models]` also need the robot (run with `-m "hw and models"`). Spoken
 turns write their timings (STT, LLM first token, TTS first audio, input to the speaker's first
-audio, totals) to `artifacts/timings-<name>.json` (`$ASSISTANT_ARTIFACTS_DIR`).
+audio, totals) to `artifacts/timings-<name>.json` (`-sim.json` on the simulated robot;
+`$ASSISTANT_ARTIFACTS_DIR`).
+
+### The sim tier
+
+For iteration: the robot scenarios the simulator can run, on Pollen's simulated Reachy Mini on
+this PC, in minutes and with no robot. The hw tier is unchanged and still runs every one of
+them on the real robot; the full gate runs both (`GATE_ROBOT=both`, the default).
+
+It is Pollen's real daemon from the pinned reachy-mini 1.10.0 with `--sim --headless` (MuJoCo,
+`python -m assistant_robot_reachy.sim`), in its own env `.venv-sim` (the `sim` dependency
+group: `mujoco==3.3.0`). Pollen's code is not patched. Our wrapper adds two things at runtime:
+the motor modes (Pollen's MuJoCo backend has none; the sim keeps the mode it is asked for,
+starting disabled), and, once its API serves, it puts the robot to rest where `goto_sleep()`
+leaves a real one (MuJoCo starts about 5 degrees off). The edge agent runs on this PC with
+`--body reachy`, next to the sim daemon, as it runs next to the real one.
+
+Audio is a virtual PipeWire sound card named like the robot's, so the SDK picks it as it picks
+the robot's: the speaker (`reachy_sim_speaker`) is recorded to
+`artifacts/sim/<feature>-speaker.wav`, and the microphone (`reachy_sim_mic`) hears quiet pink
+noise (about -55 dBFS, a quiet room). Voice input is the golden WAVs fed at the mic input
+point (`feed_golden_wav`), as on the robot. The sim's processes get their own temporary HOME
+(no `~/.asoundrc` of a real robot; the watchdog heartbeat next to the sim daemon), the user's
+Hugging Face cache (offline) for Pollen's recorded moves, and `ASSISTANT_SIM=1`.
+
+```bash
+uv run python -m assistant_testing.sim prepare   # sync .venv-sim, check MuJoCo, PipeWire, the moves
+uv run python -m assistant_testing.sim run       # a sim robot to poke at (Ctrl-C stops it all)
+uv run python -m assistant_testing.sim sweep     # stop the leftovers of a killed run
+uv run pytest e2e -m "sim and not models"        # no GPUs needed
+```
+
+One sim at a time (it uses port 8000 and the sound card's names; a second fails). It fails,
+never skips, when it cannot run (no PipeWire, no MuJoCo). Starts and stops only what it started.
+
+On `[sim, hw]`: antenna_wiggle, head_nod, motor_watchdog, daemon_restart, barge_in_flush,
+daemon_connect (all but its first scenario); with the models: attention_on_robot, voice_loop,
+hello_spoken_reply, barge_in_on_robot, llm/servers_compared.
+
+hw only, and why:
+
+| Feature | Needs |
+|---|---|
+| speaker_tone, mic_level | the real speaker and microphone through the air (acoustics) |
+| camera_frame | camera frames (the sim is headless: no rendering) |
+| edge_config | the XVF3800 (hardware AEC, its far-end reference) |
+| daemon_connect: its first scenario | the camera, WebRTC (8443), the XVF3800 and Reachy Edge.app |
+| edge_host_ready | the edge host's bootstrap, Reachy Edge.app and macOS permissions |
+| wake_word_on_robot, open_mic_on_robot, try_it_on_robot | sound through the air in a real room (acoustics, DOA) |
+
+What the sim cannot do: render the camera (headless; the PC also lacks GStreamer's
+`webrtcsink`, so no media server, WebRTC or port 8443), acoustics (speaker to microphone through
+the air, echo, AEC, the XVF3800, direction of arrival), motor torque (a sim robot with its
+motors "off" still holds its pose; the mode is tracked, not felt), the USB serial bus, and
+macOS (Reachy Edge.app, its permissions, the edge host over SSH).
 
 ## Step vocabulary
 
@@ -156,7 +216,7 @@ device id. Messages are checked by containment: the listed `fields` must be in t
 | `peer_leaves_before_hello` | `stage: tcp \| upgraded = upgraded` | A real TCP peer connects (and, if `upgraded`, completes the WebSocket upgrade) and hangs up before hello |
 | `server_output_clean` | none | The server printed no traceback or handler error |
 | `kill_process` | `process`, `signal_name: KILL \| STOP \| CONT \| TERM \| HUP = KILL`, `within_s = 60` | "kill the <process>" with a real signal (kill -9, freeze, thaw, stop, hang up); `process` may also be `daemon` (the reachy-mini daemon); after KILL, TERM or HUP it has exited |
-| `restart_process` | `process` | "restart the <process>" with the same command line (the server keeps its port; `daemon`: ready when its API serves) |
+| `restart_process` | `process` | "restart the <process>" with the same command line (the server keeps its port; `daemon`: ready when its API serves, the sim's once its robot is at rest) |
 | `client_reconnects_within` | `client`, `seconds: float` | "client "<id>" reconnects within <s> s": a new welcome and a new server session |
 | `client_retries_with_backoff` | `client`, `min_retries = 1` | Every printed retry delay is 0.5 s doubling to 10 s, within ±20 % jitter |
 | `wait` | `seconds: float` | Lets real time pass |
@@ -172,11 +232,11 @@ remote process group, and teardown stops them. The daemon API (`ssh -L`) and Edg
 
 | Step | Arguments | Does |
 |---|---|---|
-| `robot_host_found` | none | Picks the machine with the robot and prints it; fails (never skips) if neither this PC nor the edge host has its USB serial device |
+| `robot_host_found` | none | Picks the machine with the robot and prints it; fails (never skips) if neither this PC nor the edge host has its USB serial device. On the sim: prepares the sim and plugs in its sound card |
 | `edge_host_bootstrapped` | `reachy_mini: str` | Runs `scripts/edge_host_bootstrap.sh` there (installs once, then only validates) and checks the pinned reachy-mini version, the robot device and, on macOS, Reachy Edge.app |
-| `code_synced_to_edge_host` | none | `git push`es this checkout's HEAD to the edge host over SSH, checks it out in `~/assistant-edge/src` and `uv sync`s only the edge packages |
+| `code_synced_to_edge_host` | none | `git push`es this checkout's HEAD to the edge host over SSH, checks it out in `~/assistant-edge/src` and `uv sync`s only the edge packages (nothing on the sim: it runs from this checkout) |
 | `start_reachy_daemon` | `ready_within_s = 120` | Starts the real reachy-mini daemon there WITH media (`python -m assistant_robot_reachy.daemon` from the synced checkout, on macOS inside Reachy Edge.app: API on 127.0.0.1, WebRTC signalling on 127.0.0.1:8443, no mDNS; no wake-up/sleep motion); fails if a daemon it did not start already answers |
-| `reachy_daemon_running` | `ready_within_s = 120` | Reuses a daemon that already answers there, else starts one as above; teardown stops only one it started (the `reachy_daemon` pytest fixture does the same) |
+| `reachy_daemon_running` | `ready_within_s = 120` | Reuses a daemon that already answers there, else starts one as above; teardown stops only one it started (the `reachy_daemon` pytest fixture does the same; `reachy_sim` for the simulated robot). The sim's daemon is always its own |
 | `responsible_process_is_app` | `process = daemon` (or `client:<id>`) | macOS: every process of it has Reachy Edge.app as its responsible process (the owner of the camera and microphone permission); no-op elsewhere |
 | `daemon_ports_on_loopback` | `listening: list[int]?` (default 8000, 8443) | `lsof` of the daemon's process group: every socket is on 127.0.0.1 / [::1] at both ends (no `*`, no LAN address, no mDNS 5353) and it LISTENs on 127.0.0.1 at each port |
 | `daemon_status_is` | `state = running`, `version: str?` | `GET /api/daemon/status` (through the tunnel): state, backend ready, no error |

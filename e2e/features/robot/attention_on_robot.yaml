@@ -1,5 +1,5 @@
 feature: The robot's head follows the turn
-tier: [hw, models]
+tier: [sim, hw, models]
 description: >
   The real brain (basic engine, real LLM) drives the real robot through the edge agent on the
   robot's machine. A typed question makes the turn run idle -> listening -> thinking ->

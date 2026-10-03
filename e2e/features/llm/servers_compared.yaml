@@ -1,5 +1,5 @@
 feature: The same voice and text turn on vLLM and on Ollama
-tier: [hw, models]
+tier: [sim, hw, models]
 description: >
   Either LLM server can run the stack: vLLM (the default) and Ollama (the fallback, one config
   value away) each get exactly the same turns on the real robot. A real server of the

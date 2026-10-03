@@ -1,5 +1,5 @@
 feature: The edge agent drives the real robot through the daemon
-tier: hw
+tier: [sim, hw]
 description: >
   The real reachy-mini daemon runs on the robot's machine WITH media (camera and WebRTC), and
   every one of its sockets stays on loopback: lsof shows the HTTP API (8000) and the WebRTC
@@ -13,6 +13,7 @@ description: >
   body refuses to start, so nothing can move.
 scenarios:
   - name: the daemon runs with media, all on loopback; the reachy body connects
+    tier: hw  # the camera, WebRTC, the XVF3800 and Reachy Edge.app are not simulated
     steps:
       - robot_host_found
       - code_synced_to_edge_host

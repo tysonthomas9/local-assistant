@@ -1,5 +1,5 @@
 feature: The robot nods when the brain says yes
-tier: hw
+tier: [sim, hw]
 description: >
   The brain sends express{yes}; the body plays Pollen's recorded nod yes1 to its end, following
   the SDK's standard pattern wake_up -> move -> goto_sleep -> motors off (Pollen's tested moves

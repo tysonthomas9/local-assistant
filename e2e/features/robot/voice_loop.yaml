@@ -1,5 +1,5 @@
 feature: The robot hears a question and answers it aloud
-tier: [hw, models]
+tier: [sim, hw, models]
 description: >
   The full voice loop on the real robot. The golden "hello" WAV is fed into the robot's edge
   agent as real 20 ms mic frames at its mic input point (right after capture; spec "testing

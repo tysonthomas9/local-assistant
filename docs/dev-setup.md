@@ -40,9 +40,14 @@ and run `direnv allow`.
 the script). Gitignored legacy resources (`.venv`, `reachy_mini_conversation_app`,
 `third_party`, `voices`, `local_backend/models`) are symlinked into the clone from the main
 checkout, so the legacy suite runs against the real legacy environment. Exit codes: 0 pass,
-1 fail, 3 incomplete (`GATE_NO_HW=1` or `GATE_NO_MODELS=1`).
+1 fail, 3 incomplete (`GATE_ROBOT=sim`, `GATE_ROBOT=hw`, `GATE_NO_HW=1` or `GATE_NO_MODELS=1`).
 
-Before the robot (hw) and models stages the gate stops the old assistant if it runs (the
+The robot features run on both robots by default (`GATE_ROBOT=both`): stage s on Pollen's
+simulated Reachy Mini on this PC, then stage g on the real one. `GATE_ROBOT=sim` is for
+iterating without the robot; the final gate runs both. The summary shows each stage's time,
+and the sim and hw feature times. See `e2e/features/README.md`, "The sim tier".
+
+Before the robot (sim, hw) and models stages the gate stops the old assistant if it runs (the
 legacy stack holds the GPUs and the robot) and brings up the models, each on its own GPU:
 
 - the LLM: our own LLM server (below; vLLM by default) on 127.0.0.1:8773, on GPU0;

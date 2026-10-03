@@ -1,5 +1,6 @@
 """Load and validate feature files; every error names the file and line."""
 
+import dataclasses
 import json
 import re
 from collections.abc import Callable, Sequence
@@ -12,7 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from assistant_testing.features.registry import REGISTRY, StepDef, describe
 
-Tier = Literal["core", "hw", "models"]
+Tier = Literal["core", "sim", "hw", "models"]
+TierSpec = Tier | Annotated[list[Tier], Field(min_length=1)]
 
 REAL_BODIES = ("reachy", "console")
 """The only body types e2e may use (E2E uses only real devices and the real stack)."""
@@ -31,6 +33,9 @@ class _ScenarioSpec(BaseModel):
     steps: list[dict[str, Any] | str] = Field(min_length=1)
     examples: list[dict[str, Any]] | None = Field(default=None, min_length=1)
     """Scenario outline: one scenario per example; `<key>` in the name and steps is replaced."""
+    tier: TierSpec | None = None
+    """This scenario's tier(s) instead of the feature's, e.g. `hw` for a scenario of a
+    `[sim, hw]` feature that the simulated robot cannot run."""
 
 
 _PLACEHOLDER = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>")
@@ -81,8 +86,10 @@ def _expand(
 class _FeatureSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     feature: str = Field(min_length=1)
-    tier: Tier | Annotated[list[Tier], Field(min_length=1)]
-    """One tier, or a list such as `[hw, models]`: the scenarios need all of them."""
+    tier: TierSpec
+    """One tier, or a list such as `[hw, models]`: the scenarios need all of them. `sim`
+    always comes with `hw` (`[sim, hw]`): the scenario runs on the simulated robot AND on the
+    physical one, as two items."""
     description: str = Field(min_length=1)
     scenarios: list[_ScenarioSpec] = Field(min_length=1)
 
@@ -101,6 +108,8 @@ class Scenario:
     name: str
     line: int
     steps: tuple[BoundStep, ...]
+    tiers: tuple[Tier, ...] = ()
+    """Its tiers (the feature's unless the scenario sets `tier`)."""
 
 
 @dataclass(frozen=True)
@@ -172,6 +181,17 @@ def load_feature(path: Path) -> Feature:
     def fail(loc: Sequence[int | str], message: str) -> FeatureError:
         return FeatureError(f"{path}:{_line_of(root, loc)}: {message}")
 
+    def tiers_of(tier: Tier | list[Tier], loc: Sequence[int | str]) -> tuple[Tier, ...]:
+        listed: list[Tier] = [tier] if isinstance(tier, str) else tier
+        tiers = tuple(dict.fromkeys(listed))
+        if "sim" in tiers and "hw" not in tiers:
+            raise fail(
+                loc,
+                "tier sim needs hw too ([sim, hw]): the simulated robot is for iteration, "
+                "every robot scenario also runs on the physical robot",
+            )
+        return tiers
+
     try:
         spec = _FeatureSpec.model_validate(data)
     except ValidationError as exc:
@@ -180,9 +200,15 @@ def load_feature(path: Path) -> Feature:
         where = ".".join(str(p) for p in loc) or "(top level)"
         raise fail(loc, f"{where}: {err['msg']}") from None
 
+    feature_tiers = tiers_of(spec.tier, ["tier"])
     scenarios: list[Scenario] = []
     seen: set[str] = set()
     for s_idx, scenario_spec in enumerate(spec.scenarios):
+        tiers = (
+            feature_tiers
+            if scenario_spec.tier is None
+            else tiers_of(scenario_spec.tier, ["scenarios", s_idx, "tier"])
+        )
         try:
             expanded = _expand(scenario_spec, s_idx)
         except ValueError as exc:
@@ -191,11 +217,12 @@ def load_feature(path: Path) -> Feature:
             if name_ in seen:
                 raise fail([*where, "name"], f"duplicate scenario {name_!r}")
             seen.add(name_)
-            scenarios.append(_bind_scenario(fail, root, s_idx, name_, raw_steps, where))
+            bound = _bind_scenario(fail, root, s_idx, name_, raw_steps, where)
+            scenarios.append(dataclasses.replace(bound, tiers=tiers))
     return Feature(
         path=path,
         name=spec.feature,
-        tiers=tuple(dict.fromkeys([spec.tier] if isinstance(spec.tier, str) else spec.tier)),
+        tiers=feature_tiers,
         description=spec.description,
         scenarios=tuple(scenarios),
     )

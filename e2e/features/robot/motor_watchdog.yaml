@@ -1,5 +1,5 @@
 feature: Nobody looking after the robot puts it to rest with its motors off
-tier: hw
+tier: [sim, hw]
 description: >
   The motor watchdog runs next to the daemon (in the daemon's own process), not in the edge
   agent that might die. While its link to the brain is up, the edge agent's reachy body keeps

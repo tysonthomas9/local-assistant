@@ -17,6 +17,11 @@
 #              running stack, SearXNG, ...) is missing. A failing legacy test is rerun ONCE:
 #              a pass is reported as FLAKY, a second failure FAILS. SKIP only when the legacy
 #              venv is missing.
+#   s  sim     e2e features, tier sim: the same features as on the robot, on Pollen's simulated
+#              Reachy Mini (its daemon with --sim, MuJoCo, headless) on this PC, with a virtual
+#              PipeWire sound card (assistant_testing.sim; .venv-sim is synced first). One
+#              sim at a time; sweeps leftovers before and after (leftovers after FAIL)
+#              Features with `tier: [sim, hw, models]` run here too (with the models)
 #   g  hw      e2e features, tier hw. The robot is used where it is plugged in: on this PC
 #              (/dev/ttyACM*) if attached here, else on the edge host reached by the SSH alias in
 #              config [test.edge_host] ssh / ASSISTANT_EDGE_HOST (it needs /dev/cu.usbmodem* or
@@ -26,33 +31,37 @@
 #              there. Leftovers after the features FAIL the stage (docs/robot-on-another-machine.md)
 #              Features with `tier: [hw, models]` run here (they need the models too; with
 #              GATE_NO_MODELS=1 they are left out)
-#   h  models  e2e features, tier models without hw: FAILS unless both GPUs, our LLM server
+#   h  models  e2e features, tier models without sim or hw: FAILS unless both GPUs, our LLM server
 #              with reachy-gemma4 and the speech server are available
 #
-# The models (before stage g): the speech server (servers/speech: Parakeet STT + Qwen3-TTS) on
+# The models (before stage s): the speech server (servers/speech: Parakeet STT + Qwen3-TTS) on
 # 127.0.0.1:8772. If none is serving there, the gate syncs its venv in the checkout under test
 # and starts it on GPU1 (CUDA_VISIBLE_DEVICES=1; it needs 8 GB free there), and stops it after
-# stage h. A server it did not start is used and left alone. Failing to start it fails g and h.
+# stage h. A server it did not start is used and left alone. Failing to start it fails s, g, h.
 # The LLM likewise: our own server (scripts/llm_server.sh on 127.0.0.1:8773, GPU0 only) of the
 # configured kind (`[llm] server` of the ci profile, ASSISTANT__LLM__SERVER overrides it): vLLM
 # by default (servers/vllm/.venv, synced by the launcher; it needs about 21.7 GB free on GPU0),
 # Ollama as the fallback (the system model store read-only). It is started unless one serves
 # there (it must then be that kind), loaded once and checked to sit entirely on GPU0
-# (assistant_testing.llm_server check), and stopped after stage h. A busy GPU0 fails g and h
+# (assistant_testing.llm_server check), and stopped after stage h. A busy GPU0 fails s, g, h
 # with the processes on it named. The system Ollama service is not used or changed (the
 # launcher only unloads reachy-gemma4 from it). The old assistant (legacy
 # stack: run_app.py, speech-to-speech, run_daemon.py) is stopped first if it runs: it holds
 # the GPUs and the robot.
 # Spoken turns write their timings to $ROOT/artifacts (ASSISTANT_ARTIFACTS_DIR).
-#   i  summary PASS/FAIL per stage. Exit 0 = PASS, 1 = FAIL, 3 = INCOMPLETE (a stage opted out)
+#   i  summary PASS/FAIL and time per stage, the sim and robot feature times. Exit 0 = PASS,
+#              1 = FAIL, 3 = INCOMPLETE (a stage opted out)
 #
 # E2E uses only real devices and the real stack (see e2e/features/README.md).
 #
 # Environment:
 #   GATE_FAST=1       test the working tree in place instead of a fresh clone (uncommitted
 #                     changes are then included)
-#   GATE_NO_HW=1      skip stage g   } prints a loud WARNING and exits 3 (incomplete)
-#   GATE_NO_MODELS=1  skip stage h   }
+#   GATE_ROBOT=both   the robot features on both robots (the default; the full gate)
+#   GATE_ROBOT=sim    the simulated robot only: skip stage g (fast iteration)  } each prints a
+#   GATE_ROBOT=hw     the physical robot only: skip stage s                    } loud WARNING
+#   GATE_NO_HW=1      the same as GATE_ROBOT=sim                               } and exits 3
+#   GATE_NO_MODELS=1  skip stage h and the model features of s and g           } (incomplete)
 #   LEGACY_PYTHON     python for the legacy suite (default: third_party/speech-to-speech/.venv)
 #   LEGACY_APP_DIR    reachy_mini_conversation_app to link (default: from the main checkout)
 #
@@ -84,6 +93,13 @@ unset VIRTUAL_ENV || true
 export UV_PROJECT_ENVIRONMENT=.venv-assistant
 export ASSISTANT_ARTIFACTS_DIR="${ASSISTANT_ARTIFACTS_DIR:-$ROOT/artifacts}"
 
+GATE_ROBOT="${GATE_ROBOT:-both}"
+if [[ "${GATE_NO_HW:-}" == "1" ]]; then GATE_ROBOT=sim; fi
+case "$GATE_ROBOT" in
+    sim | hw | both) ;;
+    *) printf 'GATE_ROBOT must be sim, hw or both (got %q)\n' "$GATE_ROBOT" >&2; exit 2 ;;
+esac
+
 STATE_DIR="$(mktemp -d -t assistant-gate-state.XXXXXX)"
 CLONE_PARENT=""
 CLONE_DIR=""
@@ -103,7 +119,7 @@ fi
 
 WORK="$ROOT"
 STAGES=()
-declare -A RESULT NOTE
+declare -A RESULT NOTE TIME
 INCOMPLETE=()
 
 note() { printf '%s\n' "$*" >"$STATE_DIR/note"; }
@@ -119,7 +135,7 @@ warn_loud() {
 
 # run_stage <id> <title> <function>: exit 0 = PASS, 77 = SKIP (reason in the note), else FAIL.
 run_stage() {
-    local id="$1" title="$2" fn="$3" rc
+    local id="$1" title="$2" fn="$3" rc started=$SECONDS
     STAGES+=("$id")
     banner "$id) $title"
     rm -f "$STATE_DIR/note"
@@ -127,14 +143,17 @@ run_stage() {
     (set -euo pipefail; if [[ -d "$WORK" ]]; then cd "$WORK"; fi; "$fn")
     rc=$?
     set -e
+    TIME[$id]=$((SECONDS - started))
     NOTE[$id]="$(cat "$STATE_DIR/note" 2>/dev/null || true)"
     case "$rc" in
         0) RESULT[$id]="PASS" ;;
         77) RESULT[$id]="SKIP" ;;
         *) RESULT[$id]="FAIL"; NOTE[$id]="${NOTE[$id]:-exit code $rc}" ;;
     esac
-    printf '%s-> %s %s%s\n' "$BOLD" "${RESULT[$id]}" "${NOTE[$id]}" "$RESET"
+    printf '%s-> %s %s (%s)%s\n' "$BOLD" "${RESULT[$id]}" "${NOTE[$id]}" "$(duration "${TIME[$id]}")" "$RESET"
 }
+
+duration() { printf '%dm%02ds' $(($1 / 60)) $(($1 % 60)); }
 
 # pytest_features <marker expression>: run one tier; "no tests collected" (exit 5) means 0
 # features.
@@ -522,7 +541,7 @@ stage_hw() {
         return 1
     fi
     if ! robot_present; then
-        note "$(tail -1 "$STATE_DIR/robot-host" 2>/dev/null) (GATE_NO_HW=1 to skip)"
+        note "$(tail -1 "$STATE_DIR/robot-host" 2>/dev/null) (GATE_ROBOT=sim to skip)"
         return 1
     fi
     local where rc=0 swept
@@ -556,15 +575,42 @@ stage_hw() {
     return "$rc"
 }
 
+# The simulated robot (assistant_testing.sim): Pollen's daemon with --sim on this PC, and its
+# virtual sound card. Leftovers of an earlier run are swept first and reported; leftovers after
+# the features FAIL the stage.
+stage_sim() {
+    if [[ "${GATE_NO_MODELS:-}" != "1" ]] && ! models_present; then
+        note "the [sim, hw, models] features need the models: LLM $LLM_STATUS; speech $SPEECH_STATUS (GATE_NO_MODELS=1 to skip)"
+        return 1
+    fi
+    if ! uv run --locked python -m assistant_testing.sim prepare | tee "$STATE_DIR/sim-ready"; then
+        note "$(tail -1 "$STATE_DIR/sim-ready")"
+        return 1
+    fi
+    printf 'pre-run sweep (an earlier run'"'"'s leftovers):\n'
+    uv run --locked python -m assistant_testing.sim sweep || true
+    local marker="sim" rc=0 swept
+    if [[ "${GATE_NO_MODELS:-}" == "1" ]]; then marker="sim and not models"; fi
+    pytest_features "$marker" || rc=$?
+    uv run --locked python -m assistant_testing.sim sweep | tee "$STATE_DIR/sim-sweep" || true
+    swept="$(tail -1 "$STATE_DIR/sim-sweep")"
+    if [[ "$swept" != "sim sweep: 0 "* ]]; then
+        note "$(cat "$STATE_DIR/note" 2>/dev/null); LEFTOVERS: $swept"
+        return 1
+    fi
+    return "$rc"
+}
+
 stage_models() {
     if ! models_present; then
         note "needs both GPUs, $LLM_MODEL at $LLM_URL ($LLM_STATUS) and the speech server ($SPEECH_STATUS) (GATE_NO_MODELS=1 to skip)"
         return 1
     fi
-    pytest_features "models and not hw"
+    pytest_features "models and not hw and not sim"
 }
 
-stage_skipped_hw() { note "GATE_NO_HW=1"; return 77; }
+stage_skipped_sim() { note "GATE_ROBOT=$GATE_ROBOT"; return 77; }
+stage_skipped_hw() { note "GATE_ROBOT=$GATE_ROBOT${GATE_NO_HW:+ (GATE_NO_HW=1)}"; return 77; }
 stage_skipped_models() { note "GATE_NO_MODELS=1"; return 77; }
 
 # ---------------------------------------------------------------- run
@@ -577,7 +623,7 @@ fi
 
 run_stage a "fresh clone + uv sync" stage_clone
 if [[ "${RESULT[a]}" != "PASS" ]]; then
-    for id in b c d e f g h; do STAGES+=("$id"); RESULT[$id]="NOT RUN"; NOTE[$id]="stage a failed"; done
+    for id in b c d e f s g h; do STAGES+=("$id"); RESULT[$id]="NOT RUN"; NOTE[$id]="stage a failed"; done
 else
     run_stage b "lint: ruff, basedpyright, import-linter" stage_lint
     run_stage c "unit tests" stage_unit
@@ -590,8 +636,15 @@ else
         start_llm_server || printf '%sLLM server: %s%s\n' "$RED" "$LLM_STATUS" "$RESET"
         start_speech_server || printf '%sspeech server: %s%s\n' "$RED" "$SPEECH_STATUS" "$RESET"
     fi
-    if [[ "${GATE_NO_HW:-}" == "1" ]]; then
-        warn_loud "GATE_NO_HW=1: the robot (hw) features were NOT run."
+    if [[ "$GATE_ROBOT" == hw ]]; then
+        warn_loud "GATE_ROBOT=hw: the simulated robot (sim) features were NOT run."
+        INCOMPLETE+=("sim")
+        run_stage s "e2e features, tier sim" stage_skipped_sim
+    else
+        run_stage s "e2e features, tier sim" stage_sim
+    fi
+    if [[ "$GATE_ROBOT" == sim ]]; then
+        warn_loud "GATE_ROBOT=sim: the physical robot (hw) features were NOT run."
         INCOMPLETE+=("hw")
         run_stage g "e2e features, tier hw" stage_skipped_hw
     else
@@ -611,7 +664,7 @@ fi
 banner "i) summary"
 declare -A TITLE=(
     [a]="clone + uv sync" [b]="lint" [c]="unit" [d]="real-only check" [e]="features: core"
-    [f]="legacy tests" [g]="features: hw" [h]="features: models"
+    [f]="legacy tests" [s]="features: sim" [g]="features: hw" [h]="features: models"
 )
 failed=0
 for id in "${STAGES[@]}"; do
@@ -620,8 +673,13 @@ for id in "${STAGES[@]}"; do
         SKIP) colour="$YELLOW" ;;
         *) colour="$RED"; failed=1 ;;
     esac
-    printf '  %s) %-18s %s%-7s%s %s\n' "$id" "${TITLE[$id]}" "$colour" "${RESULT[$id]}" "$RESET" "${NOTE[$id]}"
+    printf '  %s) %-18s %s%-7s%s %7s  %s\n' "$id" "${TITLE[$id]}" "$colour" "${RESULT[$id]}" "$RESET" \
+        "$(duration "${TIME[$id]:-0}")" "${NOTE[$id]}"
 done
+printf '\n  robot features: sim %s, hw %s; the whole gate %s\n' \
+    "$( [[ -n "${TIME[s]:-}" && "${RESULT[s]}" != SKIP ]] && duration "${TIME[s]}" || echo "not run")" \
+    "$( [[ -n "${TIME[g]:-}" && "${RESULT[g]}" != SKIP ]] && duration "${TIME[g]}" || echo "not run")" \
+    "$(duration "$SECONDS")"
 if [[ ${#INCOMPLETE[@]} -gt 0 ]]; then
     warn_loud "opted out of: ${INCOMPLETE[*]}"
 fi

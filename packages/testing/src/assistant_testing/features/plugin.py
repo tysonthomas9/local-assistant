@@ -1,8 +1,10 @@
 """pytest plugin: every scenario in `**/features/**/*.yaml` becomes one test item.
 
 Registered through the `pytest11` entry point, so it is active wherever assistant-testing is
-installed. The feature's `tier` becomes a marker (`core`, `hw` or `models`; a list such as
-`[hw, models]` adds each), so `pytest e2e -m hw` runs only the robot features.
+installed. The feature's `tier` becomes a marker (`core`, `sim`, `hw` or `models`; a list such
+as `[hw, models]` adds each), so `pytest e2e -m hw` runs only the robot features. A scenario
+of tier `[sim, hw]` becomes TWO items, `<name>[sim]` (marker `sim`, on the simulated robot)
+and `<name>[hw]` (marker `hw`, on the physical robot); their other tiers (`models`) go to both.
 `--list-features` prints the features and their steps without running anything.
 """
 
@@ -16,9 +18,9 @@ from typing import Any
 import pytest
 
 import assistant_testing.steps  # noqa: F401  (registers the built-in steps)
-from assistant_testing.features.context import ScenarioContext
+from assistant_testing.features.context import Robot, ScenarioContext
 from assistant_testing.features.loader import Feature, FeatureError, Scenario, load_feature
-from assistant_testing.fixtures import reachy_daemon  # noqa: F401  (registers the fixture)
+from assistant_testing.fixtures import reachy_daemon, reachy_sim  # noqa: F401  (registers them)
 
 PASS = "✓"
 FAIL = "✗"
@@ -37,7 +39,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "feature: a scenario from a YAML feature file")
-    for tier in ("core", "hw", "models"):
+    for tier in ("core", "sim", "hw", "models"):
         config.addinivalue_line("markers", f"{tier}: feature tier {tier}")
 
 
@@ -61,14 +63,26 @@ class FeatureFile(pytest.File):
             raise self.CollectError(str(exc)) from None
         items: list[pytest.Item] = []
         for scenario in self.feature.scenarios:
-            item = ScenarioItem.from_parent(
-                self, name=scenario.name, feature=self.feature, scenario=scenario
-            )
-            item.add_marker("feature")
-            for tier in self.feature.tiers:
-                item.add_marker(tier)
-            items.append(item)
+            for name, robot, tiers in _variants(scenario):
+                item = ScenarioItem.from_parent(
+                    self, name=name, feature=self.feature, scenario=scenario, robot=robot
+                )
+                item.add_marker("feature")
+                for tier in tiers:
+                    item.add_marker(tier)
+                items.append(item)
         return items
+
+
+def _variants(scenario: Scenario) -> list[tuple[str, Robot | None, tuple[str, ...]]]:
+    """(item name, robot, markers) per item of a scenario: one per robot for `[sim, hw]`."""
+    tiers = scenario.tiers
+    if "sim" not in tiers:
+        return [(scenario.name, "hw" if "hw" in tiers else None, tiers)]
+    return [
+        (f"{scenario.name}[sim]", "sim", tuple(t for t in tiers if t != "hw")),
+        (f"{scenario.name}[hw]", "hw", tuple(t for t in tiers if t != "sim")),
+    ]
 
 
 @dataclass
@@ -86,21 +100,26 @@ class StepFailed(Exception):
 
 
 class ScenarioItem(pytest.Item):
-    def __init__(self, *, feature: Feature, scenario: Scenario, **kwargs: Any) -> None:
+    def __init__(
+        self, *, feature: Feature, scenario: Scenario, robot: Robot | None = None, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.feature = feature
         self.scenario = scenario
+        self.robot: Robot | None = robot
         self.results: list[StepResult] = []
 
     def reportinfo(self) -> tuple[Path, int, str]:
-        return self.path, self.scenario.line - 1, f"{self.feature.name}: {self.scenario.name}"
+        return self.path, self.scenario.line - 1, f"{self.feature.name}: {self.name}"
 
     def runtest(self) -> None:
         asyncio.run(self._run())
 
     async def _run(self) -> None:
         self.results = []
-        ctx = ScenarioContext(repo_root=self.config.rootpath, feature_path=self.path)
+        ctx = ScenarioContext(
+            repo_root=self.config.rootpath, feature_path=self.path, robot=self.robot
+        )
         failure: StepFailed | None = None
         try:
             for index, bound in enumerate(self.scenario.steps):
@@ -137,7 +156,7 @@ class ScenarioItem(pytest.Item):
         excinfo: pytest.ExceptionInfo[BaseException],
         style: Any = None,
     ) -> str:
-        header = f"{self.feature.name}: {self.scenario.name}  ({self.path.name})"
+        header = f"{self.feature.name}: {self.name}  ({self.path.name})"
         lines = [header, *self.step_lines()]
         exc = excinfo.value
         if isinstance(exc, StepFailed):
@@ -190,7 +209,8 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         write(f"[{feature.tier}] {feature.name}  ({rel})")
         write(f"    {feature.description}")
         for scenario in feature.scenarios:
-            write(f"  - {scenario.name}")
+            own = "" if scenario.tiers == feature.tiers else f"  [{', '.join(scenario.tiers)}]"
+            write(f"  - {scenario.name}{own}")
             for bound in scenario.steps:
                 write(f"      {bound.text}")
 

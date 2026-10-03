@@ -1,5 +1,5 @@
 feature: Hello gets a spoken reply on the robot
-tier: [hw, models]
+tier: [sim, hw, models]
 description: >
   "hello" typed on the robot's edge agent goes to the real brain (basic engine, the real LLM
   reachy-gemma4, vLLM by default), whose reply is spoken by the real speech server (Qwen3-TTS on GPU1, Jarvis's

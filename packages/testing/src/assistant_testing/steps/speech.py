@@ -733,7 +733,8 @@ async def turn_truncated_at_played_ms(ctx: ScenarioContext, within_s: float = 15
 
 @step("timings_recorded")
 async def timings_recorded(ctx: ScenarioContext, name: str) -> None:
-    """Write the scenario's timings as `<artifacts>/timings-<name>.json`, with the latest
+    """Write the scenario's timings as `<artifacts>/timings-<name>.json` (`-sim.json` on the
+    simulated robot, so it never replaces the physical robot's), with the latest
     finished turn's from the turn log (STT, LLM first token, TTS first audio, the reply's
     first audio, total), and print them. `$ASSISTANT_ARTIFACTS_DIR` (default
     `<repo>/artifacts`) is the directory."""
@@ -763,9 +764,11 @@ async def timings_recorded(ctx: ScenarioContext, name: str) -> None:
                 k: health.get(k) for k in ("gpu", "gpu_memory_mib", "stt_model", "tts_model")
             }
     timings["feature"] = ctx.feature_path.stem
+    if ctx.robot is not None:
+        timings["robot"] = ctx.robot
     directory = Path(os.environ.get("ASSISTANT_ARTIFACTS_DIR") or ctx.repo_root / "artifacts")
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"timings-{name}.json"
+    path = directory / f"timings-{name}{'-sim' if ctx.sim else ''}.json"
     path.write_text(json.dumps(timings, indent=2) + "\n")
     print(f"timings -> {path.name}:\n{json.dumps(timings, indent=2)}")
     turns_logged = timings.get("turns") or []

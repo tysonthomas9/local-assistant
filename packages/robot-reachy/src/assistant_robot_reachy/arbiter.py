@@ -167,7 +167,10 @@ def robot_ready(base: str = DAEMON_URL) -> tuple[bool, str]:
     except (OSError, ValueError) as exc:
         return False, f"daemon not reachable: {exc}"
     backend = status.get("backend_status") or {}
-    if status.get("state") != "running" or not backend.get("ready") or status.get("error"):
+    # Pollen's MuJoCo backend (a simulated robot) reports no `ready`: it is up once the
+    # daemon runs.
+    ready = backend.get("ready", status.get("simulation_enabled") is True)
+    if status.get("state") != "running" or not ready or status.get("error"):
         return False, f"daemon state {status.get('state')!r}, backend {backend}"
     return True, "daemon running, backend ready"
 

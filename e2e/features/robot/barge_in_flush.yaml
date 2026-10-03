@@ -1,5 +1,5 @@
 feature: Barge-in stops the robot's speaker at once
-tier: hw
+tier: [sim, hw]
 description: >
   While the robot speaks, push-to-talk is a barge-in: the edge flushes its own speaker first
   (within 150 ms, without waiting for the brain), then sends vad{start, barge_in, stream_id,
