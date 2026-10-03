@@ -357,10 +357,13 @@ transcribed at once. If that pause is the end, the text is already there when th
 runs out (`end of speech to text ready` in the log); if you go on, it's done again at the next
 pause. That pass covers everything you said (only the trailing silence is missing). After the
 reply starts, a check pass over the whole utterance logs whether both texts match (yes/no only).
+A pause pass only transcribes: where an utterance starts and ends is the VAD's decision alone.
+`--stt-full-pass` turns the pause passes off, so the text always comes from one pass over the whole
+utterance after the end silence (about 0.2-0.4 s later).
 
 To start speaking as soon as it can, MuseHandler uses `POST /turn?stream=1`: it speaks the first
 sentence while Muse is still writing the rest, and each later sentence in order. With
-`--no-barge-in` the mic stays off until the stream has ended and the audio has played. What you say ends after 0.5 s of quiet
+`--no-barge-in` the mic stays off until the stream has ended and the audio has played. What you say ends after 0.8 s of quiet
 (`--end-silence SECONDS`, 0.1-5). Each turn logs `end of speech to first audio <ms>` (timings only).
 
 Run it from the PC:
@@ -371,8 +374,8 @@ muse_gadget/run_poc.sh --fake-bridge    # echo bridge: the robot answers "You sa
 # options: --duration SECONDS, --lock-timeout SECONDS, --mic-log SECONDS, --log-transcripts,
 #          --tts qwen3|kokoro|say, --voice NAME, --instruct TEXT, --volume N (default 100),
 #          --stt qwen3-asr|parakeet|whisper, --stt-model ID, --style-hint,
-#          --end-silence SECONDS (default 0.5), --no-barge-in, --barge-in-stop-ms N (default 350),
-#          -- <app args>
+#          --end-silence SECONDS (default 0.8), --no-barge-in, --barge-in-stop-ms N (default 350),
+#          --stt-full-pass, -- <app args>
 ```
 
 In order, it:

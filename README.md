@@ -63,7 +63,7 @@ One turn, in order:
 5. If Muse wants to move the robot, it sends a `client.invoke` for a `reachy.*` command. The gadget calls MuseHandler's robot-tools endpoint, which starts the dance at once with Pollen's own `dance` tool and tells Muse it's in progress.
 6. Qwen3-TTS speaks the reply on the robot's speaker while the robot dances, and Pollen's wobbler moves the head while it plays. The reply streams in (`POST /turn?stream=1`): the first sentence is spoken as soon as Muse has written it, without waiting for the rest.
 
-What you say ends after 0.5 s of quiet (`--end-silence`). Speech-to-text runs at each pause while you're still talking, so when the pause turns out to be the end, the text is already there. Each turn logs the time from the end of your speech to the text and to the robot's first audio.
+What you say ends after 0.8 s of quiet (`--end-silence`). Speech-to-text runs at each pause while you're still talking, so when the pause turns out to be the end, the text is already there (`--stt-full-pass` turns this off: one pass over the whole utterance after the end silence). Each turn logs the time from the end of your speech to the text and to the robot's first audio.
 
 You can talk over the robot (barge-in): once a reply is playing, the mic stays open and the robot's own voice is removed by the XVF3800's echo cancellation, with Pollen's tuned settings. When you start talking, the robot keeps going for 350 ms, fades out, drops the rest of its reply, and answers what you said instead. A move that has already started keeps going. `--no-barge-in` turns this off (half-duplex: the mic is off while the robot speaks).
 
@@ -146,7 +146,8 @@ The first run installs the app, its venvs and the speech models on the Mac (`mac
 | `--style-hint` | Opt in: put a short "spoken by a desk robot" note before your words. Off by default |
 | `--duration S`, `--lock-timeout S` | Stop by itself after S seconds; give up waiting for the robot lock |
 | `--no-barge-in`, `--barge-in-stop-ms N` | Turn talking over the robot off (half-duplex); how long it keeps speaking after you start, 0-2000 ms (default 350) |
-| `--end-silence S` | Quiet time that ends what you say, 0.1-5 seconds (default 0.5). Shorter answers sooner but may cut you off mid-pause |
+| `--end-silence S` | Quiet time that ends what you say, 0.1-5 seconds (default 0.8). Shorter answers sooner but may cut you off mid-pause |
+| `--stt-full-pass` | Speech-to-text in one pass over the whole utterance, after the end silence, instead of at each pause (slower, by about 0.2-0.4 s) |
 | `--mic-log S`, `--log-transcripts` | Debugging: log mic level and VAD score; show each turn's text on the terminal |
 | `-- <app args>` | Passed to the conversation app (for example `--no-camera`, `--debug`) |
 
