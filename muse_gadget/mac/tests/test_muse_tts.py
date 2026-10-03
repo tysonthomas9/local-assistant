@@ -294,3 +294,42 @@ def test_run_app_takes_the_tts_flags(monkeypatch):
         run_app.take_own_flags(["run_app.py", "--tts", "espeak"])
     with pytest.raises(SystemExit):
         run_app.take_own_flags(["run_app.py", "--voice"])
+
+
+def test_stt_loads_and_runs_on_one_thread_while_tts_loads_in_parallel(monkeypatch):
+    # MLX (parakeet) raises "There is no Stream(cpu, 1) in current thread" on any other thread.
+    import muse_stt
+
+    threads: dict[str, set[int]] = {"load": set(), "run": set()}
+
+    def make_transcriber():
+        threads["load"].add(threading.get_ident())
+
+        def transcribe(audio):
+            threads["run"].add(threading.get_ident())
+            return ""
+
+        return "fake-mlx", transcribe
+
+    def make_tts():
+        time.sleep(0.05)  # keep a second executor thread busy while STT loads
+        return GatedTts()
+
+    monkeypatch.setattr(muse_stt, "make_transcriber", make_transcriber)
+    monkeypatch.setattr(muse_tts, "make_tts", make_tts)
+
+    async def run():
+        handler = muse_handler.MuseHandler(
+            FakeDeps(), bridge=BridgeClient("http://127.0.0.1:9"), segmenter=UtteranceSegmenter(EnergyVad()),
+        )
+        startup = asyncio.create_task(handler.start_up())
+        while not handler._is_connected():
+            await asyncio.sleep(0.01)
+        for _ in range(5):
+            await asyncio.gather(*(asyncio.to_thread(time.sleep, 0.01) for _ in range(4)))  # churn the default pool
+            await handler._run_turn(np.zeros(16000, np.float32))
+        await handler.shutdown()
+        await startup
+
+    asyncio.run(run())
+    assert len(threads["load"]) == 1 and threads["run"] == threads["load"]

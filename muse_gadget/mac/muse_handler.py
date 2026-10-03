@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -93,6 +94,8 @@ class MuseHandler(ConversationHandler):
         self._startup_voice = None if startup_voice in (None, "", DEFAULT_VOICE) else startup_voice
         self.tts: Optional[Tts] = tts or (CallableTts(synthesizer) if synthesizer else None)
         self._owns_tts = False  # loaded by start_up (so closed by shutdown)
+        # MLX streams are per thread: parakeet must run on the thread that loaded it.
+        self._stt_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="muse-stt")
         self.segmenter = segmenter or UtteranceSegmenter(make_vad())
         self._output_rate = output_sample_rate
         if log_transcripts is None:
@@ -137,7 +140,7 @@ class MuseHandler(ConversationHandler):
         if self.transcriber is None:
             from muse_stt import make_transcriber
 
-            loads.append(asyncio.to_thread(make_transcriber))
+            loads.append(asyncio.get_running_loop().run_in_executor(self._stt_thread, make_transcriber))
         if self.tts is None:
             from muse_tts import make_tts
 
@@ -242,7 +245,8 @@ class MuseHandler(ConversationHandler):
     async def _run_turn(self, utterance: np.ndarray) -> None:
         assert self.transcriber is not None
         started = time.perf_counter()
-        text = (await asyncio.to_thread(self.transcriber, utterance)).strip()
+        loop = asyncio.get_running_loop()
+        text = (await loop.run_in_executor(self._stt_thread, self.transcriber, utterance)).strip()
         stt_ms = (time.perf_counter() - started) * 1000
         if not text:
             logger.info("MuseHandler: empty transcript (%.1f s of audio), ignored", len(utterance) / 16000)
