@@ -14,6 +14,7 @@ Two VADs:
 from __future__ import annotations
 
 import collections
+import os
 from pathlib import Path
 from typing import Protocol
 
@@ -97,6 +98,20 @@ def make_vad() -> Vad:
     return EnergyVad()
 
 
+# Quiet time that ends an utterance (run_poc.sh --end-silence sets MUSE_END_SILENCE). Shorter is a
+# faster turn; too short cuts the user off at a pause.
+END_SILENCE_S = 0.5
+END_SILENCE_ENV = "MUSE_END_SILENCE"
+
+
+def end_silence_from_env() -> float:
+    try:
+        value = float(os.environ.get(END_SILENCE_ENV) or END_SILENCE_S)
+    except ValueError:
+        return END_SILENCE_S
+    return value if 0.1 <= value <= 5.0 else END_SILENCE_S
+
+
 class UtteranceSegmenter:
     """Collect one utterance: starts on `start_windows` speech windows, ends after `silence_s`."""
 
@@ -106,7 +121,7 @@ class UtteranceSegmenter:
         *,
         threshold: float = 0.5,
         start_windows: int = 3,
-        silence_s: float = 0.8,
+        silence_s: float = END_SILENCE_S,
         preroll_s: float = 0.3,
         min_speech_s: float = 0.3,
         max_utterance_s: float = 15.0,

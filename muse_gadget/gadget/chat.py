@@ -12,6 +12,11 @@ NDJSON stream on the same session, as in the ESP32 firmware
    ``message.assistant``) until every one is done and nothing has arrived for
    a short settle time. A busy agent (``agent.status``) keeps the turn open.
 
+With ``on_sentence``, each sentence is handed over as soon as it ends (``.``, ``!``, ``?``
+followed by a space, or a newline) or its message is done, so speech never waits for the
+settle time; the settle time only decides when the turn ends (a late second message is
+still handed over). At the deadline the text so far is handed over and the turn ends.
+
 Message and reply text are never logged.
 """
 
@@ -22,7 +27,7 @@ import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Awaitable, Callable, Protocol
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +46,8 @@ SETTLE_S = 0.3   # quiet time after the last message is done; each 0.1 s here is
 BUSY_HOLD_S = 20.0
 WAIT_STEP_S = 0.25
 MAX_MESSAGES = 8
+OnSentence = Callable[[str], Awaitable[None]]
+_SENTENCE_END = re.compile(r"[.!?]+[\"')\]]*(?=\s)|\n")
 REPLY_EVENTS = ("delta.message_start", "delta.text_append", "delta.message_done", "message.assistant")
 
 
@@ -105,11 +112,20 @@ def speakable(text: str) -> str:
     return " ".join(_MARKDOWN.sub("", text).split())
 
 
+def complete_length(text: str) -> int:
+    """How much of ``text`` is complete sentences (0 if no sentence has ended yet)."""
+    end = 0
+    for match in _SENTENCE_END.finditer(text):
+        end = match.end()
+    return end
+
+
 @dataclass
 class _Message:
     text: str = ""
     final: str = ""
     done: bool = False
+    handed: int = 0   # characters already handed to on_sentence
 
 
 @dataclass
@@ -196,6 +212,21 @@ class _Reply:
         parts = [(m.final or m.text).strip() for m in self.messages.values()]
         return " ".join(speakable(p) for p in parts if p)
 
+    def ready(self, flush: bool = False) -> list[str]:
+        """The sentences not handed over yet: complete ones, all of a done message, or (flush) all."""
+        out = []
+        for m in self.messages.values():
+            if m.done or flush:
+                full = m.final or m.text
+                piece, m.handed = full[m.handed:], max(m.handed, len(full))
+            else:
+                n = complete_length(m.text[m.handed:])
+                piece, m.handed = m.text[m.handed:m.handed + n], m.handed + n
+            spoken = speakable(piece)
+            if spoken:
+                out.append(spoken)
+        return out
+
 
 async def turn(
     link: Link,
@@ -203,8 +234,11 @@ async def turn(
     options: TurnOptions = TurnOptions(),
     *,
     clock: Callable[[], float] = time.monotonic,
+    on_sentence: OnSentence | None = None,
 ) -> str:
-    """Send ``text`` to Muse and return its reply. Raises ``TurnError``."""
+    """Send ``text`` to Muse and return its reply. Raises ``TurnError``.
+
+    ``on_sentence`` (optional) gets the reply sentence by sentence as it arrives."""
     started = clock()
     deadline = started + options.timeout_s
     session_id = options.session_id or None
@@ -216,6 +250,17 @@ async def turn(
         log.warning("chat subscription refused: %s", getattr(exc, "status", type(exc).__name__))
         raise TurnError("muse_error", 502) from None
     reply: _Reply | None = None
+    first_handed: float | None = None
+
+    async def hand_over(flush: bool = False) -> None:
+        nonlocal first_handed
+        if on_sentence is None or reply is None:
+            return
+        for sentence in reply.ready(flush):
+            if first_handed is None:
+                first_handed = clock()
+            await on_sentence(sentence)
+
     try:
         ack = await link.send_chat(compose(text, options.style_hint), session_id)
         ours = user_ids(ack.get("response")) if ack.get("ok") else set()
@@ -236,6 +281,8 @@ async def turn(
             event = await sub.next(min(WAIT_STEP_S, deadline - now))
             if event is not None:
                 reply.on_event(event, clock())
+                await hand_over()
+        await hand_over(flush=True)
     finally:
         await sub.close()
         if reply is not None:
@@ -244,4 +291,6 @@ async def turn(
     first = reply.first_content - started if reply.first_content is not None else -1
     log.info("got a %d-character reply in %d message(s); first text after %.2fs, turn %.2fs",
              len(answer), len(reply.messages), first, clock() - started)
+    if first_handed is not None:
+        log.info("first sentence handed over after %.2fs", first_handed - started)
     return answer

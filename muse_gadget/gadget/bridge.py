@@ -6,6 +6,11 @@
   ``{"error": "link_down"}``, 504 ``{"error": "timeout"}`` after 60 s with no
   reply text (with some text, the text so far comes back as a 200), 502
   ``{"error": "muse_error"}`` if Muse refuses the turn.
+* ``POST /turn?stream=1`` (same body) streams the reply as NDJSON while Muse writes it:
+  one ``{"text": "<sentence>"}`` line per sentence as soon as it ends, then
+  ``{"done": true}`` (or ``{"done": true, "error": "timeout"}`` when the turn ran out
+  after some text). An error before any sentence gets the same status and JSON body as
+  the one-shot form.
 * ``GET /health`` -> 200 ``{"paired": bool, "linked": bool}``.
 
 The bridge listens on loopback only. Inside a container, where the published
@@ -78,9 +83,13 @@ class Bridge:
         log.info("bridge listening on %s:%d", host, port)
         return server
 
-    async def handle(self, method: str, path: str, headers: dict, body: bytes) -> tuple[int, dict]:
-        """Route one request; returns ``(status, JSON body)``."""
-        path = path.split("?", 1)[0]
+    async def handle(self, method: str, path: str, headers: dict, body: bytes,
+                     emit: chat.OnSentence | None = None) -> tuple[int, dict]:
+        """Route one request; returns ``(status, JSON body)``.
+
+        With ``emit`` and ``?stream=1``, reply sentences go to ``emit`` as they arrive."""
+        path, _, query = path.partition("?")
+        stream = emit is not None and "stream=1" in query.split("&")
         if path == "/health":
             if method != "GET":
                 return 405, {"error": "method_not_allowed"}
@@ -104,7 +113,8 @@ class Bridge:
         if not self._is_paired():
             return 503, {"error": "not_paired"}
         try:
-            reply = await asyncio.wait_for(self._turn(text), self._options.timeout_s + TURN_MARGIN_S)
+            reply = await asyncio.wait_for(self._turn(text, emit if stream else None),
+                                           self._options.timeout_s + TURN_MARGIN_S)
         except asyncio.TimeoutError:
             return 504, {"error": "timeout"}
         except chat.TurnError as exc:
@@ -114,18 +124,29 @@ class Bridge:
             return 503, {"error": "link_down"}
         return 200, {"reply": reply}
 
-    async def _turn(self, text: str) -> str:
+    async def _turn(self, text: str, on_sentence: chat.OnSentence | None = None) -> str:
         async with self._turn_lock:
             link = self._get_link()
             if link is None:
                 raise chat.TurnError("link_down", 503)
-            return await chat.turn(link, text, self._options)
+            return await chat.turn(link, text, self._options, on_sentence=on_sentence)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         status, payload = 400, {"error": "bad_request"}
+        streaming = False
+
+        async def emit(sentence: str) -> None:   # ?stream=1: headers on the first sentence
+            nonlocal streaming
+            if not streaming:
+                streaming = True
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n"
+                             b"Cache-Control: no-store\r\nConnection: close\r\n\r\n")
+            writer.write(json.dumps({"text": sentence}).encode() + b"\n")
+            await writer.drain()
+
         try:
             method, path, headers, body = await asyncio.wait_for(_read_request(reader), HEADER_TIMEOUT_S)
-            status, payload = await self.handle(method, path, headers, body)
+            status, payload = await self.handle(method, path, headers, body, emit)
         except _TooLarge:
             status, payload = 413, {"error": "too_long"}
         except (ValueError, asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
@@ -133,6 +154,18 @@ class Bridge:
         except Exception:
             log.exception("bridge request failed")
             status, payload = 502, {"error": "muse_error"}
+        if streaming:   # the reply so far went out as sentences: just end the stream
+            end = {"done": True}
+            if status != 200 and isinstance(payload.get("error"), str):
+                end["error"] = payload["error"]
+            try:
+                writer.write(json.dumps(end).encode() + b"\n")
+                await writer.drain()
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                writer.close()
+            return
         data = json.dumps(payload).encode()
         head = (f"HTTP/1.1 {status} {_REASONS.get(status, 'Error')}\r\n"
                 "Content-Type: application/json\r\n"

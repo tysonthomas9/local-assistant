@@ -32,7 +32,8 @@ class EchoBridge(BaseHTTPRequestHandler):
             self._send(404, {"error": "not_found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/turn":
+        path, _, query = self.path.partition("?")
+        if path != "/turn":
             self._send(404, {"error": "not_found"})
             return
         if not (self.headers.get("Content-Type") or "").startswith("application/json"):
@@ -48,7 +49,16 @@ class EchoBridge(BaseHTTPRequestHandler):
             self._send(400, {"error": "bad_request"})
             return
         sys.stderr.write(f"fake-bridge: turn of {len(text)} chars\n")
-        self._send(200, {"reply": f"You said: {text.strip()}"})
+        reply = f"You said: {text.strip()}"
+        if "stream=1" in query.split("&"):   # one sentence, then the end
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(json.dumps({"text": reply}).encode() + b"\n" + b'{"done": true}\n')
+            self.close_connection = True
+            return
+        self._send(200, {"reply": reply})
 
     def log_message(self, format: str, *args: object) -> None:  # quiet: no request lines
         pass

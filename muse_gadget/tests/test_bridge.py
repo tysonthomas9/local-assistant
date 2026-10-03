@@ -133,3 +133,35 @@ def test_timeout_returns_the_text_so_far():
 
 def test_outer_guard_is_later_than_the_turn_deadline():
     assert bridge.TURN_MARGIN_S > 0
+
+
+async def http_lines(port: int, path: str, body: bytes):
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    head = (f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len(body)}\r\n"
+            "Content-Type: application/json\r\n\r\n")
+    writer.write(head.encode() + body)
+    await writer.drain()
+    raw = await reader.read()
+    writer.close()
+    status_line, _, rest = raw.partition(b"\r\n")
+    headers, _, payload = rest.partition(b"\r\n\r\n")
+    return int(status_line.split()[1]), headers.decode().lower(), [json.loads(l) for l in payload.splitlines() if l]
+
+
+def test_stream_sends_sentences_then_done():
+    link = FakeLink({"hi": ["Hi there. How are you?"]})   # streamed as "Hi there. H" + "ow are you?"
+    status, headers, lines = with_bridge(lambda port: http_lines(port, "/turn?stream=1", b'{"text": "hi"}'), link)
+    assert status == 200 and "application/x-ndjson" in headers
+    assert lines == [{"text": "Hi there."}, {"text": "How are you?"}, {"done": True}]
+
+
+def test_stream_timeout_after_text_just_ends():
+    status, _, lines = with_bridge(lambda port: http_lines(port, "/turn?stream=1", b'{"text": "dance"}'),
+                                   Unfinished({}), options=chat.TurnOptions(settle_s=0, timeout_s=0.3))
+    assert status == 200 and lines == [{"text": "Watch this dance!"}, {"done": True}]
+
+
+def test_stream_error_before_any_text_is_the_usual_status():
+    status, _, lines = with_bridge(lambda port: http_lines(port, "/turn?stream=1", b'{"text": "silence"}'),
+                                   FakeLink({}), options=chat.TurnOptions(settle_s=0, timeout_s=0.3))
+    assert (status, lines) == (504, [{"error": "timeout"}])

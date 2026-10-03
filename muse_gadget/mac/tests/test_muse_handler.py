@@ -341,3 +341,106 @@ def test_start_up_closes_the_loaded_worker_when_the_other_fails(monkeypatch, fai
     assert len(started) == 1
     assert started[0].proc.poll() is not None, "the worker that did load was stopped"
     assert not handler._owns_stt and not handler._owns_tts
+
+
+# ------------------------------------------------------------------ streamed replies
+class SlowStream:
+    """A bridge that streams two sentences with a gap, like Muse writing; records when each went out."""
+
+    def __init__(self, gap_s=0.6, lines=None):
+        import http.server
+        import json as _json
+
+        self.sent_at: list[float] = []
+        outer = self
+        self.lines = lines if lines is not None else [{"text": "First sentence."}, {"text": "Second one."}]
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                outer.paths.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.end_headers()
+                for i, line in enumerate(outer.lines):
+                    if i:
+                        time.sleep(gap_s)
+                    self.wfile.write(_json.dumps(line).encode() + b"\n")
+                    self.wfile.flush()
+                    outer.sent_at.append(time.perf_counter())
+                self.wfile.write(b'{"done": true}\n')
+                self.close_connection = True
+
+            def log_message(self, *args):
+                pass
+
+        self.paths: list[str] = []
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def run_streamed_turn(bridge):
+    spoken: list[tuple[str, float]] = []
+
+    def synth(text, rate):
+        spoken.append((text, time.perf_counter()))
+        return tone(text, rate)
+
+    handler = muse_handler.MuseHandler(FakeDeps(), bridge=BridgeClient(bridge.url), transcriber=lambda a: "hello",
+                                       synthesizer=synth, segmenter=UtteranceSegmenter(EnergyVad()))
+
+    async def main():
+        await handler._run_turn(np.zeros(16000, np.float32), time.perf_counter() - 0.5)
+        while not handler.output_queue.empty():
+            handler.output_queue.get_nowait()
+    asyncio.run(main())
+    return spoken
+
+
+def test_first_sentence_is_spoken_while_muse_is_still_writing(caplog):
+    caplog.set_level(logging.INFO)
+    bridge = SlowStream(gap_s=0.6)
+    try:
+        spoken = run_streamed_turn(bridge)
+    finally:
+        bridge.close()
+    assert bridge.paths == ["/turn?stream=1"]
+    assert [t for t, _ in spoken] == ["First sentence.", "Second one."]
+    assert spoken[0][1] < bridge.sent_at[1], "the first sentence was rendered before the second arrived"
+    timing = [r.getMessage() for r in caplog.records if "end of speech to first audio" in r.getMessage()]
+    assert len(timing) == 1 and "hello" not in timing[0]
+
+
+def test_stream_error_before_text_is_spoken_as_before():
+    bridge = SlowStream(lines=[{"done": True, "error": "timeout"}])
+    try:
+        spoken = run_streamed_turn(bridge)
+    finally:
+        bridge.close()
+    assert [t for t, _ in spoken] == ["Muse is taking too long to answer."]
+
+
+def test_stream_client_reads_sentences_and_errors(bridge_url):
+    got = []
+    assert BridgeClient(bridge_url).turn_stream("hi there", got.append) == "You said: hi there"
+    assert got == ["You said: hi there"]
+    with pytest.raises(BridgeError) as err:
+        BridgeClient("http://127.0.0.1:9", timeout_s=2).turn_stream("hi", got.append)
+    assert err.value.code == "unreachable"
+
+
+def test_end_silence_default_and_env(monkeypatch):
+    import muse_vad
+
+    monkeypatch.delenv(muse_vad.END_SILENCE_ENV, raising=False)
+    assert muse_vad.end_silence_from_env() == 0.5 == muse_vad.END_SILENCE_S
+    monkeypatch.setenv(muse_vad.END_SILENCE_ENV, "0.3")
+    assert muse_vad.end_silence_from_env() == 0.3
+    for bad in ("abc", "0", "9"):
+        monkeypatch.setenv(muse_vad.END_SILENCE_ENV, bad)
+        assert muse_vad.end_silence_from_env() == 0.5

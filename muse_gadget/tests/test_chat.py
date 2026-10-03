@@ -125,3 +125,113 @@ def test_style_note_is_off_unless_opted_in(monkeypatch):
     hint = gadget_main.turn_options().style_hint
     assert hint == chat.STYLE_NOTE and "reachy" not in hint
     assert chat.compose("hello", hint) == f"{chat.STYLE_NOTE}\nhello"
+
+
+# ------------------------------------------------------------------ sentences as they arrive
+class TimedSub:
+    """Scripted events at fixed times on a fake clock: [(time, event), ...]."""
+
+    def __init__(self, clock, events):
+        self.clock, self.events, self.closed = clock, list(events), False
+
+    async def next(self, timeout):
+        if self.events and self.events[0][0] <= self.clock.now + timeout:
+            at, event = self.events.pop(0)
+            self.clock.now = max(self.clock.now, at)
+            return event
+        self.clock.now += max(timeout, 0)
+        return None
+
+    async def close(self):
+        self.closed = True
+
+
+class TimedLink:
+    """Muse's reply as timed events; ``script(ev, note)`` returns [(time, event), ...]."""
+
+    def __init__(self, clock, script):
+        self.clock, self.script, self.seq = clock, script, 0
+        self.sent = []
+
+    def ev(self, name, **payload):
+        self.seq += 1
+        return {"type": "event", "seq": self.seq, "event": name, "payload": payload}
+
+    async def subscribe(self, session_id=None):
+        self.sub = TimedSub(self.clock, [])
+        return self.sub
+
+    async def send_chat(self, message, session_id=None):
+        self.sent.append(message)
+        self.sub.events = self.script(self.ev, "u-1")
+        return {"ok": True, "status": 200, "response": {"ok": True, "result": {"message_id": "u-1"}}}
+
+
+def stream_turn(script, options):
+    clock = Clock()
+    link = TimedLink(clock, script)
+    heard = []
+
+    async def on_sentence(sentence):
+        heard.append((sentence, clock.now))
+
+    reply = asyncio.run(chat.turn(link, "hi", options, clock=clock, on_sentence=on_sentence))
+    return reply, heard, clock.now
+
+
+def test_first_sentence_is_handed_over_before_message_done():
+    def script(ev, note):
+        return [(0.5, ev("delta.message_start", message_id="a", reply_to_message_id=note)),
+                (0.6, ev("delta.text_append", message_id="a", text="Hello **there**. How")),
+                (3.0, ev("delta.text_append", message_id="a", text=" are you?")),
+                (3.1, ev("delta.message_done", message_id="a"))]
+    reply, heard, _ = stream_turn(script, chat.TurnOptions(settle_s=0.3))
+    assert heard == [("Hello there.", 0.6), ("How are you?", 3.1)]
+    assert reply == "Hello there. How are you?"
+
+
+def test_speech_never_waits_for_the_settle_time():
+    def script(ev, note):
+        return [(1.0, ev("message.assistant", message_id="a", reply_to_message_id=note,
+                         display_text="Done", display_text_ready=True))]
+    _, heard, ended = stream_turn(script, chat.TurnOptions(settle_s=1.5))
+    assert heard == [("Done", 1.0)]
+    assert ended >= 2.5, "the settle time still decides when the turn ends"
+
+
+def test_a_late_second_message_is_still_handed_over():
+    def script(ev, note):
+        return [(0.5, ev("message.assistant", message_id="a", reply_to_message_id=note,
+                         display_text="First.", display_text_ready=True)),
+                (0.7, ev("delta.message_start", message_id="b", reply_to_message_id=note)),
+                (0.75, ev("delta.text_append", message_id="b", text="Second")),
+                (0.8, ev("delta.message_done", message_id="b"))]
+    reply, heard, _ = stream_turn(script, chat.TurnOptions(settle_s=0.3))
+    assert heard == [("First.", 0.5), ("Second", 0.8)]
+    assert reply == "First. Second"
+
+
+def test_timeout_hands_over_the_text_so_far_and_ends():
+    def script(ev, note):
+        return [(0.5, ev("delta.message_start", message_id="a", reply_to_message_id=note)),
+                (0.6, ev("delta.text_append", message_id="a", text="Sure! Let me thin"))]
+    reply, heard, ended = stream_turn(script, chat.TurnOptions(settle_s=0.3, timeout_s=5))
+    assert heard == [("Sure!", 0.6), ("Let me thin", 5.0)]
+    assert reply == "Sure! Let me thin" and ended == 5.0
+
+
+def test_one_shot_turn_is_unchanged_without_on_sentence():
+    def script(ev, note):
+        return [(0.6, ev("delta.message_start", message_id="a", reply_to_message_id=note)),
+                (0.7, ev("delta.text_append", message_id="a", text="One. Two.")),
+                (0.8, ev("delta.message_done", message_id="a"))]
+    clock = Clock()
+    assert asyncio.run(chat.turn(TimedLink(clock, script), "hi", chat.TurnOptions(settle_s=0.3),
+                                 clock=clock)) == "One. Two."
+
+
+def test_complete_length():
+    assert chat.complete_length("Hi there. How") == 9
+    assert chat.complete_length("Pi is 3.14 ok") == 0
+    assert chat.complete_length("Done.") == 0   # the end comes with message_done
+    assert chat.complete_length("one\ntwo") == 4

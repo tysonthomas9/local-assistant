@@ -48,7 +48,7 @@ from reachy_mini_conversation_app.tools.tool_constants import ToolState
 
 from muse_bridge import BridgeClient, BridgeError, spoken_error
 from muse_tts import Tts
-from muse_vad import UtteranceSegmenter, make_vad, to_mono_16k
+from muse_vad import SAMPLE_RATE, WINDOW, UtteranceSegmenter, end_silence_from_env, make_vad, to_mono_16k
 import robot_tools
 
 logger = logging.getLogger(__name__)
@@ -125,12 +125,12 @@ class MuseHandler(ConversationHandler):
         self._owns_tts = False  # loaded by start_up (so closed by shutdown)
         # MLX streams are per thread: parakeet must run on the thread that loaded it.
         self._stt_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="muse-stt")
-        self.segmenter = segmenter or UtteranceSegmenter(make_vad())
+        self.segmenter = segmenter or UtteranceSegmenter(make_vad(), silence_s=end_silence_from_env())
         self._output_rate = output_sample_rate
         if log_transcripts is None:
             log_transcripts = os.environ.get("MUSE_LOG_TRANSCRIPTS") == "1"
         self.log_transcripts = log_transcripts  # opt-in: the app would log the text
-        self._utterances: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=1)
+        self._utterances: asyncio.Queue[tuple[np.ndarray, float]] = asyncio.Queue(maxsize=1)
         self._busy = False
         self._busy_until = 0.0
         self._speak_lock = asyncio.Lock()
@@ -261,7 +261,9 @@ class MuseHandler(ConversationHandler):
             self._busy = True  # half-duplex: closed until this turn has been spoken
             self.segmenter.reset()
             try:
-                self._utterances.put_nowait(utterance)
+                # The speech ended one silence window ago (the segmenter waited that long).
+                ended = time.perf_counter() - self.segmenter.silence_windows * WINDOW / SAMPLE_RATE
+                self._utterances.put_nowait((utterance, ended))
             except asyncio.QueueFull:
                 pass
             self._mark_activity("user_utterance")
@@ -281,9 +283,9 @@ class MuseHandler(ConversationHandler):
     # ------------------------------------------------------------------ one turn
     async def _turn_worker(self) -> None:
         while True:
-            utterance = await self._utterances.get()
+            utterance, ended = await self._utterances.get()
             try:
-                await self._run_turn(utterance)
+                await self._run_turn(utterance, ended)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -291,9 +293,10 @@ class MuseHandler(ConversationHandler):
             finally:
                 self._busy = False
 
-    async def _run_turn(self, utterance: np.ndarray) -> None:
+    async def _run_turn(self, utterance: np.ndarray, speech_ended: Optional[float] = None) -> None:
         assert self.transcriber is not None
         started = time.perf_counter()
+        speech_ended = started if speech_ended is None else speech_ended
         loop = asyncio.get_running_loop()
         text = (await loop.run_in_executor(self._stt_thread, self.transcriber, utterance)).strip()
         stt_ms = (time.perf_counter() - started) * 1000
@@ -304,19 +307,46 @@ class MuseHandler(ConversationHandler):
         await self._transcript("user", text)
         self._turn_tools.clear()
         self._turn_tool_s = 0.0
+        # Each sentence is spoken as soon as the bridge streams it, while Muse is still writing.
+        sentences: asyncio.Queue[Optional[str]] = asyncio.Queue()
+
+        def on_sentence(sentence: str) -> None:   # on the bridge thread
+            loop.call_soon_threadsafe(sentences.put_nowait, sentence)
+
+        def fetch() -> str:
+            try:
+                if hasattr(self.bridge, "turn_stream"):
+                    return self.bridge.turn_stream(text, on_sentence)
+                reply = self.bridge.turn(text)
+                on_sentence(reply)
+                return reply
+            finally:
+                loop.call_soon_threadsafe(sentences.put_nowait, None)
+
+        fetching = asyncio.ensure_future(asyncio.to_thread(fetch))
+        first_audio: Optional[float] = None
+        while (sentence := await sentences.get()) is not None:
+            heard_at = await self._speak(sentence)
+            first_audio = first_audio or heard_at
         try:
-            reply = await asyncio.to_thread(self.bridge.turn, text)
+            reply = await fetching
         except BridgeError as e:
             logger.warning("MuseHandler: bridge error %s", e.code)
             reply = spoken_error(e)
+            heard_at = await self._speak(reply)
+            first_audio = first_audio or heard_at
         self._log_turn_tools()
         logger.info("MuseHandler: reply %d chars after %.0f ms", len(reply), (time.perf_counter() - started) * 1000)
-        await self._speak(reply)
+        if first_audio is not None:
+            logger.info("MuseHandler: end of speech to first audio %.0f ms (speech-to-text %.0f ms)",
+                        (first_audio - speech_ended) * 1000, stt_ms)
 
-    async def _speak(self, text: str) -> None:
+    async def _speak(self, text: str) -> Optional[float]:
+        """Speak ``text``; returns when its first audio was queued (perf_counter), or None."""
         text = text.strip()
         if not text:
-            return
+            return None
+        first_at: Optional[float] = None
         assert self.tts is not None
         async with self._speak_lock:
             rate = self.output_sample_rate()
@@ -330,6 +360,7 @@ class MuseHandler(ConversationHandler):
                     break
                 pcm = np.asarray(pcm, dtype=np.int16).reshape(-1)
                 if first:
+                    first_at = time.perf_counter()
                     logger.info("MuseHandler: first audio after %.0f ms (%s)",
                                 (time.perf_counter() - started) * 1000, self.tts.name)
                     await self._transcript("assistant", text)
@@ -341,6 +372,7 @@ class MuseHandler(ConversationHandler):
                 self._play_end = max(self._play_end, now) + len(pcm) / rate
                 self._busy_until = self._play_end + TAIL_S
                 self._mark_activity("assistant_audio")
+        return first_at
 
     async def _transcript(self, role: str, text: str) -> None:
         self._emit_transcript(role, text, True)

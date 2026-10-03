@@ -26,6 +26,28 @@ def test_bad_numbers_refused_before_anything_starts(args):
 
 
 @pytest.mark.skipif(not SCRIPT.exists(), reason="run_poc.sh is not in the gadget image")
+@pytest.mark.parametrize("value", ["0", "0.05", "5.5", "-1", "abc", "1.2.3", "0.5;id", ""])
+def test_bad_end_silence_refused(value):
+    import subprocess
+    done = subprocess.run(["bash", str(SCRIPT), "--end-silence", value], capture_output=True, text=True, timeout=10)
+    assert done.returncode == 2
+    assert "--end-silence must be seconds from 0.1 to 5" in done.stderr
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="run_poc.sh is not in the gadget image")
+@pytest.mark.parametrize("value", ["0.1", "0.5", "1", "4.99", "5"])
+def test_good_end_silence_accepted_and_passed_to_the_app(value):
+    import subprocess
+    # The --volume check runs right after --end-silence, so a bad volume stops the script there.
+    done = subprocess.run(["bash", str(SCRIPT), "--end-silence", value, "--volume", "101"],
+                          capture_output=True, text=True, timeout=10)
+    assert done.returncode == 2 and "--volume must be 0-100" in done.stderr
+    text = SCRIPT.read_text()
+    assert re.search(r"(^|[; ])end_silence=0\.5;", text, re.M), "default 0.5 s"
+    assert "-e MUSE_END_SILENCE=$end_silence" in text
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="run_poc.sh is not in the gadget image")
 def test_bridge_marked_started_before_it_starts():
     """Cleanup stops a half-started bridge only if bridge_started=1 is set before the start command."""
     lines = SCRIPT.read_text().splitlines()
