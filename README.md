@@ -197,3 +197,9 @@ The gadget tests use a fake Muse link and a fake Muse VM that speaks the SDK's r
 - [REACHY_MINI_SETUP.md](REACHY_MINI_SETUP.md): connecting a Reachy Mini Lite over USB (Linux)
 - [CONVERSATION_APP.md](CONVERSATION_APP.md): Pollen's conversation app with the hosted backend (Linux)
 - [LOCAL_CONVERSATION.md](LOCAL_CONVERSATION.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), [MULTI_ASSISTANT_PLAN.md](MULTI_ASSISTANT_PLAN.md): `main`'s fully local brain
+
+## License
+
+This repository is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+
+Third-party code is fetched separately and keeps its own licenses: Pollen Robotics' conversation app and daemon, Muse's gadget SDK, and the models. Use of the Muse SDK is also governed by Muse's SDK terms (see [Token and privacy](muse_gadget/README.md#token-and-privacy)).
