@@ -88,13 +88,31 @@ def test_qwen3_asr_failure_falls_back_to_parakeet(fake_mlx, monkeypatch, caplog)
     assert any("Qwen3-ASR unavailable" in r.getMessage() for r in caplog.records)
 
 
-def test_default_is_still_parakeet(monkeypatch):
+def test_default_is_qwen3_asr_then_parakeet(fake_mlx, monkeypatch):
     monkeypatch.delenv("MUSE_STT", raising=False)
     monkeypatch.delenv("MUSE_STT_MODEL", raising=False)
+    name, transcribe = muse_stt.make_transcriber()
+    try:
+        assert name == "qwen3-asr (Qwen3-ASR-0.6B-bf16)"
+    finally:
+        transcribe.close()
+    # Qwen3-ASR can't load (no mlx_audio) -> parakeet; parakeet fails too -> whisper.
+    monkeypatch.setenv("MUSE_KOKORO_PYTHON", "/nonexistent/python")
     monkeypatch.setattr(muse_stt, "parakeet_transcriber", lambda model_id: lambda audio: model_id)
-    monkeypatch.setattr(muse_stt, "qwen3_asr_transcriber", lambda *a: pytest.fail("Qwen3-ASR loaded by default"))
     name, transcribe = muse_stt.make_transcriber()
     assert name == "parakeet-mlx" and transcribe(None) == muse_stt.PARAKEET_MODEL
+    monkeypatch.setattr(muse_stt, "parakeet_transcriber", lambda model_id: (_ for _ in ()).throw(ImportError("x")))
+    monkeypatch.setattr(muse_stt, "whisper_transcriber", lambda model_id: lambda audio: model_id)
+    name, transcribe = muse_stt.make_transcriber()
+    assert name == "mlx-whisper" and transcribe(None) == muse_stt.WHISPER_MODEL
+
+
+def test_explicit_parakeet_skips_qwen3_asr(monkeypatch):
+    monkeypatch.setenv("MUSE_STT", "parakeet")
+    monkeypatch.setattr(muse_stt, "parakeet_transcriber", lambda model_id: lambda audio: model_id)
+    monkeypatch.setattr(muse_stt, "qwen3_asr_transcriber", lambda *a: pytest.fail("Qwen3-ASR loaded"))
+    name, _ = muse_stt.make_transcriber()
+    assert name == "parakeet-mlx"
 
 
 @pytest.mark.skipif(not RUN_POC.exists(), reason="run_poc.sh not here")
@@ -106,11 +124,11 @@ def test_run_poc_refuses_bad_stt_options(args, err):
 
 
 @pytest.mark.skipif(not RUN_POC.exists(), reason="run_poc.sh not here")
-def test_run_poc_passes_stt_to_the_app_with_parakeet_default():
+def test_run_poc_passes_stt_to_the_app_with_qwen3_asr_default():
     text = RUN_POC.read_text()
-    assert "stt=parakeet; stt_model=;" in text
+    assert "stt=qwen3-asr; stt_model=;" in text
     assert "-e MUSE_STT=$stt -e MUSE_STT_MODEL=$stt_model" in text
     start_app = next(l for l in text.splitlines() if l.startswith("start_job app "))
     assert "$tts_env" in start_app or "$tts_env" in text.split("start_job app ", 1)[1].split("\n", 2)[1]
     help_text = subprocess.run(["bash", str(RUN_POC), "--help"], capture_output=True, text=True, timeout=10).stdout
-    assert "--stt parakeet|qwen3-asr|whisper" in help_text and "--stt-model" in help_text
+    assert "--stt qwen3-asr|parakeet|whisper" in help_text and "default qwen3-asr" in help_text and "--stt-model" in help_text

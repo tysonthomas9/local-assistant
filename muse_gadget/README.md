@@ -297,11 +297,11 @@ For turns the gadget sends itself, Muse asks for a command with a `client.invoke
 
 Pollen's conversation app (pinned at `f58523b`, unmodified) runs on the Mac inside Reachy
 Edge.app, with `MuseHandler` (`mac/`) as its backend: the robot's mic, then Silero VAD (one
-utterance), then local speech-to-text (parakeet-mlx, with mlx-whisper as the fallback), then
+utterance), then local speech-to-text (Qwen3-ASR, with parakeet-mlx and mlx-whisper as the fallbacks), then
 `POST /turn` on the bridge at the Mac's `127.0.0.1:48080`. Muse's reply is spoken with Qwen3-TTS
 (MLX, on the Mac; Kokoro-82M and then macOS `say` are the fallbacks) on the robot's speaker, and Pollen's wobbler moves
 the head while it plays.
-`run_poc.sh --stt qwen3-asr [--stt-model 0.6b|1.7b]` uses Qwen3-ASR instead of parakeet (a worker in the Kokoro venv, falling back to parakeet if it can't load); `--stt whisper` uses mlx-whisper.
+Speech-to-text is Qwen3-ASR 0.6B by default (a worker in the Kokoro venv, falling back to parakeet if it can't load); `--stt-model 1.7b` picks the larger model, and `--stt parakeet` or `--stt whisper` picks another engine.
 It's half-duplex: the mic is ignored while a turn is being transcribed, sent or spoken. There's no
 wake word, so anything said near the robot becomes a turn.
 

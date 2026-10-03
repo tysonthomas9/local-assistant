@@ -1,10 +1,11 @@
-"""Local speech-to-text on the Mac (Apple silicon, MLX): parakeet-mlx, falling back to mlx-whisper.
+"""Local speech-to-text on the Mac (Apple silicon, MLX): Qwen3-ASR, falling back to parakeet-mlx, then mlx-whisper.
 
 Both take 16 kHz mono float32 audio straight from memory (no ffmpeg needed). Models are
 downloaded once by install.sh into HF_HOME (under ~/assistant-edge/muse-app) and loaded offline
-afterwards. MUSE_STT=parakeet|whisper|qwen3-asr forces one engine; MUSE_STT_MODEL overrides its model.
+afterwards. MUSE_STT=qwen3-asr|parakeet|whisper picks the engine (default qwen3-asr); MUSE_STT_MODEL
+overrides its model.
 
-Qwen3-ASR (MUSE_STT=qwen3-asr) needs mlx-audio, which the app venv's pins don't allow, so it runs
+Qwen3-ASR (the default) needs mlx-audio, which the app venv's pins don't allow, so it runs
 as qwen3_asr_worker.py in the Kokoro venv (like the Qwen3-TTS worker). MUSE_STT_MODEL picks the
 model: 0.6b (default, mlx-community/Qwen3-ASR-0.6B-bf16), 1.7b (mlx-community/Qwen3-ASR-1.7B-8bit)
 or a full repo id. If it can't load, parakeet is used (and a warning logged). Only one STT model
@@ -105,11 +106,11 @@ def qwen3_asr_transcriber(model_id: str = QWEN3_ASR_MODEL) -> Transcriber:
 
 
 def make_transcriber() -> tuple[str, Transcriber]:
-    """Return (engine name, transcriber): parakeet-mlx first, mlx-whisper if that fails.
-    MUSE_STT=qwen3-asr tries Qwen3-ASR first and falls back to parakeet (then whisper)."""
+    """Return (engine name, transcriber): Qwen3-ASR first (the default, or MUSE_STT=qwen3-asr), then
+    parakeet-mlx, then mlx-whisper. MUSE_STT=parakeet|whisper starts at that engine."""
     forced = os.environ.get("MUSE_STT", "").strip().lower()
     model = os.environ.get("MUSE_STT_MODEL") or None
-    if forced == "qwen3-asr":
+    if forced in ("", "qwen3-asr"):
         repo = qwen3_asr_model(model)
         try:
             return f"qwen3-asr ({repo.rsplit('/', 1)[-1]})", qwen3_asr_transcriber(repo)

@@ -12,7 +12,7 @@
 #            --instruct TEXT (qwen3's style instruction: how to say it, never what to say; default
 #            "playful and cheeky, like a friendly cartoon robot"; "" for none), --volume N (robot
 #            speaker 0-100, default 100; the daemon plays a short test sound when it's set),
-#            --stt parakeet|qwen3-asr|whisper (speech-to-text engine, default parakeet; qwen3-asr falls
+#            --stt qwen3-asr|parakeet|whisper (speech-to-text engine, default qwen3-asr, which falls
 #            back to parakeet if it can't load), --stt-model ID (qwen3-asr: 0.6b (default) or 1.7b,
 #            or a model repo id; parakeet/whisper: a model repo id),
 #            --style-hint (opt in: put the bridge's short "spoken by a desk robot" note before
@@ -38,7 +38,7 @@ set -uo pipefail
 HOST=reachy-mac
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 LOGDIR="${MUSE_POC_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/muse-poc}"   # outside the repo
-fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=qwen3; voice=; instruct=; instruct_set=0; volume=100; style_hint=0; stt=parakeet; stt_model=; app_args=()
+fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=qwen3; voice=; instruct=; instruct_set=0; volume=100; style_hint=0; stt=qwen3-asr; stt_model=; app_args=()
 while [ $# -gt 0 ]; do
     case $1 in
         --fake-bridge) fake=1; shift ;;
@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 case $tts in qwen3|kokoro|say) ;; *) echo "run_poc: --tts must be qwen3, kokoro or say" >&2; exit 2 ;; esac
-case $stt in parakeet|qwen3-asr|whisper) ;; *) echo "run_poc: --stt must be parakeet, qwen3-asr or whisper" >&2; exit 2 ;; esac
+case $stt in qwen3-asr|parakeet|whisper) ;; *) echo "run_poc: --stt must be qwen3-asr, parakeet or whisper" >&2; exit 2 ;; esac
 case $stt_model in *[!A-Za-z0-9._/-]*) echo "run_poc: unsupported --stt-model: $stt_model" >&2; exit 2 ;; esac
 case $instruct in *[!A-Za-z0-9\ ,.\'!?-]*) echo "run_poc: --instruct may only use letters, digits, spaces and , . ' ! ? -" >&2; exit 2 ;; esac
 [ "${#instruct}" -le 200 ] || { echo "run_poc: --instruct is longer than 200 characters" >&2; exit 2; }
