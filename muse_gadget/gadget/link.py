@@ -1,9 +1,10 @@
 """The gadget's connection to Muse, wrapped for the robot.
 
-``RobotLinkSession`` adds one thing to the SDK's ``LinkSession``: the
+``RobotLinkSession`` adds two things to the SDK's ``LinkSession``: the
 ``POST /chat/subscribe`` NDJSON event stream on the same encrypted session,
 which carries Muse's replies (as in the ESP32 firmware,
-``esp32/components/muse/muse_chat_session.cpp``).
+``esp32/components/muse/muse_chat_session.cpp``), and answers to the
+``client.invoke`` events on that stream (``gadget/client_invoke.py``).
 
 ``RobotService`` is the SDK's ``Service`` with the restricted command list,
 the neutral display name and ``RobotLinkSession``.
@@ -24,7 +25,7 @@ from musegadget.link_client import DeviceDescription, LinkSession, Outcome
 from musegadget.noise import Header
 from musegadget.service import DEFAULT_NOISE_HOST, Service
 
-from gadget import restrict
+from gadget import client_invoke, restrict
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,8 @@ class Subscription:
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict):
+                if event.get("event") == client_invoke.EVENT:
+                    self._session.on_client_invoke(event)
                 self._events.put_nowait(event)
 
     def _end(self, error: Exception | None) -> None:
@@ -115,6 +118,49 @@ class Subscription:
 
 
 class RobotLinkSession(LinkSession):
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._seen_invokes = client_invoke.SeenIds()
+        self._client_invoke = client_invoke.enabled()
+
+    async def _invoke(self, message: dict) -> None:
+        # Upstream link.invoke handling, unchanged; the id is remembered so a
+        # client.invoke with the same id isn't run a second time.
+        if isinstance(message.get("id"), str):
+            self._seen_invokes.add(message["id"])
+        await super()._invoke(message)
+
+    def on_client_invoke(self, event: dict) -> None:
+        """Answer a ``client.invoke`` from the subscription stream (see ``gadget/client_invoke.py``)."""
+        if not self._client_invoke:
+            return
+        invoke = client_invoke.parse(event)
+        if invoke is None:
+            log.info("client.invoke ignored: malformed")
+            return
+        if not self._seen_invokes.add(invoke.invoke_id):
+            log.info("client.invoke duplicate ignored id=%s", invoke.invoke_id)
+            return
+        log.info("client.invoke command=%s id=%s", invoke.command, invoke.invoke_id)
+        task = asyncio.ensure_future(self._answer_client_invoke(invoke))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _answer_client_invoke(self, invoke: client_invoke.Invoke) -> None:
+        result = client_invoke.refusal(invoke)
+        if result is None:
+            async with self._invokes:
+                try:
+                    result = await asyncio.get_running_loop().run_in_executor(
+                        None, self._run_command, invoke.command, invoke.params, invoke.timeout_ms,
+                    )
+                except Exception as exc:
+                    log.warning("client.invoke command=%s failed: %s", invoke.command, type(exc).__name__)
+                    result = client_invoke.upstream_executor.error("command failed")
+        await self.send({"method": "link.result", "id": invoke.invoke_id, **result})
+        log.info("client.invoke answered command=%s id=%s ok=%s",
+                 invoke.command, invoke.invoke_id, bool(result.get("ok")))
+
     async def subscribe(self, session_id: str | None = None) -> Subscription:
         """Open ``POST /chat/subscribe``; returns once the VM answered with a status."""
         body = json.dumps({"session_id": session_id} if session_id else {}).encode()

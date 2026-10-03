@@ -242,6 +242,23 @@ Pollen's own app tools, so the robot only ever plays Pollen's moves:
 - **Log**: the app log has one line per call, `robot tool <name> -> <result>` (no transcript
   text); the gadget logs `robot command <name> -> ok|error`.
 
+### Robot tools by voice
+
+For turns the gadget sends itself, Muse asks for a command with a `client.invoke` event on the
+`/chat/subscribe` stream (`command_id`, `invoke_id`, `params_json`, `timeout_ms`), never with
+`link.invoke`. **This is undocumented and may change.** The gadget answers it
+(`gadget/client_invoke.py`) with the documented `link.result` on `/link-control`, `id` =
+`invoke_id`. It uses no other endpoint and adds no fields.
+
+- Only the commands above and `device.health` run, through the same `RestrictedExecutor`; anything
+  else (`system.run`, `file.*`, `device.ota`, unknown names) and `params_json` that isn't a JSON
+  object get an error result.
+- Each `invoke_id` is answered once, also across `link.invoke`. Events without a usable
+  `command_id`/`invoke_id` are ignored. At most 4 commands run at a time, as upstream.
+- Events are seen only while a subscription is open, i.e. during a `/turn`.
+- The log has `client.invoke command=<name> id=<id>` and `... ok=True|False`, never message text.
+- `MUSE_CLIENT_INVOKE=0` in the gadget container's environment turns it off.
+
 ## Token and privacy
 
 - The SDK token is read from a file or a hidden prompt, never from a

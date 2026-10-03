@@ -43,6 +43,7 @@ class FakeVm:
         self.sub_headers = {}
         self.resets = []
         self.chat_bodies = []
+        self.control_messages = []
 
     async def handshake(self):
         responder = NoiseXXResponder()
@@ -92,6 +93,7 @@ class FakeVm:
             else:
                 if sid == self.control:
                     for m in messages.feed(frame.value.data):
+                        self.control_messages.append(m)
                         if m.get("method") == "link.register":
                             self.register = m
                     continue
