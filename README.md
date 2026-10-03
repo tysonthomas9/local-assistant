@@ -388,7 +388,7 @@ The suite covers configuration, services, LLM behaviour and tool choice, the Rea
 
 ## License
 
-Copyright 2026 Tyson Thomas. This repository is licensed under the Apache License 2.0. See [LICENSE](LICENSE). The attribution notices are in [NOTICE](NOTICE).
+This repository is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 Third-party code is fetched separately and keeps its own licenses: Pollen Robotics' conversation app and daemon, the speech-to-speech server, the Ollama models and the other models (speech recognition, text-to-speech, wake word).
 
