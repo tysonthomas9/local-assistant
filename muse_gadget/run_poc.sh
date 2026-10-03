@@ -11,7 +11,7 @@
 #            --voice NAME (qwen3: Aiden (default), Ryan; kokoro: af_heart, am_michael ...),
 #            --instruct TEXT (qwen3's style instruction: how to say it, never what to say; default
 #            "playful and cheeky, like a friendly cartoon robot"; "" for none), --volume N (robot
-#            speaker 0-100, default 25; the daemon plays a short test sound when it's set),
+#            speaker 0-100, default 80; the daemon plays a short test sound when it's set),
 #            --style-hint (opt in: put the bridge's short "spoken by a desk robot" note before
 #            your words; by default Muse gets your words only),
 #            -- <extra conversation-app args>
@@ -35,7 +35,7 @@ set -uo pipefail
 HOST=reachy-mac
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 LOGDIR="${MUSE_POC_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/muse-poc}"   # outside the repo
-fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=qwen3; voice=; instruct=; instruct_set=0; volume=25; style_hint=0; app_args=()
+fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=qwen3; voice=; instruct=; instruct_set=0; volume=80; style_hint=0; app_args=()
 while [ $# -gt 0 ]; do
     case $1 in
         --fake-bridge) fake=1; shift ;;
