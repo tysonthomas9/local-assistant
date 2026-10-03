@@ -349,7 +349,7 @@ def test_start_up_closes_the_loaded_worker_when_the_other_fails(monkeypatch, fai
 class SlowStream:
     """A bridge that streams two sentences with a gap, like Muse writing; records when each went out."""
 
-    def __init__(self, gap_s=0.6, lines=None):
+    def __init__(self, gap_s=0.6, lines=None, think_s=0.0):
         import http.server
         import json as _json
 
@@ -359,24 +359,30 @@ class SlowStream:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):  # noqa: N802
-                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 outer.paths.append(self.path)
+                outer.texts.append(_json.loads(body or b"{}").get("text"))
+                time.sleep(think_s)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson")
                 self.end_headers()
-                for i, line in enumerate(outer.lines):
-                    if i:
-                        time.sleep(gap_s)
-                    self.wfile.write(_json.dumps(line).encode() + b"\n")
-                    self.wfile.flush()
-                    outer.sent_at.append(time.perf_counter())
-                self.wfile.write(b'{"done": true}\n')
+                try:
+                    for i, line in enumerate(outer.lines):
+                        if i:
+                            time.sleep(gap_s)
+                        self.wfile.write(_json.dumps(line).encode() + b"\n")
+                        self.wfile.flush()
+                        outer.sent_at.append(time.perf_counter())
+                    self.wfile.write(b'{"done": true}\n')
+                except OSError:
+                    pass  # the client left (a barge-in or a continuation)
                 self.close_connection = True
 
             def log_message(self, *args):
                 pass
 
         self.paths: list[str] = []
+        self.texts: list[str] = []
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -575,7 +581,7 @@ def test_text_is_ready_at_end_of_speech_from_the_pause_pass(caplog):
     bridge = SlowStream(gap_s=0.1, lines=[{"text": "Hi."}])
     spoken: list[str] = []
     heard: list[int] = []
-    handler = barge_handler(bridge.url, spoken, heard, barge_in=False)
+    handler = barge_handler(bridge.url, spoken, heard, barge_in=False, stt_at_pauses=True)
 
     async def main():
         startup = await started(handler)
@@ -664,7 +670,7 @@ def speech_with_pauses() -> np.ndarray:
                            quiet(1.2), burst(0.7, seed=8), quiet(1.2)])
 
 
-def utterances_seen(stt_full_pass: bool) -> tuple[list[np.ndarray], int]:
+def utterances_seen(stt_at_pauses: bool) -> tuple[list[np.ndarray], int]:
     """The utterances MuseHandler queued as turns, and how many STT calls it made."""
     calls: list[int] = []
 
@@ -676,13 +682,13 @@ def utterances_seen(stt_full_pass: bool) -> tuple[list[np.ndarray], int]:
     handler = muse_handler.MuseHandler(FakeDeps(), bridge=BridgeClient("http://127.0.0.1:9"),
                                        transcriber=slow_transcribe, synthesizer=tone,
                                        segmenter=UtteranceSegmenter(EnergyVad()), barge_in=False,
-                                       stt_full_pass=stt_full_pass)
+                                       stt_at_pauses=stt_at_pauses)
     turns: list[np.ndarray] = []
 
-    async def record(utterance, speech_ended=None, early=None):
-        if early is not None:
-            await early
-        turns.append(utterance)
+    async def record(turn):
+        if turn.early is not None:
+            await turn.early
+        turns.append(turn.utterance)
 
     handler._run_turn = record
 
@@ -700,24 +706,26 @@ def utterances_seen(stt_full_pass: bool) -> tuple[list[np.ndarray], int]:
 def test_pause_passes_never_end_or_split_an_utterance():
     """The utterance boundaries are the VAD's alone, with or without speech-to-text at pauses."""
     vad_only = UtteranceSegmenter(EnergyVad()).feed(speech_with_pauses())
-    with_pauses, pause_calls = utterances_seen(stt_full_pass=False)
-    full_pass, full_calls = utterances_seen(stt_full_pass=True)
+    with_pauses, pause_calls = utterances_seen(stt_at_pauses=True)
+    full_pass, full_calls = utterances_seen(stt_at_pauses=False)
     assert len(vad_only) == 2
     for got in (with_pauses, full_pass):
         assert len(got) == len(vad_only)
         assert all(np.array_equal(a, b) for a, b in zip(got, vad_only))
     assert pause_calls > 2, "pause passes ran (at the short pauses and the ends)"
-    assert full_calls == 0, "--stt-full-pass: no pause passes (the turn itself does the one full pass)"
+    assert full_calls == 0, "default: no pause passes (the turn itself does the one full pass)"
 
 
-def test_stt_full_pass_uses_one_pass_over_the_whole_utterance(caplog, monkeypatch):
+def test_one_full_pass_is_the_default(caplog, monkeypatch):
     caplog.set_level(logging.INFO)
-    monkeypatch.setenv("MUSE_STT_FULL_PASS", "1")
+    monkeypatch.delenv("MUSE_STT_AT_PAUSES", raising=False)
     bridge = SlowStream(gap_s=0.1, lines=[{"text": "Hi."}])
     spoken: list[str] = []
     heard: list[int] = []
     handler = barge_handler(bridge.url, spoken, heard, barge_in=False)
-    assert handler.stt_full_pass
+    assert not handler.stt_at_pauses
+    monkeypatch.setenv("MUSE_STT_AT_PAUSES", "1")
+    assert barge_handler(bridge.url, []).stt_at_pauses, "--stt-at-pauses turns them on"
 
     async def main():
         startup = await started(handler)
@@ -739,3 +747,220 @@ def test_stt_full_pass_uses_one_pass_over_the_whole_utterance(caplog, monkeypatc
     ready = [m for m in logs if m.startswith("MuseHandler: end of speech to text ready")]
     assert len(ready) == 1 and ready[0].endswith("(transcribed after the end silence)")
     assert not [m for m in logs if "matches the full pass" in m]
+
+
+# ------------------------------------------------------------------ floor control: the user's voice always wins
+def numbered(texts):
+    """A transcriber that returns the given texts in order (one per pass), optionally slowly."""
+    queue = list(texts)
+
+    def transcribe(audio):
+        text, delay = queue.pop(0)
+        time.sleep(delay)
+        return text
+    return transcribe
+
+
+def floor_handler(url, spoken, transcribe, deps=None, **kwargs):
+    def synth(text, rate):
+        spoken.append(text)
+        return tone(text, rate)
+
+    return muse_handler.MuseHandler(deps or FakeDeps(), bridge=BridgeClient(url), transcriber=transcribe,
+                                    synthesizer=synth, segmenter=UtteranceSegmenter(EnergyVad()), barge_in=True,
+                                    **kwargs)
+
+
+async def settle(handler, until, timeout_s=8.0):
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline and not until():
+        await asyncio.sleep(0.02)
+
+
+def floor_logs(caplog):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("MuseHandler")]
+
+
+@pytest.mark.parametrize("slow_stt", [False, True], ids=["while-muse-thinks", "while-transcribing"])
+def test_speech_before_the_reply_joins_the_two_utterances_into_one_turn(caplog, slow_stt):
+    """Talk, pause past the end silence, talk again before the reply: one turn with both texts."""
+    caplog.set_level(logging.INFO)
+    bridge = SlowStream(lines=[{"text": "The answer."}], think_s=1.2)
+    spoken: list[str] = []
+    handler = floor_handler(bridge.url, spoken, numbered([("first part", 0.9 if slow_stt else 0.0),
+                                                          ("second part", 0.0)]))
+
+    async def main():
+        startup = await started(handler)
+        await paced(handler, np.concatenate([burst(0.5), quiet(1.0)]))   # utterance 1 ends, its turn starts
+        await paced(handler, np.concatenate([burst(0.5, seed=5), quiet(1.0)]))   # more, before any reply
+        await settle(handler, lambda: spoken and not handler._turn_active and not handler._pending)
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+
+    try:
+        asyncio.run(main())
+    finally:
+        bridge.close()
+    assert bridge.texts[-1] == "first part second part", "both utterances went to Muse as one turn"
+    if slow_stt:
+        assert bridge.texts == ["first part second part"], "the first was held back before it was sent"
+    else:
+        assert bridge.texts == ["first part", "first part second part"], "the first was sent, then dropped"
+    assert spoken == ["The answer."], "only the joined turn's reply was spoken"
+    logs = floor_logs(caplog)
+    assert any(m.startswith("MuseHandler: continuation: speech ") for m in logs)
+    assert any(m == "MuseHandler: continuation: 10 + 11 chars sent as one turn" for m in logs)
+    assert not [m for m in logs if any(t in m for t in ("first part", "second part", "The answer."))], \
+        "lengths and timings only"
+
+
+def test_speech_while_muse_thinks_is_never_lost(caplog):
+    """A follow-up too short to be a turn (a cough, "uh") still lets the held text go to Muse."""
+    caplog.set_level(logging.INFO)
+    bridge = SlowStream(lines=[{"text": "The answer."}], think_s=1.0)
+    spoken: list[str] = []
+    handler = floor_handler(bridge.url, spoken, numbered([("first part", 0.0)]))
+
+    async def main():
+        startup = await started(handler)
+        await paced(handler, np.concatenate([burst(0.5), quiet(1.0)]))
+        await paced(handler, np.concatenate([burst(0.15, seed=5), quiet(1.0)]))   # under the 0.3 s minimum
+        await settle(handler, lambda: spoken and not handler._turn_active and not handler._pending)
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+
+    try:
+        asyncio.run(main())
+    finally:
+        bridge.close()
+    assert bridge.texts == ["first part", "first part"], "dropped at the follow-up, then sent again alone"
+    assert spoken == ["The answer."]
+    assert any("the follow-up wasn't a turn" in m for m in floor_logs(caplog))
+
+
+class MovingManager:
+    """Pollen's MovementManager as MuseHandler sees it: a running move, a queue, clear_move_queue()."""
+
+    def __init__(self):
+        self.state = type("State", (), {"current_move": None})()
+        self.move_queue: list = []
+        self.cleared: list[float] = []
+
+    def clear_move_queue(self):
+        self.cleared.append(time.monotonic())
+        self.state.current_move = None
+        self.move_queue.clear()
+
+
+class DanceQueueMove:
+    pass
+
+
+class BreathingMove:
+    pass
+
+
+def moving_deps(mm):
+    return type("Deps", (), {"reachy_mini": FakeDeps.reachy_mini, "movement_manager": mm})()
+
+
+def start_move(handler, mm, move=None):
+    mm.state.current_move = move or DanceQueueMove()
+    handler._muse_moved_at = time.monotonic() - 1.0   # as _dispatch_robot_tool sets it, a second ago
+
+
+def test_speech_stops_a_move_muse_started_and_refuses_its_next_ones(caplog):
+    caplog.set_level(logging.INFO)
+    mm = MovingManager()
+    handler = floor_handler("http://127.0.0.1:9", [], numbered([("x", 0.0)]), deps=moving_deps(mm))
+
+    async def main():
+        startup = await started(handler)
+        start_move(handler, mm)
+        await paced(handler, quiet(0.5))
+        assert not mm.cleared, "no speech: the move keeps going"
+        await paced(handler, burst(0.2))
+        assert len(mm.cleared) == 1, "speech onset: stopped at once"
+        refused = await handler._dispatch_robot_tool("dance", {"move": "simple_nod"})
+        await paced(handler, quiet(1.0))
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+        return refused
+
+    refused = asyncio.run(main())
+    assert "error" in refused, "a move Muse asks for while the user talks isn't started"
+    logs = floor_logs(caplog)
+    assert any(m.startswith("MuseHandler: move stopped by user speech, ") for m in logs)
+
+
+def test_no_move_no_stop_and_breathing_is_not_a_move():
+    mm = MovingManager()
+    handler = floor_handler("http://127.0.0.1:9", [], numbered([("x", 0.0)]), deps=moving_deps(mm))
+
+    async def main():
+        startup = await started(handler)
+        await paced(handler, burst(0.2))                 # nothing running: nothing to stop
+        await paced(handler, quiet(1.0))
+        start_move(handler, mm, BreathingMove())         # Pollen's idle breathing isn't Muse's move
+        await paced(handler, burst(0.2, seed=5))
+        await paced(handler, quiet(1.0))
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+
+    asyncio.run(main())
+    assert mm.cleared == []
+
+
+def test_the_robots_own_voice_never_stops_a_move(caplog):
+    """A move runs while the reply plays and the mic hears only the echo: neither is stopped."""
+    caplog.set_level(logging.INFO)
+    mm = MovingManager()
+    bridge = SlowStream(gap_s=0.3, lines=[{"text": "One."}, {"text": "Two."}])
+    spoken: list[str] = []
+    handler = floor_handler(bridge.url, spoken, numbered([("hello", 0.0)]), deps=moving_deps(mm))
+
+    async def main():
+        startup = await started(handler)
+        await paced(handler, np.concatenate([burst(0.6), quiet(1.0)]))
+        await settle(handler, lambda: handler._armed)
+        start_move(handler, mm)
+        await paced(handler, quiet(max(0.5, handler._play_end - time.monotonic() + 1.5)))
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+
+    try:
+        asyncio.run(main())
+    finally:
+        bridge.close()
+    assert spoken == ["One.", "Two."] and mm.cleared == []
+    assert not [m for m in floor_logs(caplog) if "barge-in after" in m or "move stopped" in m]
+
+
+def test_barge_in_also_stops_the_move_at_once():
+    mm = MovingManager()
+    bridge = SlowStream(gap_s=1.5, lines=[{"text": "First sentence of a long reply."}, {"text": "Later."}])
+    spoken: list[str] = []
+    handler = floor_handler(bridge.url, spoken, numbered([("hello", 0.0), ("stop", 0.0)]), deps=moving_deps(mm),
+                            barge_in_stop_ms=300)
+    handler._clear_queue = lambda: None
+
+    async def main():
+        startup = await started(handler)
+        await paced(handler, np.concatenate([burst(0.6), quiet(1.0)]))
+        await settle(handler, lambda: handler._armed)
+        start_move(handler, mm)
+        await paced(handler, burst(0.12, seed=3))
+        moved_stop, barged = list(mm.cleared), handler._barge_at
+        await paced(handler, np.concatenate([burst(0.4, seed=4), quiet(1.2)]))
+        await settle(handler, lambda: len(bridge.paths) == 2 and not handler._turn_active)
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+        return moved_stop, barged
+
+    try:
+        moved_stop, barged = asyncio.run(main())
+    finally:
+        bridge.close()
+    assert len(moved_stop) == 1 and barged is not None, "the move stops at once; the voice after the stop delay"
+    assert bridge.texts == ["hello", "stop"], "a barge-in is still its own next turn (no joining)"

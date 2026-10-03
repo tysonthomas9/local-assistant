@@ -8,22 +8,28 @@ One turn:
     robot's speaker and the daemon's wobbler moves the head. Playback starts as soon as the first
     chunk (Qwen3) or sentence (Kokoro) is ready.
 
-Barge-in (on by default; MUSE_BARGE_IN=0, from run_poc.sh --no-barge-in, turns it off): once the
-reply's first audio is queued the mic stays open, trusting the XVF3800's echo cancellation (Pollen's
-app applies its tuned startup config). Speech the VAD finds while the robot is speaking is a
-barge-in: the robot keeps talking for MUSE_BARGE_IN_STOP_MS (default 350 ms), then fades out over
-80 ms, drops the rest of the reply (the bridge stream is closed, so Muse's turn ends there) and the
-new utterance is the next turn. A move that's already running keeps going. Without barge-in, and
-always while a turn is being transcribed or sent, mic input is dropped (half-duplex).
+Floor control (on by default; MUSE_BARGE_IN=0, from run_poc.sh --no-barge-in, turns it off): the
+mic is always open, while the user talks, while the turn is transcribed and Muse thinks, while the
+robot moves and while it speaks, trusting the XVF3800's echo cancellation (Pollen's app applies its
+tuned startup config). Whenever the VAD finds the start of speech, the user has the floor:
+* a move Muse started (dance, emotion, head look) stops at once, through the movement manager's
+  clear_move_queue (what Pollen's stop_dance/stop_emotion tools call; the head holds where it is,
+  no new motion), and Muse's later moves from that turn are refused. Face tracking isn't a move.
+* if the reply is playing, it's a barge-in: the robot keeps talking for MUSE_BARGE_IN_STOP_MS
+  (default 350 ms), then fades out over 80 ms, drops the rest of the reply (the bridge stream is
+  closed, so Muse's turn ends there) and the new utterance is the next turn.
+* if the reply hasn't started (transcribing, sending, Muse thinking), it's a continuation: that
+  reply is dropped unspoken and, once the new utterance ends, the earlier text and the new text go
+  to Muse as one turn. If the new speech doesn't become an utterance, the earlier text is sent alone.
+The robot's own voice is held off by the VAD's start rule (about 96 ms of speech in a row). Without
+barge-in the mic is closed from the end of an utterance until the reply has played (half-duplex).
 
-Early speech-to-text: when the speaker pauses, the utterance so far is transcribed at once, on the
-STT thread. If the pause turns out to be the end (no more speech before the end silence), that text
-is the turn's text, so it's ready at end of speech instead of a pass later. The pass covers the whole
-utterance up to the pause (only the trailing silence is missing), and a check pass over the full
-utterance runs once the reply starts and logs whether the texts match (yes/no only).
-MUSE_STT_FULL_PASS=1 (run_poc.sh --stt-full-pass) turns the pause passes off: the text always comes
-from one pass over the full utterance, after the end silence. Either way the utterance's boundaries
-are the VAD's alone: a pause pass only transcribes, it never ends or splits an utterance.
+Speech-to-text: the turn's text comes from one pass over the whole utterance, after the end
+silence. MUSE_STT_AT_PAUSES=1 (run_poc.sh --stt-at-pauses) adds early passes: when the speaker
+pauses, the utterance so far is transcribed at once, on the STT thread; if the pause turns out to be
+the end, that text is the turn's text (ready at end of speech instead of a pass later), and a check
+pass over the full utterance runs once the reply starts and logs whether the texts match (yes/no).
+Either way the utterance's boundaries are the VAD's alone: a pause pass never ends or splits one.
 
 Transcripts go to the app only through `_emit_transcript` (its UI/JSON-RPC push, never logged). They are not put on the
 output queue as AdditionalOutputs unless transcript logging is turned on (`log_transcripts=True`,
@@ -78,6 +84,8 @@ BARGE_IN_STOP_ENV = "MUSE_BARGE_IN_STOP_MS"
 BARGE_IN_STOP_MS = 350  # keep speaking this long after a barge-in is detected, then fade out
 FADE_S = 0.08
 EARLY_AFTER_WINDOWS = 3  # a pause this long (3 x 32 ms) gets an early speech-to-text pass
+STT_AT_PAUSES_ENV = "MUSE_STT_AT_PAUSES"  # 1: early speech-to-text passes at pauses (opt-in)
+MOVE_GRACE_S = 0.5  # a move just queued may not show in the movement manager's state yet
 
 
 def barge_in_from_env() -> bool:
@@ -90,6 +98,20 @@ def barge_in_stop_ms_from_env() -> int:
     except ValueError:
         return BARGE_IN_STOP_MS
     return value if 0 <= value <= 2000 else BARGE_IN_STOP_MS
+
+
+class _Turn:
+    """One user utterance on its way to Muse (or only text: an earlier one whose follow-up didn't count)."""
+
+    __slots__ = ("utterance", "ended", "early", "superseded", "spoke", "closed_at")
+
+    def __init__(self, utterance: Optional[np.ndarray], ended: float, early: Optional[asyncio.Future] = None):
+        self.utterance, self.ended, self.early = utterance, ended, early
+        self.superseded = False  # the user spoke again before the reply's first audio: join, don't answer
+        self.spoke = False  # the reply's first audio was queued
+        self.closed_at = time.monotonic()
+
+
 DEFAULT_VOICE = "system"
 # Pollen's move tools return as soon as the move is queued ("queued", "looking left"). The robot
 # moves and speaks the reply at the same time, so Muse is told the move is in progress.
@@ -136,7 +158,7 @@ class MuseHandler(ConversationHandler):
         robot_tools_port: Optional[int] = None,
         barge_in: Optional[bool] = None,
         barge_in_stop_ms: Optional[int] = None,
-        stt_full_pass: Optional[bool] = None,
+        stt_at_pauses: Optional[bool] = None,
     ) -> None:
         super().__init__()
         self.deps = deps
@@ -165,7 +187,11 @@ class MuseHandler(ConversationHandler):
         if log_transcripts is None:
             log_transcripts = os.environ.get("MUSE_LOG_TRANSCRIPTS") == "1"
         self.log_transcripts = log_transcripts  # opt-in: the app would log the text
-        self._utterances: asyncio.Queue[tuple[np.ndarray, float, Optional[asyncio.Future]]] = asyncio.Queue(maxsize=1)
+        self._utterances: asyncio.Queue[_Turn] = asyncio.Queue()
+        self._pending: list[_Turn] = []  # queued or running, until their turn ends
+        self._current: Optional[_Turn] = None
+        self._carry: list[str] = []  # text of utterances to send with the next one (continuation)
+        self._muse_moved_at: Optional[float] = None  # a move Muse started may be running
         self.barge_in = barge_in_from_env() if barge_in is None else barge_in
         self.barge_in_stop_s = (barge_in_stop_ms_from_env() if barge_in_stop_ms is None else barge_in_stop_ms) / 1000
         self._armed = False  # barge-in: the mic is open because this turn's reply is being spoken
@@ -176,9 +202,9 @@ class MuseHandler(ConversationHandler):
         self._echo_peak = 0.0  # highest VAD score while the robot spoke (self-interrupt margin)
         self._echo_open = False
         self._early: Optional[tuple[asyncio.Future, int]] = None  # (STT pass at a pause, speech windows)
-        if stt_full_pass is None:
-            stt_full_pass = os.environ.get("MUSE_STT_FULL_PASS") == "1"
-        self.stt_full_pass = stt_full_pass  # no pause passes: the text is from the full utterance
+        if stt_at_pauses is None:
+            stt_at_pauses = os.environ.get(STT_AT_PAUSES_ENV) == "1"
+        self.stt_at_pauses = stt_at_pauses  # early passes at pauses; off: one pass over the utterance
         self._busy = False
         self._busy_until = 0.0
         self._speak_lock = asyncio.Lock()
@@ -294,6 +320,8 @@ class MuseHandler(ConversationHandler):
     def _listening(self) -> bool:
         if self.connection is None:
             return False
+        if self.barge_in:
+            return True  # always: the user's voice takes the floor in any phase
         return self._armed or (not self._busy and time.monotonic() >= self._busy_until)
 
     def _robot_speaking(self) -> bool:
@@ -313,29 +341,27 @@ class MuseHandler(ConversationHandler):
             self._log_mic(mono)
         was_in_speech = self.segmenter.in_speech
         utterances = self.segmenter.feed(mono)
+        onset = not was_in_speech and bool(self.segmenter.in_speech or utterances)
         if self._armed:
             speaking = self._robot_speaking()
             if speaking and self._barge_at is None:
                 self._echo_open = True
                 self._echo_peak = max(self._echo_peak, self.segmenter.feed_peak)
-            if speaking and not was_in_speech and (self.segmenter.in_speech or utterances) and self._barge_at is None:
-                self._barge_in()
             elif not speaking and self._echo_open:
                 self._log_echo()
+        if onset and self.barge_in:
+            self._user_took_floor()
         for utterance in utterances:
             early = self._early if self._early and self._early[1] == self.segmenter.last_speech_windows else None
             self._early = None
-            self._busy = True  # closed until this turn's reply starts (or has been spoken, without barge-in)
+            self._busy = True  # half-duplex: closed until this turn's reply has been spoken
             self._armed = False
             if self._echo_open:
                 self._log_echo()
             self.segmenter.reset()
-            try:
-                # The speech ended one silence window ago (the segmenter waited that long).
-                ended = time.perf_counter() - self.segmenter.silence_windows * WINDOW / SAMPLE_RATE
-                self._utterances.put_nowait((utterance, ended, early[0] if early else None))
-            except asyncio.QueueFull:
-                pass
+            # The speech ended one silence window ago (the segmenter waited that long).
+            ended = time.perf_counter() - self.segmenter.silence_windows * WINDOW / SAMPLE_RATE
+            self._queue_turn(_Turn(utterance, ended, early[0] if early else None))
             self._mark_activity("user_utterance")
             break
         else:
@@ -343,11 +369,83 @@ class MuseHandler(ConversationHandler):
                 self._transcribe_early()
             else:
                 self._early = None  # no utterance in progress (or one too short to be a turn)
+                if was_in_speech:
+                    self._send_orphaned_carry()  # the follow-up was too short to be a turn
+
+    def _queue_turn(self, turn: _Turn) -> None:
+        self._pending.append(turn)
+        self._utterances.put_nowait(turn)
+
+    # ------------------------------------------------------------------ floor control
+    def _user_took_floor(self) -> None:
+        """The user started talking: stop moves, and stop or hold back the reply."""
+        self._stop_moves()
+        if self._armed and self._robot_speaking() and self._barge_at is None and not self._cut:
+            self._barge_in()
+            return
+        held = [t for t in self._pending if not t.spoke and not t.superseded]
+        if not held:
+            return
+        for turn in held:
+            turn.superseded = True
+        if self._current in held:
+            drop = getattr(self.bridge, "drop_stream", None)
+            if drop is not None:
+                drop()
+        logger.info("MuseHandler: continuation: speech %.0f ms after the utterance ended, before the reply; "
+                    "the reply is dropped and the texts go as one turn",
+                    (time.monotonic() - held[-1].closed_at) * 1000)
+
+    def _send_orphaned_carry(self) -> None:
+        """Held text whose follow-up never became an utterance is sent alone: speech is never lost."""
+        if not self._carry or self.segmenter.in_speech or self._pending:
+            return
+        logger.info("MuseHandler: continuation: the follow-up wasn't a turn; sending the earlier text alone")
+        self._queue_turn(_Turn(None, time.perf_counter()))
+
+    def _muse_move_running(self) -> bool:
+        """Whether a move Muse started (dance, emotion, look) is running or queued."""
+        if self._muse_moved_at is None:
+            return False
+        if time.monotonic() - self._muse_moved_at < MOVE_GRACE_S:
+            return True  # just queued: the movement manager may not have picked it up yet
+        mm = getattr(self.deps, "movement_manager", None)
+        state, queue = getattr(mm, "state", None), getattr(mm, "move_queue", None)
+        if state is None and queue is None:
+            return True  # can't tell: assume it runs (stopping an idle robot is harmless)
+        try:
+            moves = [getattr(state, "current_move", None), *list(queue or ())]
+        except RuntimeError:  # changed while we looked
+            return True
+        running = any(m is not None and type(m).__name__ != "BreathingMove" for m in moves)
+        if not running:
+            self._muse_moved_at = None
+        return running
+
+    def _stop_moves(self) -> None:
+        if not self._muse_move_running():
+            return
+        mm = getattr(self.deps, "movement_manager", None)
+        moved_at, self._muse_moved_at = self._muse_moved_at, None
+        try:
+            mm.clear_move_queue()  # Pollen's stop_dance / stop_emotion: stop the move, the head holds
+        except Exception as e:
+            logger.warning("MuseHandler: move stop failed (%s)", type(e).__name__)
+            return
+        logger.info("MuseHandler: move stopped by user speech, %.1f s after Muse started it",
+                    time.monotonic() - (moved_at or time.monotonic()))
+
+    def _floor_is_users(self) -> bool:
+        """Muse's moves from now on are refused: the user is talking, or this reply was cut or dropped."""
+        if not self.barge_in:
+            return False
+        current = self._current
+        return self.segmenter.in_speech or self._cut or (current is not None and current.superseded)
 
     def _transcribe_early(self) -> None:
         """At a pause, transcribe the utterance so far, so the text is ready if the pause is the end."""
         seg = self.segmenter
-        if self.stt_full_pass or self.transcriber is None or not seg.in_speech:
+        if not self.stt_at_pauses or self.transcriber is None or not seg.in_speech:
             return
         if seg.silence_run < EARLY_AFTER_WINDOWS:
             return
@@ -422,32 +520,40 @@ class MuseHandler(ConversationHandler):
     # ------------------------------------------------------------------ one turn
     async def _turn_worker(self) -> None:
         while True:
-            utterance, ended, early = await self._utterances.get()
+            turn = await self._utterances.get()
             try:
-                await self._run_turn(utterance, ended, early)
+                await self._run_turn(turn)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("MuseHandler: turn failed")
             finally:
+                if turn in self._pending:
+                    self._pending.remove(turn)
+                if turn.superseded:
+                    self._send_orphaned_carry()
                 if self._utterances.empty():  # a barge-in's utterance keeps the mic closed for its turn
                     self._busy = False
 
-    async def _run_turn(self, utterance: np.ndarray, speech_ended: Optional[float] = None,
+    async def _run_turn(self, turn: _Turn | np.ndarray, speech_ended: Optional[float] = None,
                         early: Optional[asyncio.Future] = None) -> None:
+        if not isinstance(turn, _Turn):
+            turn = _Turn(turn, time.perf_counter() if speech_ended is None else speech_ended, early)
         self._turn_active, self._cut, self._barge_at = True, False, None
         self._echo_peak, self._echo_open = 0.0, False
         self._segments = []
+        self._current = turn
         try:
-            await self._turn(utterance, speech_ended, early)
+            await self._turn(turn)
         finally:
             self._turn_active = False
+            self._current = None
 
-    async def _turn(self, utterance: np.ndarray, speech_ended: Optional[float],
-                    early: Optional[asyncio.Future]) -> None:
+    async def _turn(self, turn: _Turn) -> None:
         assert self.transcriber is not None
+        utterance, early = turn.utterance, turn.early
         started = time.perf_counter()
-        speech_ended = started if speech_ended is None else speech_ended
+        speech_ended = turn.ended
         loop = asyncio.get_running_loop()
         text = None
         if early is not None:
@@ -456,17 +562,33 @@ class MuseHandler(ConversationHandler):
             except Exception:
                 text = None
         early_used = text is not None
-        if text is None:
+        if text is None and utterance is not None:
             text = (await loop.run_in_executor(self._stt_thread, self.transcriber, utterance)).strip()
+        text = text or ""
         stt_ms = (time.perf_counter() - started) * 1000
-        if not text:
-            logger.info("MuseHandler: empty transcript (%.1f s of audio), ignored", len(utterance) / 16000)
+        if utterance is not None:
+            if text:
+                logger.info("MuseHandler: heard %d chars in %.0f ms", len(text), stt_ms)
+            else:
+                logger.info("MuseHandler: empty transcript (%.1f s of audio), ignored", len(utterance) / 16000)
+        if turn.superseded:  # the user went on talking: this text goes with the next utterance
+            if text:
+                self._carry.append(text)
             return
-        logger.info("MuseHandler: heard %d chars in %.0f ms", len(text), stt_ms)
+        if self._carry:
+            earlier = " ".join(self._carry)
+            self._carry = []
+            logger.info("MuseHandler: continuation: %d + %d chars sent as one turn", len(earlier), len(text))
+            text = f"{earlier} {text}".strip()
+        if not text:
+            return
         logger.info("MuseHandler: end of speech to text ready %.0f ms (%s)",
                     (time.perf_counter() - speech_ended) * 1000,
                     "transcribed at the pause" if early_used else "transcribed after the end silence")
         await self._transcript("user", text)
+        if turn.superseded:  # the user spoke again while we were getting here
+            self._carry.append(text)
+            return
         self._turn_tools.clear()
         self._turn_tool_s = 0.0
         # Each sentence is spoken as soon as the bridge streams it, while Muse is still writing.
@@ -477,6 +599,8 @@ class MuseHandler(ConversationHandler):
 
         def fetch() -> str:
             try:
+                if turn.superseded:
+                    return ""
                 if hasattr(self.bridge, "turn_stream"):
                     return self.bridge.turn_stream(text, on_sentence)
                 reply = self.bridge.turn(text)
@@ -489,6 +613,12 @@ class MuseHandler(ConversationHandler):
         first_audio: Optional[float] = None
         dropped = 0
         while (sentence := await sentences.get()) is not None:
+            if turn.superseded:
+                dropped += 1
+                drop = getattr(self.bridge, "drop_stream", None)
+                if drop is not None:
+                    drop()  # in case the stream wasn't open yet when the user spoke
+                continue
             if self._cut:
                 dropped += 1
                 continue
@@ -499,12 +629,17 @@ class MuseHandler(ConversationHandler):
         try:
             reply = await fetching
         except BridgeError as e:
-            logger.warning("MuseHandler: bridge error %s", e.code)
             reply = spoken_error(e)
-            if not self._cut:
+            if self._cut or turn.superseded:
+                reply = ""
+            else:
+                logger.warning("MuseHandler: bridge error %s", e.code)
                 heard_at = await self._speak(reply)
                 first_audio = first_audio or heard_at
-        if self._cut:
+        if turn.superseded:
+            self._carry.append(text)
+            logger.info("MuseHandler: continuation: reply dropped before its first audio (%d sentence(s))", dropped)
+        elif self._cut:
             logger.info("MuseHandler: barge-in: %d later sentence(s) dropped", dropped)
         self._log_turn_tools()
         logger.info("MuseHandler: reply %d chars after %.0f ms", len(reply), (time.perf_counter() - started) * 1000)
@@ -530,7 +665,7 @@ class MuseHandler(ConversationHandler):
 
         After a barge-in the rest is rendered but not played (Qwen3's worker must finish a reply)."""
         text = text.strip()
-        if not text or self._cut:
+        if not text or self._dropping():
             return None
         first_at: Optional[float] = None
         assert self.tts is not None
@@ -545,10 +680,12 @@ class MuseHandler(ConversationHandler):
                 if pcm is None:
                     break
                 pcm = np.asarray(pcm, dtype=np.int16).reshape(-1)
-                if self._cut:
-                    continue  # barge-in: render out, don't play
+                if self._dropping():
+                    continue  # barge-in or continuation: render out, don't play
                 if first:
                     first_at = time.perf_counter()
+                    if self._current is not None:
+                        self._current.spoke = True
                     if self.barge_in:
                         self._armed = True  # the mic opens: speech from now on is a barge-in
                     logger.info("MuseHandler: first audio after %.0f ms (%s)",
@@ -566,6 +703,9 @@ class MuseHandler(ConversationHandler):
                 self._segments.append((start, pcm, rate))
                 self._mark_activity("assistant_audio")
         return first_at
+
+    def _dropping(self) -> bool:
+        return self._cut or (self._current is not None and self._current.superseded)
 
     async def _transcript(self, role: str, text: str) -> None:
         self._emit_transcript(role, text, True)
@@ -624,8 +764,12 @@ class MuseHandler(ConversationHandler):
         """Run one of Pollen's tools through the tool manager, as the HF backend does, and wait for it."""
         started = time.perf_counter()
         try:
+            if tool in MOVE_TOOLS and self._floor_is_users():
+                logger.info("MuseHandler: robot tool %s refused: the user has the floor", tool)
+                return {"error": "the user is speaking; move not started"}
             result = await self._run_robot_tool(tool, args)
             if tool in MOVE_TOOLS and not result.get("error"):
+                self._muse_moved_at = time.monotonic()
                 if tool == "move_head":
                     result = {"direction": args.get("direction"), **result}
                 result["status"] = IN_PROGRESS

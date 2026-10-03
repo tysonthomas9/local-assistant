@@ -54,15 +54,19 @@ class BridgeClient:
         error = ""
         url = urllib.parse.urlsplit(self.base_url)
         conn = http.client.HTTPConnection(url.hostname or "127.0.0.1", url.port or 80, timeout=self.timeout_s)
+        with self._stream_lock:
+            self._dropped = False
         try:
             try:
                 conn.request("POST", (url.path or "") + "/turn?stream=1", json.dumps({"text": text}).encode(),
                              {"Content-Type": "application/json"})
                 with self._stream_lock:
-                    self._stream_sock, self._dropped = conn.sock, False
+                    self._stream_sock = conn.sock
+                    if self._dropped:  # dropped while connecting: hang up so the bridge stops the turn
+                        conn.sock.shutdown(socket.SHUT_RDWR)
                 resp = conn.getresponse()
             except (OSError, http.client.HTTPException) as e:
-                raise BridgeError("unreachable", type(e).__name__) from None
+                raise BridgeError("dropped" if self._dropped else "unreachable", type(e).__name__) from None
             if resp.status != 200:
                 try:
                     code = str(json.loads(resp.read() or b"{}").get("error") or resp.status)
