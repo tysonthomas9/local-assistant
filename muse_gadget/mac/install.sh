@@ -7,10 +7,11 @@
 # uv-managed Python 3.12 are the ones edge_host_bootstrap.sh already installed):
 #   app/        git checkout of reachy_mini_conversation_app at APP_COMMIT, venv in app/.venv
 #   kokoro/.venv  Kokoro TTS venv (mlx-audio; its torch/spaCy pins don't fit the app's venv), also
-#               used by the Qwen3-TTS worker
+#               used by the Qwen3-TTS and Qwen3-ASR workers
 #   cache/uv    uv cache;  hf/  HF_HOME with the speech-to-text, Kokoro and Qwen3-TTS models and Pollen's emotions
-#   installed, installed-kokoro, installed-qwen3   stamps: a second run with the same pins only validates (fast)
+#   installed, installed-kokoro, installed-qwen3, installed-qwen3-asr   stamps: a second run with the same pins only validates (fast)
 # If Qwen3-TTS fails to install, replies use Kokoro; if Kokoro fails too, macOS `say`.
+# If Qwen3-ASR (the default speech-to-text) fails to install, the app uses parakeet.
 # Written for bash 3.2 (macOS /bin/bash).
 set -euo pipefail
 
@@ -28,6 +29,7 @@ KOKORO_MODEL="mlx-community/Kokoro-82M-bf16"
 KOKORO_REV="a71e4d38b236d968966a2002c4c895dbd12b1c3c"           # same as kokoro_worker.py
 QWEN3_MODEL="mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"  # ~2.9 GB; runs in the Kokoro venv
 QWEN3_REV="41d3337e8b7f2843a75841595fc14e4b9a7a4b96"            # same as qwen3_worker.py
+QWEN3_ASR_MODEL="mlx-community/Qwen3-ASR-0.6B-bf16"             # default STT (~1.2 GB); same as qwen3_asr_worker.py
 
 EDGE="$HOME/assistant-edge"
 M="$EDGE/muse-app"
@@ -117,6 +119,26 @@ elif install_qwen3; then
 else
     rm -f "$M/installed-qwen3"
     say "WARNING: Qwen3-TTS not installed; replies will use Kokoro"
+fi
+
+install_qwen3_asr() {   # the model's main revision, loaded by repo id as qwen3_asr_worker.py does
+    local kv="$M/kokoro/.venv" out
+    say "caching Qwen3-ASR model $QWEN3_ASR_MODEL (about 1.2 GB the first time)"
+    HF_HUB_DISABLE_PROGRESS_BARS=1 "$kv/bin/python" -c "import huggingface_hub as h; h.snapshot_download('$QWEN3_ASR_MODEL')" >/dev/null 2>&1 || return 1
+    out="$(HF_HUB_OFFLINE=1 "$kv/bin/python" "$M/mac/qwen3_asr_worker.py" --model "$QWEN3_ASR_MODEL" < /dev/null 2>/dev/null | head -1)"
+    case $out in ready*) return 0 ;; *) say "Qwen3-ASR worker check failed: $out"; return 1 ;; esac
+}
+astamp="$kstamp $QWEN3_ASR_MODEL"
+if [ "$(cat "$M/installed-qwen3-asr" 2>/dev/null || true)" = "$astamp" ]; then
+    say "Qwen3-ASR already installed"
+elif [ ! -f "$M/installed-kokoro" ]; then
+    rm -f "$M/installed-qwen3-asr"
+    say "WARNING: Qwen3-ASR not installed (it needs the Kokoro venv); speech-to-text will use parakeet"
+elif install_qwen3_asr; then
+    printf '%s\n' "$astamp" > "$M/installed-qwen3-asr"
+else
+    rm -f "$M/installed-qwen3-asr"
+    say "WARNING: Qwen3-ASR not installed; speech-to-text will use parakeet"
 fi
 
 APY="$M/app/.venv/bin/python"

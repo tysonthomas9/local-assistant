@@ -132,3 +132,12 @@ def test_run_poc_passes_stt_to_the_app_with_qwen3_asr_default():
     assert "$tts_env" in start_app or "$tts_env" in text.split("start_job app ", 1)[1].split("\n", 2)[1]
     help_text = subprocess.run(["bash", str(RUN_POC), "--help"], capture_output=True, text=True, timeout=10).stdout
     assert "--stt qwen3-asr|parakeet|whisper" in help_text and "default qwen3-asr" in help_text and "--stt-model" in help_text
+
+
+def test_install_caches_the_default_qwen3_asr_model():
+    import qwen3_asr_worker
+
+    text = (HERE.parent / "install.sh").read_text()
+    assert f'QWEN3_ASR_MODEL="{muse_stt.QWEN3_ASR_MODEL}"' in text
+    assert qwen3_asr_worker.MODEL == muse_stt.QWEN3_ASR_MODEL
+    assert 'qwen3_asr_worker.py" --model "$QWEN3_ASR_MODEL"' in text, "install checks the worker loads it offline"
