@@ -165,3 +165,38 @@ def test_stream_error_before_any_text_is_the_usual_status():
     status, _, lines = with_bridge(lambda port: http_lines(port, "/turn?stream=1", b'{"text": "silence"}'),
                                    FakeLink({}), options=chat.TurnOptions(settle_s=0, timeout_s=0.3))
     assert (status, lines) == (504, [{"error": "timeout"}])
+
+
+def test_client_leaving_a_stream_stops_the_turn():
+    """A barge-in on the robot closes the stream: the turn stops, so the next one doesn't wait for it."""
+    class Then(FakeLink):
+        async def send_chat(self, message, session_id=None):
+            ack = await super().send_chat(message, session_id)
+            if message == "dance":   # one sentence out at once, then Muse keeps going (tools)
+                note = ack["response"]["result"]["message_id"]
+                self.subs[-1].events += [
+                    self._event("delta.message_start", message_id="m-late", reply_to_message_id=note),
+                    self._event("delta.text_append", message_id="m-late", text="Watch this! Now the"),
+                ]
+            return ack
+
+    link = Then({"what time is it": ["Tea time."]})
+
+    async def scenario(port):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        body = b'{"text": "dance"}'
+        writer.write((f"POST /turn?stream=1 HTTP/1.1\r\nHost: x\r\nContent-Length: {len(body)}\r\n"
+                      "Content-Type: application/json\r\n\r\n").encode() + body)
+        await writer.drain()
+        while b'"text"' not in await reader.readline():
+            pass
+        writer.close()                                    # the robot's user barged in
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        reply = await http(port, "POST", "/turn", b'{"text": "what time is it"}', "application/json")
+        return reply, loop.time() - t0
+
+    (status, body), took = with_bridge(scenario, link, options=chat.TurnOptions(settle_s=0, timeout_s=5))
+    assert (status, body) == (200, {"reply": "Tea time."})
+    assert took < 2, "the next turn didn't wait for the abandoned one's 5 s deadline"
+    assert link.subs[0].closed

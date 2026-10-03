@@ -7,6 +7,8 @@
 #   options: --duration SECONDS (stop by itself), --lock-timeout SECONDS (default: wait forever),
 #            --mic-log SECONDS (log the mic level and VAD score that often),
 #            --end-silence SECONDS (quiet time that ends what you say, 0.1-5, default 0.5),
+#            --no-barge-in (half-duplex: the mic is off while the robot speaks),
+#            --barge-in-stop-ms N (keep speaking N ms after you talk over it, 0-2000, default 350),
 #            --log-transcripts (debugging: show each turn's text on this terminal; the log files
 #            on the PC stay redacted), --tts qwen3|kokoro|say (reply voice engine, default qwen3),
 #            --voice NAME (qwen3: Aiden (default), Ryan; kokoro: af_heart, am_michael ...),
@@ -39,7 +41,7 @@ set -uo pipefail
 HOST=reachy-mac
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 LOGDIR="${MUSE_POC_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/muse-poc}"   # outside the repo
-fake=0; duration=0; lock_timeout=0; mic_log=0; end_silence=0.5; log_transcripts=0; tts=qwen3; voice=; instruct=; instruct_set=0; volume=100; style_hint=0; stt=qwen3-asr; stt_model=; app_args=()
+fake=0; duration=0; lock_timeout=0; mic_log=0; end_silence=0.5; barge_in=1; barge_stop_ms=350; log_transcripts=0; tts=qwen3; voice=; instruct=; instruct_set=0; volume=100; style_hint=0; stt=qwen3-asr; stt_model=; app_args=()
 while [ $# -gt 0 ]; do
     case $1 in
         --fake-bridge) fake=1; shift ;;
@@ -47,6 +49,8 @@ while [ $# -gt 0 ]; do
         --lock-timeout) lock_timeout=$2; shift 2 ;;
         --mic-log) mic_log=$2; shift 2 ;;
         --end-silence) end_silence=$2; shift 2 ;;
+        --no-barge-in) barge_in=0; shift ;;
+        --barge-in-stop-ms) barge_stop_ms=$2; shift 2 ;;
         --log-transcripts) log_transcripts=1; shift ;;
         --tts) tts=$2; shift 2 ;;
         --voice) voice=$2; shift 2 ;;
@@ -57,7 +61,7 @@ while [ $# -gt 0 ]; do
         --style-hint) style_hint=1; shift ;;
         --no-style-hint) style_hint=0; shift ;;   # the default; still accepted
         --) shift; app_args=("$@"); break ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "run_poc: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -75,6 +79,8 @@ case $end_silence in
     *) echo "run_poc: --end-silence must be seconds from 0.1 to 5 (e.g. 0.5)" >&2; exit 2 ;;
 esac
 case $end_silence in 0|0.0|0.00|0.0[0-9]) echo "run_poc: --end-silence must be seconds from 0.1 to 5 (e.g. 0.5)" >&2; exit 2 ;; esac
+case $barge_stop_ms in ''|*[!0-9]*) echo "run_poc: --barge-in-stop-ms must be 0-2000" >&2; exit 2 ;; esac
+[ "$barge_stop_ms" -le 2000 ] || { echo "run_poc: --barge-in-stop-ms must be 0-2000" >&2; exit 2; }
 [ "$volume" -le 100 ] || { echo "run_poc: --volume must be 0-100" >&2; exit 2; }
 case $voice in *[!A-Za-z0-9_]*) echo "run_poc: unsupported voice name: $voice" >&2; exit 2 ;; esac
 for a in "${app_args[@]}"; do
@@ -303,7 +309,7 @@ EOF
     tts_env="$tts_env -e MUSE_TTS_INSTRUCT_FILE=$INSTRUCT_FILE"
 fi
 log "starting the conversation app with MuseHandler (tts $tts, stt $stt${stt_model:+ $stt_model})"
-start_job app "-e HF_HOME=~/assistant-edge/muse-app/hf -e HF_HUB_OFFLINE=1 -e MUSE_BRIDGE_URL=http://127.0.0.1:48080 -e MUSE_MIC_LOG='$mic_log' -e MUSE_END_SILENCE=$end_silence -e MUSE_LOG_TRANSCRIPTS=$log_transcripts \
+start_job app "-e HF_HOME=~/assistant-edge/muse-app/hf -e HF_HUB_OFFLINE=1 -e MUSE_BRIDGE_URL=http://127.0.0.1:48080 -e MUSE_MIC_LOG='$mic_log' -e MUSE_END_SILENCE=$end_silence -e MUSE_BARGE_IN=$barge_in -e MUSE_BARGE_IN_STOP_MS=$barge_stop_ms -e MUSE_LOG_TRANSCRIPTS=$log_transcripts \
 $tts_env -e MUSE_ROBOT_TOOLS_SECRET_FILE=$TOOLS_FILE -e MUSE_ROBOT_TOOLS_PORT=$TOOLS_PORT \
 -- $M/mac/exec_python.py $M/app/.venv/bin/python $M/mac/run_app.py --no-camera ${app_args[*]:-}"
 app_ssh=${pids[-1]}

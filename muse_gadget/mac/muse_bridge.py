@@ -7,11 +7,15 @@ POST /turn?stream=1 -> NDJSON {"text": sentence} lines as Muse writes, then {"do
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import socket
+import threading
 import urllib.error
+import urllib.parse
 import urllib.request
-from typing import Callable
+from typing import Callable, Optional
 
 DEFAULT_URL = "http://127.0.0.1:48080"
 
@@ -28,6 +32,9 @@ class BridgeClient:
     def __init__(self, base_url: str | None = None, timeout_s: float = 70.0) -> None:
         self.base_url = (base_url or os.environ.get("MUSE_BRIDGE_URL") or DEFAULT_URL).rstrip("/")
         self.timeout_s = timeout_s
+        self._stream_lock = threading.Lock()
+        self._stream_sock: Optional[socket.socket] = None
+        self._dropped = False
 
     def turn(self, text: str) -> str:
         """Send one user turn; return Muse's reply text (blocking; call it in a thread)."""
@@ -41,30 +48,61 @@ class BridgeClient:
         """Like turn(), but call on_sentence with each sentence as soon as Muse has written it.
 
         Returns the whole reply. Raises BridgeError only if nothing was handed over; a turn
-        that runs out after some text just ends (the text so far is the reply)."""
+        that runs out after some text just ends (the text so far is the reply). drop_stream()
+        (from another thread) ends it early: what was handed over so far is returned."""
         sentences: list[str] = []
-
-        def read(resp) -> str:
-            error = ""
-            for raw in resp:
+        error = ""
+        url = urllib.parse.urlsplit(self.base_url)
+        conn = http.client.HTTPConnection(url.hostname or "127.0.0.1", url.port or 80, timeout=self.timeout_s)
+        try:
+            try:
+                conn.request("POST", (url.path or "") + "/turn?stream=1", json.dumps({"text": text}).encode(),
+                             {"Content-Type": "application/json"})
+                with self._stream_lock:
+                    self._stream_sock, self._dropped = conn.sock, False
+                resp = conn.getresponse()
+            except (OSError, http.client.HTTPException) as e:
+                raise BridgeError("unreachable", type(e).__name__) from None
+            if resp.status != 200:
                 try:
-                    line = json.loads(raw)
-                except ValueError:
-                    continue
-                if not isinstance(line, dict):
-                    continue
-                piece = line.get("text") if "text" in line else line.get("reply")   # one-shot form
-                if isinstance(piece, str) and piece.strip():
-                    sentences.append(piece.strip())
-                    on_sentence(piece.strip())
-                if isinstance(line.get("error"), str):
-                    error = line["error"]
-            return error
-
-        error = self._post_turn(text, "/turn?stream=1", read)
+                    code = str(json.loads(resp.read() or b"{}").get("error") or resp.status)
+                except Exception:
+                    code = str(resp.status)
+                raise BridgeError("timeout" if resp.status == 504 else code, f"HTTP {resp.status}")
+            try:
+                for raw in resp:
+                    try:
+                        line = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if not isinstance(line, dict):
+                        continue
+                    piece = line.get("text") if "text" in line else line.get("reply")   # one-shot form
+                    if isinstance(piece, str) and piece.strip():
+                        sentences.append(piece.strip())
+                        on_sentence(piece.strip())
+                    if isinstance(line.get("error"), str):
+                        error = line["error"]
+            except (OSError, http.client.HTTPException, ValueError):
+                if not self._dropped:
+                    error = error or "unreachable"
+        finally:
+            with self._stream_lock:
+                self._stream_sock = None
+            conn.close()
         if error and not sentences:
             raise BridgeError(error)
         return " ".join(sentences)
+
+    def drop_stream(self) -> None:
+        """End the turn_stream() in progress (a barge-in): the bridge sees us leave and stops the turn."""
+        with self._stream_lock:
+            sock, self._dropped = self._stream_sock, True
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
 
     def _post_turn(self, text: str, path: str, read):
         body = json.dumps({"text": text}).encode()

@@ -146,7 +146,12 @@ class Bridge:
 
         try:
             method, path, headers, body = await asyncio.wait_for(_read_request(reader), HEADER_TIMEOUT_S)
-            status, payload = await self.handle(method, path, headers, body, emit)
+            work = asyncio.ensure_future(self.handle(method, path, headers, body, emit))
+            if not await _until_done_or_client_left(work, reader):
+                log.info("bridge: client left during the turn; turn stopped")
+                writer.close()
+                return
+            status, payload = work.result()
         except _TooLarge:
             status, payload = 413, {"error": "too_long"}
         except (ValueError, asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
@@ -206,3 +211,24 @@ async def _read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict, b
         raise _TooLarge()
     body = await reader.readexactly(length) if length else b""
     return parts[0].upper(), parts[1], headers, body
+
+
+async def _until_done_or_client_left(work: asyncio.Future, reader: asyncio.StreamReader) -> bool:
+    """Wait for ``work``; if the client hangs up first (a barge-in on the robot), cancel it and
+    return False, so the next turn doesn't wait for Muse to finish one nobody is listening to."""
+    gone = asyncio.ensure_future(reader.read(1))
+    try:
+        while True:
+            await asyncio.wait({work, gone}, return_when=asyncio.FIRST_COMPLETED)
+            if work.done():
+                return True
+            if gone.exception() is not None or gone.result() == b"":
+                work.cancel()
+                try:
+                    await work
+                except (asyncio.CancelledError, Exception):
+                    pass
+                return False
+            gone = asyncio.ensure_future(reader.read(1))   # stray bytes: keep watching
+    finally:
+        gone.cancel()

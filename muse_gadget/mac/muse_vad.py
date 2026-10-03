@@ -133,6 +133,8 @@ class UtteranceSegmenter:
         self.min_speech_windows = max(1, round(min_speech_s * SAMPLE_RATE / WINDOW))
         self.max_windows = max(1, round(max_utterance_s * SAMPLE_RATE / WINDOW))
         self.peak_prob = 0.0  # highest VAD score since the caller last zeroed it (diagnostics)
+        self.last_speech_windows = 0  # speech windows of the last utterance that ended
+        self.feed_peak = 0.0
         self._preroll: collections.deque[np.ndarray] = collections.deque(
             maxlen=max(start_windows, round(preroll_s * SAMPLE_RATE / WINDOW))
         )
@@ -141,6 +143,20 @@ class UtteranceSegmenter:
     @property
     def in_speech(self) -> bool:
         return self._speaking
+
+    @property
+    def silence_run(self) -> int:
+        """Quiet windows since the last speech window of the utterance in progress (0 while talking)."""
+        return self._silence if self._speaking else 0
+
+    @property
+    def speech_windows(self) -> int:
+        """Speech windows in the utterance so far (only grows while it lasts)."""
+        return self._speech_windows if self._speaking else 0
+
+    def snapshot(self) -> np.ndarray:
+        """The utterance in progress so far (pre-roll included), as one array."""
+        return np.concatenate(self._windows) if self._speaking and self._windows else np.zeros(0, np.float32)
 
     def reset(self) -> None:
         """Drop any partial utterance and VAD state (used while the robot speaks)."""
@@ -156,6 +172,7 @@ class UtteranceSegmenter:
     def feed(self, audio: np.ndarray) -> list[np.ndarray]:
         """Add 16 kHz mono float32 audio; return the utterances it completed (usually none)."""
         done: list[np.ndarray] = []
+        self.feed_peak = 0.0  # highest VAD score in this call (MuseHandler's echo check)
         self._pending = np.concatenate([self._pending, audio.astype(np.float32, copy=False)])
         n = len(self._pending) // WINDOW
         for i in range(n):
@@ -169,6 +186,7 @@ class UtteranceSegmenter:
     def _step(self, window: np.ndarray) -> np.ndarray | None:
         prob = self.vad(window)
         self.peak_prob = max(self.peak_prob, prob)
+        self.feed_peak = max(self.feed_peak, prob)
         speech = prob >= self.threshold
         if not self._speaking:
             self._preroll.append(window)
@@ -188,6 +206,7 @@ class UtteranceSegmenter:
             self._silence += 1
         if self._silence >= self.silence_windows or len(self._windows) >= self.max_windows:
             enough = self._speech_windows >= self.min_speech_windows
+            self.last_speech_windows = self._speech_windows
             utterance = np.concatenate(self._windows)
             self._speaking = False
             self._windows = []

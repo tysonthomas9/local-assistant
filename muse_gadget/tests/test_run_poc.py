@@ -84,3 +84,23 @@ def test_redact_backstops_text_and_content_anywhere():
     assert "dance for me" not in out and "Watch this" not in out
     assert "text=<redacted>" in out and "content=<redacted>" in out
     assert "client.invoke command=reachy.dance id=c-1" in out and "34-character reply" in out
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="run_poc.sh is not in the gadget image")
+@pytest.mark.parametrize("value", ["x", "-1", "2001", "", "1;id"])
+def test_bad_barge_in_stop_refused(value):
+    import subprocess
+    done = subprocess.run(["bash", str(SCRIPT), "--barge-in-stop-ms", value], capture_output=True, text=True, timeout=10)
+    assert done.returncode == 2 and "--barge-in-stop-ms must be 0-2000" in done.stderr
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="run_poc.sh is not in the gadget image")
+def test_barge_in_is_on_by_default_and_can_be_turned_off():
+    import subprocess
+    done = subprocess.run(["bash", str(SCRIPT), "--no-barge-in", "--barge-in-stop-ms", "0", "--volume", "101"],
+                          capture_output=True, text=True, timeout=10)
+    assert done.returncode == 2 and "--volume must be 0-100" in done.stderr, "both options were accepted"
+    text = SCRIPT.read_text()
+    assert re.search(r"(^|[; ])barge_in=1; barge_stop_ms=350;", text, re.M)
+    assert "--no-barge-in) barge_in=0;" in text
+    assert "-e MUSE_BARGE_IN=$barge_in -e MUSE_BARGE_IN_STOP_MS=$barge_stop_ms" in text

@@ -118,9 +118,11 @@ def test_recorded_utterance_becomes_a_spoken_reply(bridge_url, monkeypatch, capl
     )
     transcripts, outputs = asyncio.run(drive(handler, mic_frames()))
 
-    assert len(heard) == 1, "one utterance, one STT call"
+    # One utterance. The passes at pauses get the utterance so far; the check pass gets all of it.
+    full = max(heard, key=len)
+    assert all(np.array_equal(a, full[: len(a)]) for a in heard)
     speech_s = read_wav_int16(WAV)[1].size / 16000
-    assert speech_s - 0.3 < heard[0].size / 16000 < speech_s + 2.0
+    assert speech_s - 0.3 < full.size / 16000 < speech_s + 2.0
     assert ("user", "hello robot", True) in transcripts
     assert ("assistant", "You said: hello robot", True) in transcripts
 
@@ -202,12 +204,12 @@ def test_mic_is_ignored_while_the_robot_speaks(bridge_url):
 
     handler = muse_handler.MuseHandler(
         FakeDeps(), bridge=BridgeClient(bridge_url), transcriber=transcribe, synthesizer=tone,
-        segmenter=UtteranceSegmenter(EnergyVad()),
+        segmenter=UtteranceSegmenter(EnergyVad()), barge_in=False,
     )
     # The same utterance twice, back to back: the second arrives while the first reply plays.
     frames = mic_frames(seconds_silence=1.0)
     asyncio.run(drive(handler, frames + frames))
-    assert len(calls) == 1
+    assert len([c for c in calls if c == max(calls)]) == 1, "half-duplex: the second one isn't heard"
 
 
 def test_say_speaks_verbatim_without_a_turn():
@@ -444,3 +446,213 @@ def test_end_silence_default_and_env(monkeypatch):
     for bad in ("abc", "0", "9"):
         monkeypatch.setenv(muse_vad.END_SILENCE_ENV, bad)
         assert muse_vad.end_silence_from_env() == 0.5
+
+
+# ------------------------------------------------------------------ barge-in and early speech-to-text
+def burst(seconds: float, level: float = 0.1, seed: int = 1) -> np.ndarray:
+    return (np.random.default_rng(seed).normal(0, level, int(seconds * 16000))).astype(np.float32)
+
+
+def quiet(seconds: float, level: float = 0.003) -> np.ndarray:
+    return burst(seconds, level, seed=2)
+
+
+async def paced(handler, audio: np.ndarray, frame_s: float = 0.02) -> None:
+    """Feed mono 16 kHz audio as the robot mic would, in real time."""
+    step = int(frame_s * 16000)
+    for i in range(0, len(audio), step):
+        chunk = audio[i : i + step]
+        await handler.receive((16000, np.stack([chunk, chunk], axis=1)))
+        await asyncio.sleep(frame_s)
+
+
+async def started(handler):
+    task = asyncio.create_task(handler.start_up())
+    for _ in range(100):
+        if handler._is_connected():
+            break
+        await asyncio.sleep(0.01)
+    return task
+
+
+def barge_handler(url, spoken, heard=None, **kwargs):
+    def synth(text, rate):
+        spoken.append(text)
+        return tone(text, rate)
+
+    def transcribe(audio):
+        if heard is not None:
+            heard.append(audio.size)
+        return "hello"
+
+    return muse_handler.MuseHandler(FakeDeps(), bridge=BridgeClient(url), transcriber=transcribe, synthesizer=synth,
+                                    segmenter=UtteranceSegmenter(EnergyVad()), **kwargs)
+
+
+def test_barge_in_stops_the_reply_and_the_new_utterance_is_the_next_turn(caplog):
+    caplog.set_level(logging.INFO)
+    bridge = SlowStream(gap_s=1.5, lines=[{"text": "First sentence of a long reply."}, {"text": "Never heard."}])
+    spoken: list[str] = []
+    handler = barge_handler(bridge.url, spoken, barge_in=True, barge_in_stop_ms=300)
+    cleared: list[float] = []
+
+    def clear():
+        cleared.append(time.monotonic())
+        while not handler.output_queue.empty():
+            handler.output_queue.get_nowait()
+
+    handler._clear_queue = clear
+
+    async def main():
+        startup = await started(handler)
+        await paced(handler, np.concatenate([burst(0.6), quiet(0.7)]))
+        for _ in range(200):
+            if handler._armed:
+                break
+            await asyncio.sleep(0.01)
+        assert handler._armed, "the mic opens once the reply's first audio is queued"
+        await paced(handler, quiet(0.3))
+        assert not cleared, "quiet room: no barge-in"
+        await paced(handler, burst(0.15, seed=3))
+        assert not cleared, "it keeps speaking for the stop delay"
+        await paced(handler, np.concatenate([burst(0.4, seed=4), quiet(0.7)]))
+        assert cleared, "stopped"
+        fade = handler.output_queue.get_nowait()
+        for _ in range(500):
+            if len(bridge.paths) == 2 and not handler._turn_active and handler._utterances.empty():
+                break
+            await asyncio.sleep(0.01)
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+        return fade
+
+    try:
+        rate, fade = asyncio.run(main())
+    finally:
+        bridge.close()
+    assert rate == 16000 and fade.shape[1] == int(muse_handler.FADE_S * 16000)
+    assert abs(int(fade[0, -1])) < 200, "faded to silence"
+    assert bridge.paths == ["/turn?stream=1", "/turn?stream=1"], "the barge-in utterance was the next turn"
+    assert spoken[0] == "First sentence of a long reply."
+    assert spoken.count("Never heard.") == 1, "dropped from the first reply; spoken only in the second"
+    logs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("MuseHandler: barge-in after ") for m in logs)
+    stop = [m for m in logs if "reply stopped" in m]
+    assert len(stop) == 1 and "(faded)" in stop[0]
+    assert not [m for m in logs if "hello" in m or "First sentence" in m]
+
+
+def test_no_self_barge_in_when_only_the_robot_is_heard(caplog):
+    """The mic hears only quiet (the echo the XVF3800 leaves): the whole reply plays, the margin is logged."""
+    caplog.set_level(logging.INFO)
+    bridge = SlowStream(gap_s=0.3, lines=[{"text": "One."}, {"text": "Two."}])
+    spoken: list[str] = []
+    handler = barge_handler(bridge.url, spoken, barge_in=True)
+
+    async def main():
+        startup = await started(handler)
+        await paced(handler, np.concatenate([burst(0.6), quiet(0.7)]))
+        for _ in range(200):
+            if handler._armed:
+                break
+            await asyncio.sleep(0.01)
+        await paced(handler, quiet(max(0.5, handler._play_end - time.monotonic() + 1.5)))
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+
+    try:
+        asyncio.run(main())
+    finally:
+        bridge.close()
+    assert spoken == ["One.", "Two."]
+    logs = [r.getMessage() for r in caplog.records]
+    assert not [m for m in logs if "barge-in after" in m]
+    assert any(m.startswith("MuseHandler: reply played with the mic open, no barge-in; peak VAD 0.00") for m in logs)
+
+
+def test_text_is_ready_at_end_of_speech_from_the_pause_pass(caplog):
+    caplog.set_level(logging.INFO)
+    bridge = SlowStream(gap_s=0.1, lines=[{"text": "Hi."}])
+    spoken: list[str] = []
+    heard: list[int] = []
+    handler = barge_handler(bridge.url, spoken, heard, barge_in=False)
+
+    async def main():
+        startup = await started(handler)
+        # A short pause (not the end), more speech, then the end.
+        await paced(handler, np.concatenate([burst(0.5), quiet(0.25), burst(0.5, seed=5), quiet(0.8)]))
+        for _ in range(300):
+            if spoken and any("matches the full pass" in r.getMessage() for r in caplog.records):
+                break
+            await asyncio.sleep(0.01)
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+
+    try:
+        asyncio.run(main())
+    finally:
+        bridge.close()
+    logs = [r.getMessage() for r in caplog.records]
+    ready = [m for m in logs if m.startswith("MuseHandler: end of speech to text ready")]
+    assert len(ready) == 1 and ready[0].endswith("(transcribed at the pause)")
+    # The pass at the first pause was stale (more speech came); the turn used the pass at the last pause,
+    # which covers both bursts.
+    assert len(heard) == 3 and heard[0] < 16000 < heard[1] <= heard[2]
+    assert any(m.startswith("MuseHandler: text from the pause matches the full pass: yes") for m in logs)
+
+
+def test_barge_in_settings_from_env(monkeypatch):
+    monkeypatch.delenv("MUSE_BARGE_IN", raising=False)
+    monkeypatch.delenv("MUSE_BARGE_IN_STOP_MS", raising=False)
+    assert muse_handler.barge_in_from_env() is True
+    assert muse_handler.barge_in_stop_ms_from_env() == 350
+    monkeypatch.setenv("MUSE_BARGE_IN", "0")
+    assert muse_handler.barge_in_from_env() is False
+    for bad in ("x", "-1", "2001"):
+        monkeypatch.setenv("MUSE_BARGE_IN_STOP_MS", bad)
+        assert muse_handler.barge_in_stop_ms_from_env() == 350
+    monkeypatch.setenv("MUSE_BARGE_IN_STOP_MS", "250")
+    assert muse_handler.barge_in_stop_ms_from_env() == 250
+
+
+def test_drop_stream_ends_the_turn_with_what_was_said():
+    bridge = SlowStream(gap_s=2.0)
+    client = BridgeClient(bridge.url)
+    got: list[str] = []
+
+    def on_sentence(s):
+        got.append(s)
+        threading.Timer(0.05, client.drop_stream).start()
+
+    try:
+        t0 = time.perf_counter()
+        reply = client.turn_stream("hi", on_sentence)
+        took = time.perf_counter() - t0
+    finally:
+        bridge.close()
+    assert reply == "First sentence." and got == ["First sentence."]
+    assert took < 1.0, "didn't wait for the second sentence"
+
+
+def test_a_pause_pass_is_dropped_when_its_utterance_is():
+    """A pause pass must only ever be used by the utterance it came from."""
+    handler = muse_handler.MuseHandler(FakeDeps(), bridge=BridgeClient("http://127.0.0.1:9"),
+                                       transcriber=lambda a: "x", synthesizer=tone,
+                                       segmenter=UtteranceSegmenter(EnergyVad()), barge_in=False)
+
+    async def main():
+        startup = await started(handler)
+        stale = asyncio.get_running_loop().create_future()
+        stale.set_result("old")
+        handler._early = (stale, 12)
+        await paced(handler, quiet(0.1))            # nothing in progress: dropped
+        after_quiet = handler._early
+        handler._early = (stale, 12)
+        handler._busy = True                        # the mic closes (a turn starts): dropped
+        await paced(handler, burst(0.1))
+        after_closed = handler._early
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+        return after_quiet, after_closed
+
+    assert asyncio.run(main()) == (None, None)
