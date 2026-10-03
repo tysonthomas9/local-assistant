@@ -59,6 +59,10 @@ Synthesizer = Callable[[str, int], np.ndarray]  # (text, sample_rate) -> int16 m
 FRAME_S = 0.2  # seconds of reply audio per output_queue item
 TAIL_S = 0.6  # keep the mic closed this long after the reply should have finished playing
 DEFAULT_VOICE = "system"
+# Pollen's move tools return as soon as the move is queued ("queued", "looking left"). The robot
+# moves and speaks the reply at the same time, so Muse is told the move is in progress.
+MOVE_TOOLS = frozenset({"dance", "play_emotion", "move_head"})
+IN_PROGRESS = "in progress"
 
 
 class CallableTts:
@@ -395,7 +399,12 @@ class MuseHandler(ConversationHandler):
         """Run one of Pollen's tools through the tool manager, as the HF backend does, and wait for it."""
         started = time.perf_counter()
         try:
-            return await self._run_robot_tool(tool, args)
+            result = await self._run_robot_tool(tool, args)
+            if tool in MOVE_TOOLS and not result.get("error"):
+                if tool == "move_head":
+                    result = {"direction": args.get("direction"), **result}
+                result["status"] = IN_PROGRESS
+            return result
         finally:
             self._turn_tools[tool] += 1
             self._turn_tool_s += time.perf_counter() - started

@@ -127,12 +127,27 @@ class FakeMovementManager:
     def clear_move_queue(self):
         self.calls.append(("clear_move_queue",))
 
+    def queue_move(self, move):
+        self.calls.append(("queue_move", type(move).__name__))
+
+    def set_moving_state(self, duration):
+        pass
+
 
 class FakeRobot:
     class media:  # noqa: N801
         @staticmethod
         def get_output_audio_samplerate():
             return 16000
+
+    @staticmethod
+    def get_current_head_pose():
+        import numpy as np
+        return np.eye(4)
+
+    @staticmethod
+    def get_current_joint_positions():
+        return [0.0] * 7, [0.0, 0.0]
 
 
 def make_handler(mm, secret=SECRET):
@@ -197,3 +212,34 @@ def test_no_secret_no_endpoint():
         return server
 
     assert asyncio.run(main()) is None
+
+
+def test_moves_start_at_once_and_are_reported_in_progress():
+    """Move and talk together: the move is queued on the call and Muse hears it's in progress."""
+    gadget_robot = load_gadget_robot()
+    mm = FakeMovementManager()
+    handler = make_handler(mm)
+
+    async def main():
+        startup = asyncio.create_task(handler.start_up())
+        for _ in range(200):
+            if handler._robot_tools_server is not None:
+                break
+            await asyncio.sleep(0.01)
+        port = handler._robot_tools_server.sockets[0].getsockname()[1]
+        client = gadget_robot.RobotTools(url=f"http://127.0.0.1:{port}", secret=SECRET, timeout_s=5)
+        dance = await asyncio.to_thread(client.run, "reachy.dance", {"move": "simple_nod"})
+        after_dance = list(mm.calls)
+        look = await asyncio.to_thread(client.run, "reachy.look", {"direction": "left"})
+        tracking = await asyncio.to_thread(client.run, "reachy.head_tracking", {"enabled": True})
+        await handler.shutdown()
+        await asyncio.wait_for(startup, 5)
+        return dance, after_dance, look, tracking
+
+    dance, after_dance, look, tracking = asyncio.run(main())
+    assert dance == {"ok": True, "payload": {"status": "in progress", "move": "simple_nod", "repeat": 1}}
+    assert after_dance == [("queue_move", "DanceQueueMove")], "queued on the call, nothing held"
+    assert look == {"ok": True, "payload": {"direction": "left", "status": "in progress"}}
+    assert tracking == {"ok": True, "payload": {"status": "following"}}, "head_tracking is unchanged"
+    assert [c[0] for c in mm.calls].count("queue_move") == 2
+    assert not hasattr(muse_handler, "HELD_TOOLS")
