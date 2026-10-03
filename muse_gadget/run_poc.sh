@@ -24,6 +24,9 @@
 # It never deletes another run's lock (it waits) and never stops a daemon it didn't start; it
 # sets the speaker volume to --volume (logged before and after). Output from the Mac shows its
 # home directory as ~; transcript text (`content=...`) is redacted in the logs in ~/.local/state/muse-poc/.
+# The whole script is one function, run on the last line: bash reads all of it before running
+# anything, so editing this file while a run is using it can't change what that run does.
+main() {
 set -uo pipefail
 
 HOST=reachy-mac
@@ -277,3 +280,5 @@ else
 fi
 kill -0 "$app_ssh" 2>/dev/null || log "the app exited"
 exit 0
+}
+main "$@"; exit

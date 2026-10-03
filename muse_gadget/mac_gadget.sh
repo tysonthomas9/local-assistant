@@ -21,6 +21,9 @@
 # other containers or images. The gadget doesn't use the robot (no daemon,
 # motors, mic, speaker or camera), so it doesn't take the hw-run lock.
 # State: reachy-mac:~/assistant-edge/muse-state (from pair_on_pc.sh).
+# The whole script is one function, run on the last line: bash reads all of it before running
+# anything, so editing this file while a run is using it can't change what that run does.
+main() {
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -202,3 +205,5 @@ case "$action" in
     status) remote status "$PORT" | sed 's/^/[mac-gadget] /' ;;
     *) echo "usage: $0 start|stop|status" >&2; exit 2 ;;
 esac
+}
+main "$@"; exit
