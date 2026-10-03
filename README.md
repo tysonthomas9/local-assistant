@@ -63,11 +63,11 @@ One turn, in order:
 5. If Muse wants to move the robot, it sends a `client.invoke` for a `reachy.*` command. The gadget calls MuseHandler's robot-tools endpoint, which starts the dance at once with Pollen's own `dance` tool and tells Muse it's in progress.
 6. Qwen3-TTS speaks the reply on the robot's speaker while the robot dances, and Pollen's wobbler moves the head while it plays. The reply streams in (`POST /turn?stream=1`): the first sentence is spoken as soon as Muse has written it, without waiting for the rest.
 
-What you say ends after 0.8 s of quiet (`--end-silence`). Speech-to-text runs at each pause while you're still talking, so when the pause turns out to be the end, the text is already there (`--stt-full-pass` turns this off: one pass over the whole utterance after the end silence). Each turn logs the time from the end of your speech to the text and to the robot's first audio.
+What you say ends after 0.8 s of quiet (`--end-silence`). Speech-to-text runs once over the whole utterance, after the end silence (`--stt-at-pauses` also transcribes at each pause, which is about 0.2-0.4 s faster but less accurate). Each turn logs the time from the end of your speech to the text and to the robot's first audio.
 
-You can talk over the robot (barge-in): once a reply is playing, the mic stays open and the robot's own voice is removed by the XVF3800's echo cancellation, with Pollen's tuned settings. When you start talking, the robot keeps going for 350 ms, fades out, drops the rest of its reply, and answers what you said instead. A move that has already started keeps going. `--no-barge-in` turns this off (half-duplex: the mic is off while the robot speaks).
+You always have the floor. The mic is always open (while you talk, while Muse thinks, while the robot moves and while it speaks), and the robot's own voice is removed by the XVF3800's echo cancellation, with Pollen's tuned settings. When you start talking, the robot stops any move Muse started at once (Pollen's stop; the head holds where it is; face tracking keeps running). If it's speaking, it keeps going for 350 ms, fades out, drops the rest of its reply and answers what you said instead. If it hadn't started answering, your new words are joined to what you said before and sent as one turn. `--no-barge-in` turns this off (half-duplex: the mic is off from the end of what you say until the reply has played).
 
-The mic is ignored while a turn is being transcribed and sent (and, with `--no-barge-in`, while it's spoken). There's no wake word, so anything said near the robot becomes a turn.
+There's no wake word, so anything said near the robot becomes a turn.
 
 | Port (Mac, 127.0.0.1) | Service |
 | --- | --- |
@@ -145,9 +145,9 @@ The first run installs the app, its venvs and the speech models on the Mac (`mac
 | `--volume N` | Robot speaker volume 0-100 (default 100) |
 | `--style-hint` | Opt in: put a short "spoken by a desk robot" note before your words. Off by default |
 | `--duration S`, `--lock-timeout S` | Stop by itself after S seconds; give up waiting for the robot lock |
-| `--no-barge-in`, `--barge-in-stop-ms N` | Turn talking over the robot off (half-duplex); how long it keeps speaking after you start, 0-2000 ms (default 350) |
+| `--no-barge-in`, `--barge-in-stop-ms N` | Turn the always-open mic off (half-duplex: no talking over the robot, no stopping moves or joining turns); how long it keeps speaking after you start, 0-2000 ms (default 350) |
 | `--end-silence S` | Quiet time that ends what you say, 0.1-5 seconds (default 0.8). Shorter answers sooner but may cut you off mid-pause |
-| `--stt-full-pass` | Speech-to-text in one pass over the whole utterance, after the end silence, instead of at each pause (slower, by about 0.2-0.4 s) |
+| `--stt-at-pauses` | Also run speech-to-text at each pause, so the text is ready at the end of speech (about 0.2-0.4 s sooner, less accurate; default: one pass over the whole utterance) |
 | `--mic-log S`, `--log-transcripts` | Debugging: log mic level and VAD score; show each turn's text on the terminal |
 | `-- <app args>` | Passed to the conversation app (for example `--no-camera`, `--debug`) |
 

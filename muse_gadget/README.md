@@ -340,26 +340,36 @@ utterance), then local speech-to-text (Qwen3-ASR, with parakeet-mlx and mlx-whis
 (MLX, on the Mac; Kokoro-82M and then macOS `say` are the fallbacks) on the robot's speaker, and Pollen's wobbler moves
 the head while it plays.
 Speech-to-text is Qwen3-ASR 0.6B by default (a worker in the Kokoro venv, falling back to parakeet if it can't load); `--stt-model 1.7b` picks the larger model, and `--stt parakeet` or `--stt whisper` picks another engine.
-You can talk over the robot (barge-in). Once the reply starts playing, the mic stays open: the
-robot's own voice is removed by the XVF3800's echo cancellation (Pollen's app applies its tuned
-startup settings, `PP_AGCMAXGAIN 10`, `PP_MIN_NS`/`PP_MIN_NN 0.8`, `PP_GAMMA_E`/`PP_GAMMA_ETAIL 0.5`,
-`PP_NLATTENONOFF 0`, `PP_MGSCALE 4 1 1`, and reads them back). Speech the VAD finds while the robot
-speaks is a barge-in: it keeps talking for 350 ms (`--barge-in-stop-ms N`), then fades out over
-80 ms, drops the rest of the reply (it closes the bridge stream) and your words are the next turn.
-A move that's already running keeps going. After a reply played with nobody talking, the log
-shows how close the robot's own voice came (`peak VAD`, against the 0.5 threshold).
-`--no-barge-in` goes back to half-duplex: the mic is ignored while a reply is spoken. Either way it
-is ignored while a turn is being transcribed and sent. There's no wake word, so anything said near
-the robot becomes a turn.
+You always have the floor. The mic is always open: while you talk, while your words are
+transcribed and Muse thinks, while the robot moves and while it speaks. The robot's own voice is
+removed by the XVF3800's echo cancellation (Pollen's app applies its tuned startup settings,
+`PP_AGCMAXGAIN 10`, `PP_MIN_NS`/`PP_MIN_NN 0.8`, `PP_GAMMA_E`/`PP_GAMMA_ETAIL 0.5`,
+`PP_NLATTENONOFF 0`, `PP_MGSCALE 4 1 1`, and reads them back), and speech only counts once the VAD
+has heard about 96 ms of it in a row. When you start talking:
 
-Speech-to-text starts before you've finished: when you pause, what you've said so far is
-transcribed at once. If that pause is the end, the text is already there when the end silence
-runs out (`end of speech to text ready` in the log); if you go on, it's done again at the next
-pause. That pass covers everything you said (only the trailing silence is missing). After the
-reply starts, a check pass over the whole utterance logs whether both texts match (yes/no only).
-A pause pass only transcribes: where an utterance starts and ends is the VAD's decision alone.
-`--stt-full-pass` turns the pause passes off, so the text always comes from one pass over the whole
-utterance after the end silence (about 0.2-0.4 s later).
+- A move Muse started (a dance, an emotion, a head look) stops at once, the way Pollen's
+  `stop_dance`/`stop_emotion` stop it (the move queue is cleared and the head holds where it is).
+  Moves Muse asks for from that turn are refused. Face tracking isn't a move and keeps running.
+- If the reply is playing, it's a barge-in: the robot keeps talking for 350 ms
+  (`--barge-in-stop-ms N`), fades out over 80 ms, drops the rest of the reply (it closes the bridge
+  stream, so Muse's turn ends) and your words are the next turn.
+- If the reply hasn't started yet (your words are being transcribed or Muse is thinking), it's a
+  continuation: that reply is dropped unspoken, and when you finish, what you said before and what
+  you just said go to Muse as one turn. This also covers being cut off at a pause. If the new sound
+  was too short to be a turn (a cough), the earlier words are sent on their own.
+
+The log shows `move stopped by user speech`, `barge-in after ...` and `continuation: ...` lines
+(lengths and timings only). After a reply played with nobody talking, it shows how close the
+robot's own voice came (`peak VAD`, against the 0.5 threshold). `--no-barge-in` goes back to
+half-duplex: the mic is off from the end of what you say until the reply has played, and moves
+aren't stopped. There's no wake word, so anything said near the robot becomes a turn.
+
+Speech-to-text runs once over the whole utterance, after the end silence: accuracy comes before
+the 0.2-0.4 s an earlier pass could save. `--stt-at-pauses` adds passes at pauses: what you've said
+so far is transcribed at once, and if that pause is the end, that text is used (`end of speech to
+text ready` in the log); after the reply starts, a check pass over the whole utterance logs whether
+both texts match (yes/no only). A pause pass only transcribes: where an utterance starts and ends
+is the VAD's decision alone.
 
 To start speaking as soon as it can, MuseHandler uses `POST /turn?stream=1`: it speaks the first
 sentence while Muse is still writing the rest, and each later sentence in order. With
@@ -375,7 +385,7 @@ muse_gadget/run_poc.sh --fake-bridge    # echo bridge: the robot answers "You sa
 #          --tts qwen3|kokoro|say, --voice NAME, --instruct TEXT, --volume N (default 100),
 #          --stt qwen3-asr|parakeet|whisper, --stt-model ID, --style-hint,
 #          --end-silence SECONDS (default 0.8), --no-barge-in, --barge-in-stop-ms N (default 350),
-#          --stt-full-pass, -- <app args>
+#          --stt-at-pauses, -- <app args>
 ```
 
 In order, it:
