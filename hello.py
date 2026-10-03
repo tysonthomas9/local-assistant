@@ -1,3 +1,4 @@
+# Adapted from Pollen Robotics' Reachy Mini quickstart (https://huggingface.co/docs/reachy_mini/SDK/quickstart).
 from reachy_mini import ReachyMini
 from reachy_mini.utils import create_head_pose
 

@@ -205,6 +205,8 @@ class RobotService(Service):
             return None
         return session
 
+    # Adapted from muse-gadget-sdk linux/src/musegadget/service.py (Service._session, commit 7e88df2).
+    # Copyright (c) Meta Platforms, Inc. and affiliates. Apache License 2.0. Modified.
     async def _session(self, vm: dict, pairing: dict) -> tuple[Outcome, float]:
         device = DeviceDescription(
             node_id=self.identity.node_id,

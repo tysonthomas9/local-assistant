@@ -14,6 +14,8 @@ from gadget.link import RobotLinkSession
 from musegadget.link_client import DeviceDescription
 
 
+# Pipe and FakeVm are adapted from muse-gadget-sdk linux/tests/test_link_client.py (commit 7e88df2).
+# Copyright (c) Meta Platforms, Inc. and affiliates. Apache License 2.0. Modified.
 class Pipe:
     def __init__(self, inbox, outbox):
         self._inbox, self._outbox = inbox, outbox
