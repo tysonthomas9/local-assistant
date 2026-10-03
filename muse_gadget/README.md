@@ -97,7 +97,8 @@ message, so the bridge reads the reply the way the SDK's ESP32 firmware does
 With `?stream=1`, each sentence goes out as soon as it ends (`.`, `!` or `?` before a space, or a
 newline), and the rest of a message when its `delta.message_done` comes. Nothing waits for the
 0.3 s settle before it's sent; the settle only decides when the stream ends, so a second message
-that comes late is still sent.
+that comes late is still sent. If the client hangs up during a stream (a barge-in on the robot),
+the bridge stops the turn, so the next one doesn't wait for Muse to finish a reply nobody hears.
 
 `/chat/history` isn't used: Muse answers it with 403 for a gadget's device
 token.
@@ -339,12 +340,27 @@ utterance), then local speech-to-text (Qwen3-ASR, with parakeet-mlx and mlx-whis
 (MLX, on the Mac; Kokoro-82M and then macOS `say` are the fallbacks) on the robot's speaker, and Pollen's wobbler moves
 the head while it plays.
 Speech-to-text is Qwen3-ASR 0.6B by default (a worker in the Kokoro venv, falling back to parakeet if it can't load); `--stt-model 1.7b` picks the larger model, and `--stt parakeet` or `--stt whisper` picks another engine.
-It's half-duplex: the mic is ignored while a turn is being transcribed, sent or spoken. There's no
-wake word, so anything said near the robot becomes a turn.
+You can talk over the robot (barge-in). Once the reply starts playing, the mic stays open: the
+robot's own voice is removed by the XVF3800's echo cancellation (Pollen's app applies its tuned
+startup settings, `PP_AGCMAXGAIN 10`, `PP_MIN_NS`/`PP_MIN_NN 0.8`, `PP_GAMMA_E`/`PP_GAMMA_ETAIL 0.5`,
+`PP_NLATTENONOFF 0`, `PP_MGSCALE 4 1 1`, and reads them back). Speech the VAD finds while the robot
+speaks is a barge-in: it keeps talking for 350 ms (`--barge-in-stop-ms N`), then fades out over
+80 ms, drops the rest of the reply (it closes the bridge stream) and your words are the next turn.
+A move that's already running keeps going. After a reply played with nobody talking, the log
+shows how close the robot's own voice came (`peak VAD`, against the 0.5 threshold).
+`--no-barge-in` goes back to half-duplex: the mic is ignored while a reply is spoken. Either way it
+is ignored while a turn is being transcribed and sent. There's no wake word, so anything said near
+the robot becomes a turn.
+
+Speech-to-text starts before you've finished: when you pause, what you've said so far is
+transcribed at once. If that pause is the end, the text is already there when the end silence
+runs out (`end of speech to text ready` in the log); if you go on, it's done again at the next
+pause. That pass covers everything you said (only the trailing silence is missing). After the
+reply starts, a check pass over the whole utterance logs whether both texts match (yes/no only).
 
 To start speaking as soon as it can, MuseHandler uses `POST /turn?stream=1`: it speaks the first
-sentence while Muse is still writing the rest, and each later sentence in order. The mic stays off
-until the stream has ended and the audio has played. What you say ends after 0.5 s of quiet
+sentence while Muse is still writing the rest, and each later sentence in order. With
+`--no-barge-in` the mic stays off until the stream has ended and the audio has played. What you say ends after 0.5 s of quiet
 (`--end-silence SECONDS`, 0.1-5). Each turn logs `end of speech to first audio <ms>` (timings only).
 
 Run it from the PC:
@@ -355,7 +371,8 @@ muse_gadget/run_poc.sh --fake-bridge    # echo bridge: the robot answers "You sa
 # options: --duration SECONDS, --lock-timeout SECONDS, --mic-log SECONDS, --log-transcripts,
 #          --tts qwen3|kokoro|say, --voice NAME, --instruct TEXT, --volume N (default 100),
 #          --stt qwen3-asr|parakeet|whisper, --stt-model ID, --style-hint,
-#          --end-silence SECONDS (default 0.5), -- <app args>
+#          --end-silence SECONDS (default 0.5), --no-barge-in, --barge-in-stop-ms N (default 350),
+#          -- <app args>
 ```
 
 In order, it:
