@@ -203,7 +203,7 @@ The gadget tests use a fake Muse link and a fake Muse VM that speaks the SDK's r
 
 ## License
 
-Copyright 2026 Tyson Thomas. This repository is licensed under the Apache License 2.0. See [LICENSE](LICENSE). The attribution notices are in [NOTICE](NOTICE).
+This repository is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 Third-party code is fetched separately and keeps its own licenses: Pollen Robotics' conversation app and daemon, Muse's gadget SDK, and the models. Use of the Muse SDK is also governed by Muse's SDK terms (see [Token and privacy](muse_gadget/README.md#token-and-privacy)).
 
