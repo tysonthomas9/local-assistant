@@ -8,6 +8,15 @@ A fully local voice assistant for the USB-tethered **Reachy Mini Lite** robot. I
 
 Every service listens on `127.0.0.1` only. Nothing in this repo patches upstream code: our extra behaviour lives in `local_backend/` as profiles, external tools and small wrappers (`run_app.py`, `run_daemon.py`, `reachy_bridge.py`).
 
+## Branches / brains
+
+One robot stack (Reachy Mini Lite, Pollen's conversation app, the daemon, local speech) with different "brain" agents, each on its own branch.
+
+- **This branch (`muse-gadget-poc`)**: the brain is [Muse](https://gadgets.muse.ai), through the gadget in `muse_gadget/`. See [muse_gadget/README.md](muse_gadget/README.md).
+- **`main`**: the fully local brain (Ollama gemma4 and the local speech server) described below.
+
+This branch is never merged into `main`.
+
 ## Architecture
 
 ```text

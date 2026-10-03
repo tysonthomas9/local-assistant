@@ -26,6 +26,19 @@ pair_on_pc.sh                     mac_gadget.sh start
   `7e88df2bbb3fa92403024b9d161d798f937d6716` (see `Containerfile`) and
   installed with uv. Everything robot-specific lives in `gadget/`.
 
+## Branch strategy
+
+This is the "Muse brain" branch (`muse-gadget-poc`). The robot stack is the
+same as on `main`; only the brain differs. `main` keeps the fully local brain.
+
+- **Long-lived.** This branch is never merged into `main`.
+- **Shared fixes come from `main`.** Now and then, merge `main` into this
+  branch. If the top-level README conflicts, keep this branch's
+  "Branches / brains" note.
+- **Muse-specific code stays in `muse_gadget/`.**
+- **Nothing here is PR'd into `main`.** A fix that both brains need goes to
+  `main` first, then comes here with the next merge.
+
 ## What the wrapper changes
 
 - **Commands Muse can call: only `device.health` and the robot's `reachy.*`
@@ -293,7 +306,7 @@ For turns the gadget sends itself, Muse asks for a command with a `client.invoke
   `display_text_ready`, `activity_code`) come from the ESP32 firmware, not
   from API docs.
 
-## POC run
+## Running the robot with Muse
 
 Pollen's conversation app (pinned at `f58523b`, unmodified) runs on the Mac inside Reachy
 Edge.app, with `MuseHandler` (`mac/`) as its backend: the robot's mic, then Silero VAD (one
