@@ -10,8 +10,8 @@
 #                                      machine only if `start` started it
 #   muse_gadget/mac_gadget.sh status   machine, container, bridge health, listeners
 #
-# MUSE_STYLE_HINT_OFF=1 (start): send messages to Muse without the bridge's
-# "[Spoken aloud by a small desk robot ...]" note (MUSE_STYLE_HINT="" in the gadget).
+# MUSE_STYLE_HINT_ON=1 (start): opt in to the bridge's short "[Spoken aloud by a small
+# desk robot ...]" note before each message. Off by default: Muse gets the words only.
 # MUSE_ROBOT_TOOLS_RUN=<run id> (start, from run_poc.sh): give the gadget that run's
 # robot-tools secret (the 0600 file ~/assistant-edge/muse-app/run/robot-tools.<run>.env on
 # the Mac, as --env-file) and point its reachy.* commands at the app's endpoint on the
@@ -29,7 +29,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MAC="reachy-mac"
 PORT="${MUSE_BRIDGE_PORT:-48080}"
-HINT=on; [ "${MUSE_STYLE_HINT_OFF:-0}" = 1 ] && HINT=off
+HINT=off; [ "${MUSE_STYLE_HINT_ON:-0}" = 1 ] && HINT=on
 TOOLS_RUN="${MUSE_ROBOT_TOOLS_RUN:-none}"
 TOOLS_PORT="${MUSE_ROBOT_TOOLS_PORT:-48081}"
 action="${1:-status}"
@@ -98,8 +98,8 @@ case "$action" in
     echo "built $IMAGE ($(podman image inspect "$IMAGE" --format '{{.Architecture}}'))"
     ;;
   run)
-    port="$1"; hint="${2:-on}"; tools_run="${3:-none}"; tools_port="${4:-48081}"
-    hint_env=(); [ "$hint" = off ] && hint_env=(-e MUSE_STYLE_HINT=)
+    port="$1"; hint="${2:-off}"; tools_run="${3:-none}"; tools_port="${4:-48081}"
+    hint_env=(); [ "$hint" = on ] && hint_env=(-e MUSE_STYLE_HINT_ON=1)
     # The run's robot-tools secret: podman reads the 0600 file, so it never shows on a command line.
     tools_env=()
     tools_file="$HOME/assistant-edge/muse-app/run/robot-tools.$tools_run.env"

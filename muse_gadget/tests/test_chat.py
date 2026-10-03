@@ -27,7 +27,7 @@ def test_turn_returns_the_reply_to_our_message_only():
     assert run_turn(link, "hello") == "Hi there!"
     message, session_id = link.sent[0]
     assert session_id == chat.DEFAULT_SESSION_ID
-    assert message.startswith(chat.DEFAULT_STYLE_HINT) and message.endswith("\nhello")
+    assert message == "hello"   # the user's words only: no note by default
     assert link.sub_sessions == [chat.DEFAULT_SESSION_ID]   # side chat events come only if asked for
     assert link.subs[0].closed
 
@@ -114,3 +114,14 @@ def test_fake_subscription_sleeps_without_clock():
     sub = FakeSubscription()
     sub.events.clear()
     assert asyncio.run(sub.next(0.01)) is None
+
+
+def test_style_note_is_off_unless_opted_in(monkeypatch):
+    from gadget import __main__ as gadget_main
+
+    monkeypatch.delenv("MUSE_STYLE_HINT_ON", raising=False)
+    assert gadget_main.turn_options().style_hint == ""
+    monkeypatch.setenv("MUSE_STYLE_HINT_ON", "1")
+    hint = gadget_main.turn_options().style_hint
+    assert hint == chat.STYLE_NOTE and "reachy" not in hint
+    assert chat.compose("hello", hint) == f"{chat.STYLE_NOTE}\nhello"

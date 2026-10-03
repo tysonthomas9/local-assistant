@@ -73,10 +73,11 @@ token.
 Turns run one at a time. Each one goes to a fixed side chat
 (`MUSE_SESSION_ID`, default the fixed UUID
 `06cab6b7-2197-526c-90eb-7aef229fdea5`; Muse refuses a `session_id` that isn't
-a UUID with 400 `invalid_params`) and starts with a short note
-asking for brief, spoken-style answers (`MUSE_STYLE_HINT`; set it to an empty
-string to turn it off). The bridge logs only how long messages and replies
-are, never what they say.
+a UUID with 400 `invalid_params`). Muse gets the user's words only: nothing is
+added to them. A short note asking for brief, spoken-style answers can be put in
+front only by opting in (`MUSE_STYLE_HINT_ON=1` in the gadget, `run_poc.sh
+--style-hint`). The bridge logs only how long messages and replies are, never
+what they say.
 
 Speech-to-text runs on the Mac, so the bridge accepts text only.
 
@@ -240,7 +241,6 @@ Pollen's own app tools, so the robot only ever plays Pollen's moves:
   address or account). There's no camera or photo command.
 - **Log**: the app log has one line per call, `robot tool <name> -> <result>` (no transcript
   text); the gadget logs `robot command <name> -> ok|error`.
-- The bridge's style note asks Muse to "use the reachy.* tools to move when it fits".
 
 ## Token and privacy
 

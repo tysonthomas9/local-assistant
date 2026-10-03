@@ -161,7 +161,7 @@ def test_turn_over_real_link_session():
         assert vm.resets == [vm.sub]   # the subscription is closed after the turn
         assert vm.chat_bodies[0]["device_id"] == "homelink-abcdef"
         assert vm.chat_bodies[0]["session_id"] == chat.DEFAULT_SESSION_ID
-        assert vm.chat_bodies[0]["message"].endswith("\nhi robot")
+        assert vm.chat_bodies[0]["message"] == "hi robot"   # no note by default
         stop.set()
         await asyncio.wait_for(task, 2)
         server.cancel()

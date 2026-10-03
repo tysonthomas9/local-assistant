@@ -30,7 +30,7 @@ log = logging.getLogger("gadget")
 
 def turn_options() -> chat.TurnOptions:
     session_id = os.environ.get("MUSE_SESSION_ID", chat.DEFAULT_SESSION_ID)
-    style_hint = os.environ.get("MUSE_STYLE_HINT", chat.DEFAULT_STYLE_HINT)
+    style_hint = chat.STYLE_NOTE if os.environ.get("MUSE_STYLE_HINT_ON") == "1" else chat.DEFAULT_STYLE_HINT
     return chat.TurnOptions(session_id=session_id.strip() or None, style_hint=style_hint)
 
 
