@@ -161,6 +161,7 @@ def test_gadget_command_runs_pollen_tool_through_the_handler(caplog):
         stop = await asyncio.to_thread(client.run, "reachy.stop_move", {})
         wrong = await asyncio.to_thread(
             gadget_robot.RobotTools(url=f"http://127.0.0.1:{port}", secret="b2" * 32).run, "reachy.stop_move", {})
+        handler._log_turn_tools()
         await handler.shutdown()
         await asyncio.wait_for(startup, 5)
         after = await asyncio.to_thread(client.run, "reachy.head_tracking", {"enabled": False})
@@ -174,6 +175,10 @@ def test_gadget_command_runs_pollen_tool_through_the_handler(caplog):
     assert mm.calls == [("set_head_tracking", True), ("clear_move_queue",)]
     logged = caplog.text
     assert "robot tool head_tracking ->" in logged and "robot tool stop_dance ->" in logged
+    # The per-turn line counts the calls the endpoint ran (names and times only; the refused one isn't run).
+    turn = [r.getMessage() for r in caplog.records if "this turn" in r.getMessage()]
+    assert len(turn) == 1
+    assert turn[0].startswith("MuseHandler: 2 robot tool call(s) this turn (head_tracking x1, stop_dance x1), tool time ")
 
 
 def test_no_secret_no_endpoint():

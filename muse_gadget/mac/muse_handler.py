@@ -31,6 +31,7 @@ import logging
 import os
 import time
 import uuid
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
@@ -107,6 +108,8 @@ class MuseHandler(ConversationHandler):
         self._robot_tools_port = robot_tools_port if robot_tools_port is not None else robot_tools.port_from_env()
         self._robot_tools_server: Optional[asyncio.AbstractServer] = None
         self._tool_waiters: dict[str, asyncio.Future] = {}
+        self._turn_tools: Counter[str] = Counter()  # robot tool calls in the current turn (names only)
+        self._turn_tool_s = 0.0  # their total time, start to result
         self.output_queue: asyncio.Queue[Any] = asyncio.Queue()
         self.connection: Optional[str] = None  # LocalStream reads this to show "connected"
         self.bridge = bridge or BridgeClient()
@@ -295,11 +298,14 @@ class MuseHandler(ConversationHandler):
             return
         logger.info("MuseHandler: heard %d chars in %.0f ms", len(text), stt_ms)
         await self._transcript("user", text)
+        self._turn_tools.clear()
+        self._turn_tool_s = 0.0
         try:
             reply = await asyncio.to_thread(self.bridge.turn, text)
         except BridgeError as e:
             logger.warning("MuseHandler: bridge error %s", e.code)
             reply = spoken_error(e)
+        self._log_turn_tools()
         logger.info("MuseHandler: reply %d chars after %.0f ms", len(reply), (time.perf_counter() - started) * 1000)
         await self._speak(reply)
 
@@ -378,8 +384,23 @@ class MuseHandler(ConversationHandler):
         self._tool_waiters.clear()
         logger.info("MuseHandler: robot tools endpoint closed")
 
+    def _log_turn_tools(self) -> None:
+        """One line per turn: how many robot tool calls Muse made and their total time (names only)."""
+        calls = sum(self._turn_tools.values())
+        names = ", ".join(f"{name} x{n}" for name, n in self._turn_tools.most_common())
+        logger.info("MuseHandler: %d robot tool call(s) this turn%s, tool time %.0f ms",
+                    calls, f" ({names})" if names else "", self._turn_tool_s * 1000)
+
     async def _dispatch_robot_tool(self, tool: str, args: dict) -> dict:
         """Run one of Pollen's tools through the tool manager, as the HF backend does, and wait for it."""
+        started = time.perf_counter()
+        try:
+            return await self._run_robot_tool(tool, args)
+        finally:
+            self._turn_tools[tool] += 1
+            self._turn_tool_s += time.perf_counter() - started
+
+    async def _run_robot_tool(self, tool: str, args: dict) -> dict:
         call_id = f"muse-{uuid.uuid4().hex[:12]}"
         done: asyncio.Future = asyncio.get_running_loop().create_future()
         self._tool_waiters[call_id] = done

@@ -9,6 +9,8 @@
 #   muse_gadget/mac_gadget.sh stop     remove the gadget container; stop the Podman
 #                                      machine only if `start` started it
 #   muse_gadget/mac_gadget.sh status   machine, container, bridge health, listeners
+#   muse_gadget/mac_gadget.sh logs     print the gadget container's log (names, ids and timings;
+#                                      run_poc.sh saves it, redacted, before `stop` removes it)
 #
 # MUSE_STYLE_HINT_ON=1 (start): opt in to the bridge's short "[Spoken aloud by a small
 # desk robot ...]" note before each message. Off by default: Muse gets the words only.
@@ -160,6 +162,11 @@ case "$action" in
       echo "left $MACHINE as it was ($(machine_state))"
     fi
     ;;
+  logs)
+    if [ "$(machine_state)" = running ] && [ "$(container_state)" != none ]; then
+      podman logs "$NAME" 2>&1 | tail -n 20000
+    fi
+    ;;
   status)
     port="$1"
     echo "machine: $(machine_state)$(marker_valid && echo ', started by mac_gadget.sh')"
@@ -203,7 +210,8 @@ case "$action" in
         ;;
     stop) remote down | sed 's/^/[mac-gadget] /' ;;
     status) remote status "$PORT" | sed 's/^/[mac-gadget] /' ;;
-    *) echo "usage: $0 start|stop|status" >&2; exit 2 ;;
+    logs) remote logs ;;
+    *) echo "usage: $0 start|stop|status|logs" >&2; exit 2 ;;
 esac
 }
 main "$@"; exit

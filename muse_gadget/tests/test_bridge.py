@@ -108,3 +108,28 @@ def test_default_server_socket_is_loopback(monkeypatch):
         await server.wait_closed()
         return addrs
     assert asyncio.run(main()) == {"127.0.0.1"}
+
+
+class Unfinished(FakeLink):
+    """Muse starts a reply but never finishes it (e.g. it keeps calling tools)."""
+
+    async def send_chat(self, message, session_id=None):
+        ack = await super().send_chat(message, session_id)
+        note = ack["response"]["result"]["message_id"]
+        self.subs[-1].events += [
+            self._event("delta.message_start", message_id="m-late", reply_to_message_id=note),
+            self._event("delta.text_append", message_id="m-late", text="Watch this dance!"),
+        ]
+        return ack
+
+
+def test_timeout_returns_the_text_so_far():
+    """The outer guard must not fire before chat.turn's own deadline, which keeps partial text."""
+    status, body = with_bridge(
+        lambda port: http(port, "POST", "/turn", b'{"text": "dance"}', "application/json"),
+        Unfinished({}), options=chat.TurnOptions(settle_s=0, timeout_s=0.3))
+    assert (status, body) == (200, {"reply": "Watch this dance!"})
+
+
+def test_outer_guard_is_later_than_the_turn_deadline():
+    assert bridge.TURN_MARGIN_S > 0

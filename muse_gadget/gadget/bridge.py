@@ -3,7 +3,8 @@
 * ``POST /turn`` with JSON ``{"text": "..."}`` -> 200 ``{"reply": "..."}``.
   Errors: 415 for a body that isn't JSON (audio included: speech-to-text is
   local), 400 for JSON without text, 503 ``{"error": "not_paired"}`` or
-  ``{"error": "link_down"}``, 504 ``{"error": "timeout"}`` after 60 s, 502
+  ``{"error": "link_down"}``, 504 ``{"error": "timeout"}`` after 60 s with no
+  reply text (with some text, the text so far comes back as a 200), 502
   ``{"error": "muse_error"}`` if Muse refuses the turn.
 * ``GET /health`` -> 200 ``{"paired": bool, "linked": bool}``.
 
@@ -31,6 +32,9 @@ DEFAULT_PORT = 48080
 MAX_BODY = 16 * 1024
 MAX_TEXT = 4000
 HEADER_TIMEOUT_S = 10
+# chat.turn has its own deadline (TurnOptions.timeout_s) and returns the text received so far
+# when it hits it. This outer guard only catches a turn that hangs past that, so it must be later.
+TURN_MARGIN_S = 5.0
 IN_CONTAINER_ENV = "MUSE_BRIDGE_IN_CONTAINER"
 _REASONS = {200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed",
             413: "Payload Too Large", 415: "Unsupported Media Type", 502: "Bad Gateway",
@@ -100,7 +104,7 @@ class Bridge:
         if not self._is_paired():
             return 503, {"error": "not_paired"}
         try:
-            reply = await asyncio.wait_for(self._turn(text), self._options.timeout_s)
+            reply = await asyncio.wait_for(self._turn(text), self._options.timeout_s + TURN_MARGIN_S)
         except asyncio.TimeoutError:
             return 504, {"error": "timeout"}
         except chat.TurnError as exc:

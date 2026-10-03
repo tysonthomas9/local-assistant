@@ -36,3 +36,29 @@ def test_bridge_marked_started_before_it_starts():
     for branch, start in ((fake_branch, fake_start), (real_branch, real_start)):
         marks = [i for i in range(branch, start) if lines[i].strip().startswith("bridge_started=1")]
         assert marks, f"no bridge_started=1 between lines {branch + 1} and {start + 1}"
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="run_poc.sh is not in the gadget image")
+def test_gadget_log_is_saved_redacted_before_the_container_goes():
+    lines = SCRIPT.read_text().splitlines()
+    save = next(i for i, l in enumerate(lines) if '"$ROOT/mac_gadget.sh" logs' in l)
+    stop = next(i for i, l in enumerate(lines) if '"$ROOT/mac_gadget.sh" stop' in l)
+    assert save < stop
+    assert "| redact" in lines[save] and '"$LOGDIR/$RUN.gadget.log"' in lines[save]
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="run_poc.sh is not in the gadget image")
+def test_redact_backstops_text_and_content_anywhere():
+    import subprocess
+    redact = next(l for l in SCRIPT.read_text().splitlines() if l.startswith("redact()"))
+    sample = (
+        "2026-10-03 14:05:31,330 INFO gadget.link: client.invoke command=reachy.dance id=c-1\n"
+        "2026-10-03 14:05:31,352 INFO gadget.chat: got a 34-character reply in 1 message(s)\n"
+        "2026-10-03 14:05:32,000 INFO some.lib: message text=dance for me please\n"
+        "2026-10-03 14:05:32,001 INFO some.lib: payload content=Watch this! role=x\n"
+    )
+    out = subprocess.run(["bash", "-c", redact + "\nredact"], input=sample, capture_output=True,
+                         text=True, check=True).stdout
+    assert "dance for me" not in out and "Watch this" not in out
+    assert "text=<redacted>" in out and "content=<redacted>" in out
+    assert "client.invoke command=reachy.dance id=c-1" in out and "34-character reply" in out

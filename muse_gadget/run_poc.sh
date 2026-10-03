@@ -83,7 +83,9 @@ log() { printf '[run_poc %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 scrub() { sed -u -e 's#/Users/[^/ ]*#~#g' -e 's#/home/[^/ ]*#~#g'; }
 # The app logs AdditionalOutputs as `role=<r> content=<text>`. MuseHandler only emits those with
 # --log-transcripts, but whatever reaches a log file on the PC goes through this first.
-redact() { sed -u -e 's/\(role=[A-Za-z_]*\) content=.*/\1 content=<redacted>/'; }
+# The gadget's log (saved at cleanup) has names, ids and timings only; the text= and content= rules
+# are a backstop in case a library ever logs message text there.
+redact() { sed -u -e 's/\(role=[A-Za-z_]*\) content=.*/\1 content=<redacted>/' -e 's/\(^\|[^A-Za-z_]\)\(text\|content\)=.*/\1\2=<redacted>/'; }
 rsh() { ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "$@"; }
 rsh_sh() { rsh "sh -s --$(printf ' %q' "$@")"; }   # rsh_sh <args...> < script: args keep their spaces
 
@@ -202,6 +204,8 @@ cleanup() {
             rsh "f=$M/run/fake-bridge.$RUN.pid; p=\$(cat \"\$f\" 2>/dev/null); \
 [ -n \"\$p\" ] && ps -p \"\$p\" -o command= | grep -q fake_bridge.py && kill \"\$p\"; rm -f \"\$f\"; true"
         else
+            # Keep the gadget's log (client.invoke and turn timings) before the container goes.
+            "$ROOT/mac_gadget.sh" logs 2>&1 | scrub | redact >> "$LOGDIR/$RUN.gadget.log" || true
             "$ROOT/mac_gadget.sh" stop
         fi
     fi
