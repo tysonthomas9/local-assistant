@@ -60,8 +60,8 @@ One turn, in order:
 2. Qwen3-ASR turns your voice into text, on the Mac.
 3. MuseHandler sends only that text to the bridge (`POST /turn` on `127.0.0.1:48080`).
 4. The gadget passes it to Muse over its encrypted link and reads Muse's reply.
-5. If Muse wants to move the robot, it sends a `client.invoke` for a `reachy.*` command. The gadget calls MuseHandler's robot-tools endpoint, which accepts the `dance` and holds it until the reply has been spoken.
-6. Qwen3-TTS speaks the reply on the robot's speaker, and Pollen's wobbler moves the head while it plays. Then the robot dances, with Pollen's own `dance` tool.
+5. If Muse wants to move the robot, it sends a `client.invoke` for a `reachy.*` command. The gadget calls MuseHandler's robot-tools endpoint, which starts the dance at once with Pollen's own `dance` tool and tells Muse it's in progress.
+6. Qwen3-TTS speaks the reply on the robot's speaker while the robot dances, and Pollen's wobbler moves the head while it plays.
 
 It's half-duplex: the mic is ignored while a turn is being transcribed, sent or spoken. There's no wake word, so anything said near the robot becomes a turn.
 
@@ -159,7 +159,7 @@ Muse can call six commands. Each runs one of Pollen's own app tools, so the robo
 | `reachy.head_tracking` | `head_tracking` | the face tracker on or off |
 | `reachy.status` | `robot_status` | `name`, `software` or `imu` only |
 
-Path: Muse `client.invoke` → gadget (checks the command and its parameters) → `POST /tool` to MuseHandler's endpoint on the Mac's `127.0.0.1:48081` → Pollen's tool. The endpoint accepts only these tools and needs a random secret that `run_poc.sh` makes for each run and deletes at clean-up. It exists only while a run holds the robot; otherwise a command answers "robot is asleep". **Talk first, then move:** emotions, dances and looks start once the reply has played (at turn end if nothing is spoken, and at most 20 s after the call); `reachy.stop_move` runs at once and drops held moves. There's no camera, volume, sleep, memory or web command. Besides these, the gadget registers only `device.health`: Muse gets no shell and no file access.
+Path: Muse `client.invoke` → gadget (checks the command and its parameters) → `POST /tool` to MuseHandler's endpoint on the Mac's `127.0.0.1:48081` → Pollen's tool. The endpoint accepts only these tools and needs a random secret that `run_poc.sh` makes for each run and deletes at clean-up. It exists only while a run holds the robot; otherwise a command answers "robot is asleep". **Move and talk together:** emotions, dances and looks start at once, and the reply is spoken while the robot moves; Muse is told the move is in progress. There's no camera, volume, sleep, memory or web command. Besides these, the gadget registers only `device.health`: Muse gets no shell and no file access.
 
 ## Privacy
 

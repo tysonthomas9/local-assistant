@@ -266,12 +266,9 @@ Pollen's own app tools, so the robot only ever plays Pollen's moves:
 - **Allowlist on both ends.** The gadget checks the enums; the endpoint accepts only the tools
   above (no volume, camera, sleep, memory or web tools) and only those status topics (no Wi-Fi
   address or account). There's no camera or photo command.
-- **Talk first, then move.** MuseHandler answers `dance`, `play_emotion` and `move_head` at once
-  ("will start after I finish speaking") and starts them, in call order, when the turn's reply
-  has finished playing (at turn end if nothing is spoken, and never more than 20 s after the
-  call). `stop_dance` runs at once and drops held moves; `head_tracking` and `robot_status` aren't
-  held. Held moves are dropped on a new turn and at shutdown. The command descriptions tell Muse
-  the move comes after the reply.
+- **Move and talk together.** `dance`, `play_emotion` and `move_head` start at once (Pollen's
+  tools queue the move and return), and the reply is spoken while the robot moves. MuseHandler
+  reports these moves to Muse as `"status": "in progress"` instead of Pollen's "queued".
 - **Log**: the app log has one line per call, `robot tool <name> -> <result>` (no transcript
   text), and one line per turn with the number of robot tool calls, their names and the total
   tool time; the gadget logs `robot command <name> -> ok|error`.
