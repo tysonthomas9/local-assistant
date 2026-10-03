@@ -228,3 +228,59 @@ listener is Podman's `gvproxy` on `127.0.0.1:48080`.
 - The history row fields (`seq`, `event_name`, `message_id`,
   `reply_to_message_id`, `display_text`, `display_text_ready`) come from the
   ESP32 firmware, not from API docs.
+
+## POC run
+
+Pollen's conversation app (pinned at `f58523b`, unmodified) runs on the Mac inside Reachy
+Edge.app, with `MuseHandler` (`mac/`) as its backend: the robot's mic, then Silero VAD (one
+utterance), then local speech-to-text (parakeet-mlx, with mlx-whisper as the fallback), then
+`POST /turn` on the bridge at the Mac's `127.0.0.1:48080`. Muse's reply is rendered with macOS
+`say` and played on the robot's speaker, and Pollen's wobbler moves the head while it plays.
+It's half-duplex: the mic is ignored while a turn is being transcribed, sent or spoken. There's no
+wake word, so anything said near the robot becomes a turn.
+
+Run it from the PC:
+
+```bash
+muse_gadget/run_poc.sh                  # real Muse gadget (mac_gadget.sh start/stop)
+muse_gadget/run_poc.sh --fake-bridge    # echo bridge: the robot answers "You said: ..."
+# options: --duration SECONDS, --lock-timeout SECONDS, --mic-log SECONDS, -- <app args>
+```
+
+In order, it:
+1. takes the hw-run lock on `reachy-mac` (it waits while another run holds it and only takes over
+   a lock whose owner on this PC has died);
+2. copies `mac/` to `~/assistant-edge/muse-app/mac` and runs `mac/install.sh` there. The first
+   time, that clones the app, builds its venv from `mac/app-constraints.txt` (the app's `uv.lock`
+   pins: the Mac's uv can't read that lock format), and caches the STT model in
+   `muse-app/hf`. Later runs only validate;
+3. starts the bridge: `mac_gadget.sh start`, or `mac/fake_bridge.py` with `--fake-bridge`;
+4. starts the daemon (`mac/run_daemon.py`: API, WebRTC signalling and mDNS all kept on loopback),
+   then the app (`mac/run_app.py`), both inside Reachy Edge.app via `edge_app_run.sh`.
+
+On exit, an error or Ctrl-C, it stops the app, puts the robot to sleep (`goto_sleep`), turns
+the motors off, then stops the daemon, unloads this run's `com.assistant.reachy-edge.*` jobs,
+stops the bridge and releases the lock. It refuses to start if a daemon or bridge it didn't start
+is already running, and it never changes the speaker volume (65).
+
+Details:
+- `mac/run_app.py` swaps `MuseHandler` in for `HuggingFaceRealtimeHandler` in the app's
+  module before the app starts. It sets a placeholder realtime URL, because the app only
+  starts its audio loops once one is configured; nothing connects to it.
+- Reachy Edge.app always starts `~/assistant-edge/src/.venv-assistant/bin/python`.
+  `mac/exec_python.py` swaps that process for the daemon's or the app's own Python, so the app
+  is still responsible for the mic. It first removes that venv's GStreamer environment
+  variables.
+- Reply audio is rendered at the speaker's rate (16 kHz), not 24 kHz, because the app pushes
+  frames to the speaker without resampling.
+- Speaking or listening needs nobody at the Mac, once Reachy Edge has its microphone grant.
+- **Transcripts in logs:** the upstream app logs every turn (`role=user content=...`). The logs
+  of each run go to `~/.local/state/muse-poc/` on the PC (`MUSE_POC_LOGDIR`), never into the
+  repo. Delete them when you're done. MuseHandler itself logs only lengths and timings.
+
+Tests (on the PC, with the app's venv; the Silero test runs when the `silero-vad` wheel is
+importable):
+
+```bash
+cd muse_gadget/mac && <app venv>/bin/python -m pytest tests -q
+```
