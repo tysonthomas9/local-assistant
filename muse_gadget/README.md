@@ -334,6 +334,18 @@ stops the bridge and releases the lock. It refuses to start if a daemon or bridg
 is already running. Once the daemon is up it sets the robot's speaker volume to `--volume`
 (default 100; the daemon plays a short test sound) and logs the value before and after.
 
+One-time setup for head tracking: the daemon runs offline (`HF_HUB_OFFLINE=1`, `HF_HOME` is
+`~/assistant-edge/hf`), so Pollen's YuNet face model must already be in that cache or
+`reachy.head_tracking` crashes the face tracker. `install.sh` doesn't fetch it. Cache it once on
+the Mac, with network access, using the daemon's own Python, so the pinned revision matches:
+
+```bash
+cd ~/assistant-edge && HF_HOME=$PWD/hf daemon/bin/python -c "from reachy_mini.vision import face_detector as f; \
+from huggingface_hub import hf_hub_download as d; print(d(f._MODEL_REPO, f._MODEL_FILE, revision=f._MODEL_REVISION))"
+```
+
+This caches `pollen-robotics/face_detection_yunet_2026may` (about 230 KB).
+
 Details:
 - `mac/run_app.py` swaps `MuseHandler` in for `HuggingFaceRealtimeHandler` in the app's
   module before the app starts. It sets a placeholder realtime URL, because the app only
