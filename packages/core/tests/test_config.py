@@ -149,3 +149,14 @@ def test_deep_merge() -> None:
 
 def test_data_dir_is_expanded() -> None:
     assert "~" not in str(AssistantConfig().brain.data_dir)
+
+
+def test_edge_listening_defaults_and_repo_config() -> None:
+    edge = AssistantConfig().edge
+    assert edge.listen.mode == "wake_word"
+    assert edge.wake.models == ["hey_jarvis"]
+    assert edge.wake.pre_roll_s == 1.5
+    repo = load_config(Path(__file__).parents[3] / "config", environ={}).edge
+    assert repo.listen.mode == "wake_word"
+    with pytest.raises(ValidationError):
+        AssistantConfig.model_validate({"edge": {"listen": {"mode": "always"}}})

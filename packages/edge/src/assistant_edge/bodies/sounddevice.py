@@ -1,4 +1,6 @@
-"""SoundDeviceBody: the default microphone and speaker of this machine (PortAudio).
+"""SoundDeviceBody: a microphone and speaker of this machine (PortAudio).
+
+The devices are `[edge.audio] input` / `output` (a PortAudio device name, or `default`).
 
 For an edge on a laptop or desktop. No motion and no camera. There is no echo cancellation
 (`aec: none`), so use headphones or push-to-talk. `sounddevice` is imported on `start()`, so the
@@ -20,11 +22,16 @@ MIC_RATE = 16000
 FRAME_SAMPLES = 320  # 20 ms
 
 
-class _Speaker:
-    """A `PcmSink` on the default output device; reopened when the stream rate changes."""
+def _device(name: str) -> str | None:
+    return None if name == "default" else name
 
-    def __init__(self, sd: Any) -> None:
+
+class _Speaker:
+    """A `PcmSink` on the output device; reopened when the stream rate changes."""
+
+    def __init__(self, sd: Any, device: str = "default") -> None:
         self.sd = sd
+        self.device = _device(device)
         self.rate = 0
         self.stream: Any = None
         self.buffer = bytearray()
@@ -43,7 +50,11 @@ class _Speaker:
         if rate != self.rate:
             self.close()
             self.stream = self.sd.RawOutputStream(
-                samplerate=rate, channels=1, dtype="int16", callback=self._callback
+                samplerate=rate,
+                channels=1,
+                dtype="int16",
+                callback=self._callback,
+                device=self.device,
             )
             self.stream.start()
             self.rate = rate
@@ -63,9 +74,10 @@ class _Speaker:
 class SoundDeviceAudio:
     aec: Aec = "none"
 
-    def __init__(self, sd: Any) -> None:
+    def __init__(self, sd: Any, input: str = "default", output: str = "default") -> None:
         self.sd = sd
-        self.speaker = _Speaker(sd)
+        self.input = _device(input)
+        self.speaker = _Speaker(sd, output)
         self.player = PacedPlayer(self.speaker)
         self._mic: Any = None
 
@@ -84,6 +96,7 @@ class SoundDeviceAudio:
             dtype="int16",
             blocksize=FRAME_SAMPLES,
             callback=callback,
+            device=self.input,
         )
         self._mic.start()
         try:
@@ -122,10 +135,10 @@ def _put_latest(queue: asyncio.Queue[AudioFrame], frame: AudioFrame) -> None:
 class SoundDeviceBody:
     kind = "sounddevice"
 
-    def __init__(self) -> None:
+    def __init__(self, input: str = "default", output: str = "default") -> None:
         import sounddevice
 
-        self.audio = SoundDeviceAudio(sounddevice)
+        self.audio = SoundDeviceAudio(sounddevice, input, output)
         self.motion = None
         self.camera = None
 

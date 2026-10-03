@@ -16,6 +16,7 @@ import itertools
 import json
 import math
 import os
+import signal
 import sys
 import time
 from typing import Any, Literal
@@ -90,6 +91,8 @@ async def start_edge_agent(
     energy_trigger_feed_only: bool = False,
     vad_end_ms: int | None = None,
     record: bool = False,
+    listen: Literal["wake_word", "open_mic", "push_to_talk"] = "push_to_talk",
+    config_only: bool = False,
     within_s: float = 60.0,
 ) -> None:
     """Start the real edge agent with a real body; it dials the link server console.
@@ -103,8 +106,13 @@ async def start_edge_agent(
     `energy_trigger_feed_only` arms that trigger only on fed golden audio (`/feed`): ordinary
     room sound on the real microphone then cannot open a window before the fed utterance (the
     real microphone still flows into the brain's follow-up windows). Both go in the timings.
-    `record` writes each played speech stream to a WAV where the agent runs (read and
+    `listen` is the listening mode (`--listen`): `push_to_talk` here unless a scenario asks
+    for `wake_word` (the product's default) or `open_mic` (see steps/listen.py); it goes in the
+    timings. `record` writes each played speech stream to a WAV where the agent runs (read and
     removed by `recorded_reply_transcript_not_empty`).
+    `config_only` starts it the way a user does: only the link's address and token are given,
+    everything else (device id, body, listening mode, wake word, mic cap) comes from
+    config/assistant.toml; `id` then only names the process and `body` is what to expect.
     """
     link = _link(ctx)
     if body == "reachy" and where != "edge_host":
@@ -121,8 +129,13 @@ async def start_edge_agent(
             port = await edge_host_steps.reverse_tunnel(ctx, link.port)
             python, ssh = f"{edge_host.REMOTE_VENV}/bin/python", host.ssh
             in_app = body == "reachy" and await edge_host_steps.is_mac(host)
-    args = ["-m", "assistant_edge", "--device-id", id, "--body", body]
+    args = ["-m", "assistant_edge"]
+    if not config_only:
+        args += ["--device-id", id, "--body", body, "--listen", listen]
+        ctx.state.setdefault("timings", {})["listen_mode"] = listen
     args += ["--url", f"ws://127.0.0.1:{port}/edge/v1", "--token", link.token]
+    if config_only and (energy_trigger_dbfs is not None or vad_end_ms is not None or record):
+        raise AssertionError("config_only takes no other agent options")
     if energy_trigger_dbfs is not None:
         args += ["--energy-trigger-dbfs", str(energy_trigger_dbfs)]
         timings = ctx.state.setdefault("timings", {})
@@ -251,6 +264,20 @@ async def release_push_to_talk(ctx: ScenarioContext, client: str) -> None:
     name = _client_name(client)
     await _type(ctx, name, "/ptt up")
     await _expect(ctx, name, {"MIC-CLOSE"}, 10, fields={"reason": "ptt"}, what="MIC-CLOSE")
+
+
+@step("edge_printed")
+async def edge_printed(
+    ctx: ScenarioContext,
+    client: str,
+    tag: str,
+    fields: dict[str, str] | None = None,
+    within_s: float = 10.0,
+) -> None:
+    """The agent printed a `tag` line (with these fields) that no step consumed yet."""
+    want = {k: str(v) for k, v in (fields or {}).items()}
+    line = await _expect(ctx, _client_name(client), {tag}, within_s, fields=want, what=tag)
+    print(line.text)
 
 
 @step("edge_output_clean")
@@ -773,6 +800,22 @@ async def daemon_ports_on_loopback(
     listens = {name for proto, name, state in sockets if proto == "TCP" and state == "LISTEN"}
     for port in listening or list(DAEMON_LOOPBACK_PORTS):
         assert f"127.0.0.1:{port}" in listens, f"no LISTEN on 127.0.0.1:{port}: {sorted(listens)}"
+
+
+@step("edge_agent_crashes")
+async def edge_agent_crashes(ctx: ScenarioContext, client: str) -> None:
+    """The agent dies at once (kill -9 of its Python; inside Reachy Edge.app, of the app
+    job's process group), so none of its own cleanup runs."""
+    proc = _agent(ctx, client)
+    pgid = edge_host_steps.app_job_pgid(proc)
+    if pgid is None:
+        proc.send_signal(signal.SIGKILL)
+    else:
+        host = edge_host_steps.host_of(ctx)
+        await asyncio.to_thread(host.run, f"kill -KILL -- -{pgid}", 30)
+    ctx.state["crashed_at"] = time.monotonic()
+    code = await proc.wait(60)
+    print(f"edge {client} killed (exit {code})")
 
 
 @step("edge_agent_fails")

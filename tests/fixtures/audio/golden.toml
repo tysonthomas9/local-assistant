@@ -25,3 +25,11 @@ voice = "aiden"
 [tell_me_a_story]
 text = "Please tell me a long story about a little robot who learns to paint."
 voice = "aiden"
+
+[hey_jarvis_whats_your_name]
+text = "Hey Jarvis, what's your name?"
+voice = "aiden"
+
+[whats_your_name]
+text = "What's your name?"
+voice = "aiden"

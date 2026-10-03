@@ -155,8 +155,8 @@ device id. Messages are checked by containment: the listed `fields` must be in t
 | `flood_stopped` | `process`, `within_s = 5` | The flood ended early because its link closed (the writes were backed up) |
 | `peer_leaves_before_hello` | `stage: tcp \| upgraded = upgraded` | A real TCP peer connects (and, if `upgraded`, completes the WebSocket upgrade) and hangs up before hello |
 | `server_output_clean` | none | The server printed no traceback or handler error |
-| `kill_process` | `process`, `signal_name: KILL \| STOP \| CONT = KILL` | "kill the <process>" with a real signal (kill -9, freeze, thaw) |
-| `restart_process` | `process` | "restart the <process>" with the same command line (the server keeps its port) |
+| `kill_process` | `process`, `signal_name: KILL \| STOP \| CONT \| TERM \| HUP = KILL`, `within_s = 60` | "kill the <process>" with a real signal (kill -9, freeze, thaw, stop, hang up); `process` may also be `daemon` (the reachy-mini daemon); after KILL, TERM or HUP it has exited |
+| `restart_process` | `process` | "restart the <process>" with the same command line (the server keeps its port; `daemon`: ready when its API serves) |
 | `client_reconnects_within` | `client`, `seconds: float` | "client "<id>" reconnects within <s> s": a new welcome and a new server session |
 | `client_retries_with_backoff` | `client`, `min_retries = 1` | Every printed retry delay is 0.5 s doubling to 10 s, within ±20 % jitter |
 | `wait` | `seconds: float` | Lets real time pass |
@@ -181,6 +181,8 @@ remote process group, and teardown stops them. The daemon API (`ssh -L`) and Edg
 | `daemon_ports_on_loopback` | `listening: list[int]?` (default 8000, 8443) | `lsof` of the daemon's process group: every socket is on 127.0.0.1 / [::1] at both ends (no `*`, no LAN address, no mDNS 5353) and it LISTENs on 127.0.0.1 at each port |
 | `daemon_status_is` | `state = running`, `version: str?` | `GET /api/daemon/status` (through the tunnel): state, backend ready, no error |
 | `robot_state_read` | `control_mode: str?` | `GET /api/state/full`: head pose, body yaw, both antennas (and the motor mode) |
+| `robot_motors_are` | `mode: enabled \| disabled \| gravity_compensation`, `within_s = 10` | `GET /api/motors/status` says `mode` within `within_s` (printed with the time since `edge_agent_crashes`) |
+| `daemon_printed` | `text`, `count = 1`, `within_s = 10` | The daemon printed a line containing `text` (e.g. the motor watchdog's `WATCHDOG rested motors=disabled`) at least `count` times |
 | `stop_reachy_daemon` | none | SIGTERM; the daemon reports a clean stop and stops answering |
 | `edge_host_clean` | none | Stops this scenario's processes on the edge host, the daemon last; the motors must be disabled by then (else the robot is put to rest, SDK `goto_sleep` and torque off, and the step fails) and nothing from `~/assistant-edge` may still run there. Any teardown also rests the robot before its daemon stops: the motors' torque outlives the daemon |
 
@@ -209,11 +211,13 @@ over 0.4 s fails as "the measurement is starved".
 
 | Step | Arguments | Does |
 |---|---|---|
-| `start_edge_agent` | `id`, `body: console \| reachy = console`, `where: pc \| edge_host = pc`, `wait = true`, `energy_trigger_dbfs: float?`, `energy_trigger_feed_only = false`, `vad_end_ms: int?`, `record = false`, `within_s = 60` | Starts the edge agent; waits for its BODY line and welcome unless `wait: false`. `energy_trigger_dbfs` opens a mic window on a loud voice (`energy_trigger_feed_only`: only on fed golden audio, so ordinary room sound on the real microphone cannot open a window before the feed; recorded in the timings), `vad_end_ms` closes it after that much quiet once speech was heard; `record` writes each played speech stream to a WAV where the agent runs (`.recordings/`, read and removed by `recorded_reply_transcript_not_empty`) |
+| `start_edge_agent` | `id`, `body: console \| reachy = console`, `where: pc \| edge_host = pc`, `wait = true`, `energy_trigger_dbfs: float?`, `energy_trigger_feed_only = false`, `vad_end_ms: int?`, `record = false`, `listen: wake_word \| open_mic \| push_to_talk = push_to_talk`, `config_only = false`, `within_s = 60` | Starts the edge agent; waits for its BODY line and welcome unless `wait: false`. `listen` is its listening mode (`--listen`, recorded in the timings; the product's default is `wake_word`, scenarios ask for it). `energy_trigger_dbfs` opens a mic window on a loud voice (`energy_trigger_feed_only`: only on fed golden audio, so ordinary room sound on the real microphone cannot open a window before the feed; recorded in the timings), `vad_end_ms` closes it after that much quiet once speech was heard; `record` writes each played speech stream to a WAV where the agent runs (`.recordings/`, read and removed by `recorded_reply_transcript_not_empty`). `config_only` starts it as a user does, with only `--url` and `--token`: device id, body, listening mode, wake word and mic cap come from config/assistant.toml (`id` then only names the process) |
 | `edge_body_is` | `client`, `aec: none \| sw \| hw?`, `camera: bool?`, `expressions: list[str]?` | The body's announced capabilities (and the hello the server got); `aec: hw` also checks the XVF3800 report (board found, one far-end reference) |
 | `edge_types` | `client`, `text` | Types a line into the agent (`/ptt down`, `/mute`, ... or text, sent as text.input) |
 | `press_push_to_talk` / `release_push_to_talk` | `client` | `/ptt down` opens a mic window (MIC-OPEN); `/ptt up` closes it (MIC-CLOSE) |
 | `edge_answers` | `client`, `type`, `fields: map?`, `ok = true`, `error_contains: str?`, `within_s = 10` | The server sends a request; the edge's `result` for that id has `ok` (and the error text) |
+| `edge_printed` | `client`, `tag`, `fields: dict?`, `within_s = 10` | The agent printed a `tag` line with these fields that no step took yet (e.g. `UNMUTE-REFUSED`, `MIC-REFUSED`, `FOLLOW-UP seconds=120`, `CLOSED`) |
+| `edge_agent_crashes` | `client` | The agent dies at once: kill -9 of its Python (inside Reachy Edge.app: the app job's process group), none of its cleanup runs |
 | `edge_output_clean` | `client` | No traceback, CONSOLE-ERROR, UNHANDLED or BODY-ERROR line from the agent |
 | `edge_agent_fails` | `client`, `contains: str`, `within_s = 60` | The agent exited non-zero, said `contains` and never connected |
 | `client_stayed_connected` | `client` | One welcome, no CLOSED, no RETRY: the link never dropped |
@@ -268,13 +272,46 @@ reachy bodies do; the link client console does not, so use `brain_state_is` with
 | `llm_parallel_throughput` | `count = 4`, `max_tokens = 300`, `min_tokens: int?` | The scenario's LLM server: one request alone, then `count` at once (unique prompts); each produces at least `min_tokens` (default 80% of `max_tokens`) and together they beat the single stream; the tokens/s and TTFTs go to the timings |
 | `robot_pose_follows` | `client`, `text`, `states: list[str]`, `tolerance_deg = 6`, `max_head_deg = 10` | Types `text`; the body's MOTION lines follow the attention `states`; a sampler on the robot's machine checks each pose within `tolerance_deg` of neutral turned by the state's roll/pitch, and no more than `max_head_deg` from neutral (remembers the start pose for `robot_back_at_rest`) |
 
+### Listening (`steps/listen.py`)
+
+The edge's hands-free listening (`--listen`): wake word, open mic and the brain's follow-up.
+The checks read the agent's WAKE, MIC-OPEN/MIC-CLOSE, FOLLOW-UP, VAD-ECHO and ECHO-END lines
+after a mark (set by `listen_mark`, `follow_up_armed` and `speaker_plays`). On the robot, sound
+reaches the microphone through the air from the edge host's built-in speaker (`speaker_plays`);
+the robot's own speaker volume is never touched.
+
+| Step | Arguments | Does |
+|---|---|---|
+| `listen_mark` | `client` | Later listening checks look only at what the agent prints from now on |
+| `edge_listens` | `client`, `mode` | The agent's LISTEN line names this mode (recorded in the timings) |
+| `wake_detected` | `client`, `model = hey_jarvis`, `word = hey jarvis`, `min_score = 0.4`, `within_s = 15` | The agent detected the wake word (WAKE, `model`) and sent `wake{word, score}` with at least `min_score` |
+| `mic_opened` | `client`, `reason`, `barge_in: bool?`, `limit_s: float?`, `within_s = 15` | A mic window opened for `reason` (wake, vad, follow_up, ptt, energy) after the mark, cutting the robot's speech or not (`barge_in`), with the time limit `limit_s` (at most the 120 s cap); on failure it says what the speaker played |
+| `mic_closed` | `client`, `reason = vad_end`, `opened_by: str?`, `min_s = 0`, `open_for_s: float?`, `within_s = 30` | The mic window closed for `reason` (vad_end, no_speech, timeout, ...), opened by `opened_by`, after at least `min_s` of audio; `open_for_s`: it was open that long (+-2 s) |
+| `no_turn_for` | `client`, `seconds` | For `seconds` after the mark no window opened and no wake was sent; prints near misses (WAKE-NEAR) and refused echo (VAD-ECHO) |
+| `follow_up_armed` | `client`, `within_s = 30` | The brain's follow-up reached the agent (FOLLOW-UP); sets the mark |
+| `room_quiet` | `client`, `seconds = 2`, `within_s = 90` | Waits for `seconds` in which the speech detector heard no speech (`/level`): a precondition, so someone talking elsewhere cannot start or spoil the next turn; a turn room speech started meanwhile is waited out (window closed, brain idle) and set aside, so later checks do not take it for the next turn |
+| `speaker_plays` | `client`, `name`, `volume = 50`, `wait = true` | Plays `tests/fixtures/audio/<name>.wav` through the macOS edge host's built-in speaker (refused if it is not the default output) at `volume` (at most 60), restoring the volume and mute after; sets the mark; `wait: false` returns as it starts |
+| `speaker_finished` | `within_s = 60` | The play `speaker_plays` started has finished |
+
+### The try-it launcher (`steps/try_it.py`)
+
+`scripts/try_it.sh` run as a user runs it; its client name for `speaker_plays` is `try_it`.
+Teardown stops it with Ctrl-C too, so the robot is put to rest whatever the outcome.
+
+| Step | Arguments | Does |
+|---|---|---|
+| `try_it_started` | `listen: wake_word \| open_mic \| push_to_talk?`, `mode = wake_word`, `within_s = 900` | Runs the launcher (with `--listen listen` if given) until it is ready, listening in `mode` |
+| `try_it_shows` | `wake = false`, `max_wer = 0.35`, `within_s = 60` | Since the mark the launcher showed the wake word (`wake`), what was heard (`you:`, the played WAV's text within `max_wer`) and a non-empty reply (`robot:`) |
+| `try_it_stopped` | `within_s = 180` | Ctrl-C (SIGINT to its process group): it exits 0 having reported the motors disabled and 0 leftover processes |
+
 ### Speech (`steps/speech.py`)
 
 The real speech server (`servers/speech`: Parakeet TDT STT and Qwen3-TTS on GPU1) and spoken
 turns. Voice input is the golden WAVs of `tests/fixtures/audio` (synthetic speech, listed in
 `golden.toml`), fed into the edge agent as real 20 ms mic frames at its mic input point
-(`/feed`), never played through a speaker. Word error rates compare lower-case words without
-punctuation.
+(`/feed`), or, in the listening features on the robot, played through the air from the edge
+host's speaker (`speaker_plays`, see Listening). Word error rates compare lower-case words
+without punctuation.
 
 | Step | Arguments | Does |
 |---|---|---|
@@ -286,7 +323,7 @@ punctuation.
 | `tts_gives_audio` | `text`, `voice = ryan`, `min_s = 0.5`, `max_s = 30`, `min_voiced = 0.4` | The TTS streams `min_s` to `max_s` seconds of audio, first audio before the end, with at least `min_voiced` of its 20 ms frames above -45 dBFS (first-audio time recorded) |
 | `transcribe_tts_audio` | none | The speech server transcribes the audio of the last `tts_gives_audio` (a round trip) |
 | `speech_server_used_voice` | `voice` | The speech server's latest TTS request (`/requests`) used this voice |
-| `room_level_measured` | `client`, `seconds = 2` | The edge measures the room on its real microphone (`/level`, LEVEL): it must deliver frames; the mean and peak dBFS go in the timings (`room_level`) |
+| `room_level_measured` | `client`, `seconds = 2`, `key = room_level`, `min_mean_dbfs: float?` | The edge measures the room on its real microphone (`/level`, LEVEL): it must deliver frames; the mean and peak dBFS go in the timings (under `key`); `min_mean_dbfs` asks for a room at least that loud (noise played) |
 | `feed_golden_wav` | `client`, `name` | The agent feeds `tests/fixtures/audio/<name>.wav` as mic frames in real time (`/feed`, FEED) |
 | `golden_wav_fed` | `client`, `within_s = 30` | The fed WAV reached its end (FED) |
 | `voice_turn_transcribed` | `client`, `text: str?`, `max_wer = 0.2`, `within_s = 60` | The brain's next TRANSCRIPT matches the fed WAV's text (or `text`); prints the edge's mic windows |

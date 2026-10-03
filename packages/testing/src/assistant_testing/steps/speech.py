@@ -460,10 +460,17 @@ async def feed_golden_wav(ctx: ScenarioContext, client: str, name: str) -> None:
 
 
 @step("room_level_measured")
-async def room_level_measured(ctx: ScenarioContext, client: str, seconds: float = 2.0) -> None:
+async def room_level_measured(
+    ctx: ScenarioContext,
+    client: str,
+    seconds: float = 2.0,
+    key: str = "room_level",
+    min_mean_dbfs: float | None = None,
+) -> None:
     """Measure the room on the edge agent's real microphone for `seconds` (`/level`, before a
-    feed) and put it in the timings (`room_level`): the microphone must deliver frames; the
-    level is recorded, not judged (an ordinary room may sit above the energy trigger)."""
+    feed) and put it in the timings (`room_level`, or `key`): the microphone must deliver
+    frames; the level is recorded, not judged (an ordinary room may sit above the energy
+    trigger), unless `min_mean_dbfs` asks for a room at least that loud (noise played)."""
     agent = _client_name(client)
     await ctx.processes.get(agent).write_line(f"/level {seconds}")
     line = await _expect(ctx, agent, {"LEVEL", "CONSOLE-ERROR"}, seconds + 15, what="LEVEL")
@@ -475,7 +482,7 @@ async def room_level_measured(ctx: ScenarioContext, client: str, seconds: float 
     )
     mean, peak = float(line.fields["mean_dbfs"]), float(line.fields["max_dbfs"])
     trigger = (_timings(ctx).get("energy_trigger") or {}).get("dbfs")
-    _timings(ctx)["room_level"] = {
+    _timings(ctx)[key] = {
         "seconds": seconds,
         "frames": frames,
         "mean_dbfs": mean,
@@ -484,6 +491,8 @@ async def room_level_measured(ctx: ScenarioContext, client: str, seconds: float 
     }
     print(f"room level on the real microphone: mean {mean} dBFS, peak {peak} dBFS over "
           f"{seconds} s ({frames} frames); energy trigger {trigger} dBFS")  # fmt: skip
+    if min_mean_dbfs is not None:
+        assert mean >= min_mean_dbfs, f"the room is at {mean} dBFS (want >= {min_mean_dbfs})"
 
 
 def _turn_input_time(ctx: ScenarioContext, client: str) -> tuple[float, str] | None:

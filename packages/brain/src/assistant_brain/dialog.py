@@ -20,8 +20,8 @@ Turn states and the attention the edge is told (through `body.intent` -> BodyCon
   (`played_ms`); the engine's cut goes in the turn log (`truncated`, `TURN-TRUNCATED`).
 - **Follow-up.** After a voice turn that was answered the brain sends
   `mic.follow_up{follow_up_s}` and stays listening; a window that ends without speech (or
-  `follow_up_s` + a grace) returns to idle. A voice turn in which nothing was heard (empty
-  transcript) gets no reply and no window.
+  `follow_up_s` + a grace, a clock that speech starting stops) returns to idle. A voice turn
+  in which nothing was heard (empty transcript) gets no reply and no window.
 - **Proactive speech** (`speech.request`): spoken at once when idle, queued while a turn or
   window is active and spoken when the session is idle again, dropped while muted or once
   its `ttl_s` has passed.
@@ -179,6 +179,9 @@ class DialogManager:
 
     async def on_vad(self, vad: Vad) -> None:
         if vad.state == "start":
+            # Speech started: the window is the edge's now (it ends it), not the follow-up
+            # timer's, which would drop speech that runs past it.
+            self._cancel_follow_up()
             if vad.barge_in or self._turn_running():
                 await self.interrupt(vad.played_ms)
             if self._mic is None:

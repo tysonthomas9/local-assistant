@@ -293,6 +293,48 @@ local_backend/cache_models.sh
 
 This caches the daemon's YuNet face model, the emotions and dances datasets, and the sherpa-onnx keyword spotter, so everything can run with `HF_HUB_OFFLINE=1`. The speech models (Parakeet, Qwen3-TTS, Silero, Smart Turn) are cached by the speech server's first run. Also create the NLTK symlink described in LOCAL_CONVERSATION.md ("Leak 1"), which stops speech-to-speech from downloading an index on every start.
 
+## Try it
+
+The new stack (brain on this PC, edge agent on the robot's machine) in one command, hands-free:
+
+```bash
+scripts/try_it.sh                         # wake word (the default): say "hey jarvis", then ask
+scripts/try_it.sh --listen open_mic       # no wake word: just talk; talk over the robot to interrupt it
+scripts/try_it.sh --listen push_to_talk   # debugging: Enter starts listening, Enter again stops
+```
+
+It starts (or reuses) the LLM server (vLLM, reachy-gemma4 on GPU0) and the speech server
+(Parakeet and Qwen3-TTS on GPU1). It syncs this checkout's HEAD (commit your changes first) to
+the robot's machine, the SSH alias in `config/assistant.toml` `[test.edge_host] ssh` (see
+[docs/robot-on-another-machine.md](docs/robot-on-another-machine.md)). Then it starts the daemon,
+the brain, the SSH tunnels and the edge agent (inside Reachy Edge.app on a Mac). It shows what
+was heard (`you:`) and the replies (`robot:`). A typed line is sent as a typed question.
+
+- **Wake word:** after a reply, a follow-up needs no wake word.
+- **Open mic:** claps, music and the robot's own voice start nothing. Speech in the room does,
+  so use the wake word in a room where people talk.
+- **Ctrl-C:** stops everything it started. The robot goes to rest with its motors off, and no
+  process is left on this PC or the robot's machine.
+
+Safety rules the edge and the daemon enforce whatever the brain asks:
+
+- **Mute:** `/mute` typed at the edge agent only ends with `/unmute` there. The brain cannot
+  unmute it, and the mute outlives reconnects.
+- **Mic cap:** no mic window stays open longer than 2 minutes (`[edge.wake] max_window_s`, at
+  most 120). A longer request from the brain is cut to 120 s.
+- **Motor watchdog:** it runs inside the daemon process on the robot's machine. If the edge
+  agent dies or freezes, or its link drops, the robot goes to rest with its motors off within
+  a few seconds. A daemon that is stopped or hung up on (SSH gone) rests a robot whose motors
+  are on before it exits.
+
+The edge agent reads `config/assistant.toml` (`[edge]`, `[edge.audio]`, `[edge.wake]`,
+`[edge.listen]`, `[body.reachy]`; `--profile` adds an overlay). Its command-line flags override
+the file.
+
+The listening settings are in `config/assistant.toml` (`[edge.listen]`, `[edge.vad]`,
+`[edge.wake]`). A legacy assistant still running is stopped first (SIGINT). While the launcher
+runs it holds the robot's hw-run lock, so the gate's robot tests wait for it.
+
 ## Run
 
 Three terminals:

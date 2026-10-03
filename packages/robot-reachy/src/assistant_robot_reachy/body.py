@@ -7,6 +7,15 @@ PulseAudio), 16 kHz stereo float. The microphone is the XVF3800's processed chan
 its hardware echo canceller (`aec: hw`, see `xvf3800`). Nothing here moves the robot unless
 the daemon answers with its backend ready; every move goes through `MotionArbiter`.
 
+Its `[body.reachy]` table: `connection` (the SDK's connection mode, `localhost_only`) and
+`expressions` (a TOML file whose `[moves]` table adds or replaces expression -> Pollen move
+names over the built-in `EMOTION_MOVES`).
+
+While the edge's link to the brain is up (`link_changed`), the body touches the motor
+watchdog's heartbeat file (`assistant_robot_reachy.watchdog`): the watchdog next to the daemon
+puts the robot to rest with its motors off when the heartbeat stops (this agent died, froze or
+stopped, or the link dropped). Stopping rests the robot, then removes the file.
+
 If the daemon goes away, the body reports `BodyHealth(ok=False)` (the edge tells the brain
 `error{code: body_unavailable}`), refuses motion, and reconnects on its own when the daemon is
 back.
@@ -26,7 +35,9 @@ import json
 import sys
 import threading
 import time
+import tomllib
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -41,6 +52,7 @@ from assistant_contracts.capabilities import (
 )
 from assistant_contracts.common import Aec, AttentionState, LookTarget
 from assistant_core.playback import PacedPlayer
+from assistant_robot_reachy import watchdog
 from assistant_robot_reachy.arbiter import (
     DAEMON_URL,
     MotionArbiter,
@@ -286,11 +298,31 @@ class ReachyCamera:
         return tuple(camera.resolution) if camera is not None else None
 
 
+def expression_moves(path: str | None) -> dict[str, str]:
+    """The `[moves]` table of the `expressions` file (expression -> Pollen move name)."""
+    if path is None:
+        return {}
+    file = Path(path).expanduser()
+    if not file.is_file():
+        raise ValueError(f"[body.reachy] expressions: no file {path}")
+    moves = tomllib.loads(file.read_text()).get("moves", {})
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in moves.items()):
+        raise ValueError(f"{path}: [moves] maps expression names to move names (strings)")
+    return dict(moves)
+
+
 class ReachyBody:
     kind = "reachy"
 
-    def __init__(self, daemon_url: str = DAEMON_URL) -> None:
+    def __init__(
+        self,
+        daemon_url: str = DAEMON_URL,
+        connection: str = "localhost_only",
+        expressions: str | None = None,
+    ) -> None:
         self.daemon_url = daemon_url
+        self.connection = connection
+        self.moves = expression_moves(expressions)
         self.mini: Any = None
         self.arbiter: MotionArbiter | None = None
         self.healthy = False
@@ -299,12 +331,14 @@ class ReachyBody:
         self.camera = ReachyCamera(self)
         self._health: asyncio.Queue[BodyHealth] = asyncio.Queue()
         self._watch: asyncio.Task[None] | None = None
+        self._beat: asyncio.Task[None] | None = None
+        self.link_up = False
 
     # ------------------------------------------------------------ lifecycle
 
     def _connect(self) -> None:
         mini = connect_mini(
-            connection_mode="localhost_only",
+            connection_mode=self.connection,
             media_backend="local",
             automatic_body_yaw=False,
             log_level="WARNING",
@@ -312,6 +346,7 @@ class ReachyBody:
         mini.media.start_recording()
         mini.media.start_playing()
         self.mini, self.arbiter = mini, MotionArbiter(mini, daemon_url=self.daemon_url)
+        self.arbiter.emotions.update(self.moves)
 
     def _disconnect(self) -> None:
         mini, self.mini, self.arbiter = self.mini, None, None
@@ -333,6 +368,7 @@ class ReachyBody:
         emit("AEC", aec)
         size = self.camera.size()
         self._watch = asyncio.create_task(self._watch_daemon(), name="reachy-health")
+        self._beat = asyncio.create_task(self._heartbeat(), name="reachy-heartbeat")
         return Capabilities(
             audio_in=AudioInCaps(rate=16000, aec="hw"),
             motion=MotionCaps(
@@ -342,12 +378,37 @@ class ReachyBody:
             doa=False,
         )
 
+    def link_changed(self, up: bool) -> None:
+        """The edge's link to the brain came up or went down: the heartbeat goes on or stops
+        (a link back within the watchdog's `STALE_S` leaves the robot as it is)."""
+        self.link_up = up
+        if up:  # at once: a link that drops right away still arms the watchdog
+            try:
+                watchdog.touch()
+            except OSError as exc:
+                emit("HEARTBEAT-ERROR", {"detail": f"{type(exc).__name__}: {exc}"})
+
+    async def _heartbeat(self) -> None:
+        while True:
+            if self.link_up:
+                try:
+                    watchdog.touch()
+                except OSError as exc:
+                    emit("HEARTBEAT-ERROR", {"detail": f"{type(exc).__name__}: {exc}"})
+            await asyncio.sleep(watchdog.HEARTBEAT_EVERY_S)
+
     async def stop(self) -> None:
         if self._watch is not None:
             self._watch.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._watch
-        await self.motion.rest()
+        await self.motion.rest()  # the heartbeat goes on meanwhile: one rest, this one
+        if self._beat is not None:
+            self._beat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._beat
+        with contextlib.suppress(OSError):
+            watchdog.clear()
         await self.audio.close()
         await asyncio.to_thread(self._disconnect)
 

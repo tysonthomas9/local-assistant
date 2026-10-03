@@ -8,8 +8,16 @@ dependencies = [
     "assistant-core",
     "assistant-link",
     "numpy>=2.2.5",
+    "onnxruntime>=1.20",
+    "openwakeword==0.4.0",
+    "pysilero-vad==3.4.0",
     "sounddevice>=0.5",
 ]
+
+[project.optional-dependencies]
+# The open-vocabulary wake phrase spotter ([edge.wake] engine = "phrase"): sherpa-onnx's keyword
+# spotter, with its model directory in [edge.wake] phrase_model_dir.
+phrase = ["sherpa-onnx>=1.10", "sentencepiece>=0.2"]
 
 [project.scripts]
 assistant-edge = "assistant_edge.cli:main"

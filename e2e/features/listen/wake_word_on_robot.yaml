@@ -1,0 +1,75 @@
+feature: Hey Jarvis wakes the robot through the air; the question without it does not
+tier: [hw, models]
+description: >
+  Wake word, the default listening mode, on the real robot. The edge agent runs inside Reachy
+  Edge.app on the robot's machine with openWakeWord (hey_jarvis) and Silero VAD on its CPU,
+  listening to the robot's own microphone (XVF3800, echo-cancelled). The golden utterances are
+  played through a real speaker next to the robot (the Mac mini's built-in speaker; its volume
+  is set for the play and restored, the robot's speaker volume is never touched) and reach
+  the microphone through the air. "Hey Jarvis, what's your name?" gives wake{hey jarvis,
+  score >= threshold}; the window carries the question (1.5 s pre-roll) and ends with the
+  speech; the real brain transcribes it (Parakeet), asks the real LLM and the robot speaks the
+  reply. Then the brain's follow-up listens without the wake word: nobody speaks, the robot's
+  own reply and its tail do not count, nothing is sent and the brain goes back to idle with no
+  new turn (no self-talk). "What's your name?" without the wake word starts nothing. The same
+  works in room noise at about -28 dBFS played through the speaker (the room level is
+  measured with and without it and goes in the artifact). Before each utterance the scenario
+  waits for a moment without speech in the room (someone talking elsewhere would spoil it).
+scenarios:
+  - name: hey jarvis -> wake -> reply -> silent follow-up -> idle; the question alone -> no turn
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - llm_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true, follow_up_s: 6}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: wake_word, record: true}
+      - edge_listens: {client: lite, mode: wake_word}
+      - room_level_measured: {client: lite}
+      - room_quiet: {client: lite}
+      - speaker_plays: {client: lite, name: hey_jarvis_whats_your_name}
+      - wake_detected: {client: lite, model: hey_jarvis, word: hey jarvis, min_score: 0.4}
+      - mic_closed: {client: lite, reason: vad_end, opened_by: wake, min_s: 1.0}
+      - voice_turn_transcribed: {client: lite, max_wer: 0.35}
+      - robot_speaks_reply: {client: lite, min_ms: 500}
+      - turn_logged: {kind: voice, ttft: true}
+      - follow_up_armed: lite
+      - no_turn_for: {client: lite, seconds: 8}
+      - brain_state_is: {client: lite, state: idle}
+      - room_quiet: {client: lite}
+      - speaker_plays: {client: lite, name: whats_your_name}
+      - no_turn_for: {client: lite, seconds: 3}
+      - brain_state_is: {client: lite, state: idle}
+      - timings_recorded: {name: wake_word_on_robot}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: in room noise (about -28 dBFS) hey jarvis still wakes the robot; the noise alone does not
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - llm_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true, follow_up_s: 0}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: wake_word}
+      - room_level_measured: {client: lite}
+      - room_quiet: {client: lite}
+      - speaker_plays: {client: lite, name: room_noise, wait: false}
+      - wait: {seconds: 1}
+      - room_level_measured: {client: lite, seconds: 2, key: room_level_with_noise, min_mean_dbfs: -40}
+      - speaker_finished
+      - no_turn_for: {client: lite, seconds: 1}
+      - room_quiet: {client: lite}
+      - speaker_plays: {client: lite, name: hey_jarvis_in_noise}
+      - wake_detected: {client: lite, model: hey_jarvis, word: hey jarvis, min_score: 0.4}
+      - mic_closed: {client: lite, reason: vad_end, opened_by: wake, min_s: 1.0}
+      - voice_turn_transcribed: {client: lite, text: "Hey Jarvis, what's your name?", max_wer: 0.4}
+      - robot_speaks_reply: {client: lite, min_ms: 500}
+      - turn_logged: {kind: voice}
+      - timings_recorded: {name: wake_word_in_noise_on_robot}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean

@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from assistant_testing import edge_host as eh
 from assistant_testing.features.context import ScenarioContext
@@ -400,6 +400,45 @@ def _daemon_url(ctx: ScenarioContext) -> str:
     if url is None:
         raise AssertionError("no daemon started; use start_reachy_daemon first")
     return url
+
+
+@step("robot_motors_are")
+async def robot_motors_are(
+    ctx: ScenarioContext,
+    mode: Literal["enabled", "disabled", "gravity_compensation"],
+    within_s: float = 10.0,
+) -> None:
+    """The motors' control mode (the daemon's GET /api/motors/status) is `mode` within
+    `within_s`; printed with the time since `edge_agent_crashes`, if it ran."""
+    started = time.monotonic()
+    while True:
+        got = (await _get(f"{_daemon_url(ctx)}/api/motors/status")).get("mode")
+        if got == mode:
+            break
+        if time.monotonic() - started > within_s:
+            raise AssertionError(f"motors {got!r} after {within_s} s, want {mode!r}")
+        await asyncio.sleep(0.25)
+    crashed = ctx.state.get("crashed_at")
+    since = f", {time.monotonic() - crashed:.1f} s after the crash" if crashed else ""
+    print(f"motors {mode}{since}")
+
+
+@step("daemon_printed")
+async def daemon_printed(
+    ctx: ScenarioContext, text: str, count: int = 1, within_s: float = 10.0
+) -> None:
+    """The daemon (on the robot's machine) printed a line containing `text` (e.g. the motor
+    watchdog's `WATCHDOG rested`) at least `count` times, within `within_s`."""
+    proc = ctx.processes.get(DAEMON)
+    started = time.monotonic()
+    while len(found := [line for line in proc.lines if text in line]) < count:
+        if time.monotonic() - started > within_s:
+            dog = [line for line in proc.lines if line.startswith("WATCHDOG")]
+            tail = "\n".join([*proc.lines[-10:], "its WATCHDOG lines:", *dog])
+            want = f"{text!r} {len(found)}x (want {count})"
+            raise AssertionError(f"the daemon printed {want}:\n{tail}")
+        await asyncio.sleep(0.2)
+    print(found[count - 1])
 
 
 @step("daemon_status_is")

@@ -1,0 +1,63 @@
+feature: Nobody looking after the robot puts it to rest with its motors off
+tier: hw
+description: >
+  The motor watchdog runs next to the daemon (in the daemon's own process), not in the edge
+  agent that might die. While its link to the brain is up, the edge agent's reachy body keeps
+  a heartbeat; once it is older than 3 s (or gone) the watchdog puts a robot whose motors are
+  on to rest: the SDK's goto_sleep through the daemon's REST API, then the motors off. Here the
+  robot is woken mid-turn (attention listening: motors on, the listening pose), then: the edge
+  agent is killed (kill -9, none of its own cleanup runs); or the link drops (the brain, the
+  link server console, is killed), and once it is back the watchdog arms again; or the daemon
+  itself is hung up on (SIGHUP, as when its SSH session drops) and puts the robot to rest
+  before it exits, although it runs with --no-goto-sleep-on-stop. Each time the robot ends at
+  rest with its motors off within seconds.
+scenarios:
+  - name: the edge agent is killed mid-turn -> the robot rests, motors off
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - daemon_printed: {text: WATCHDOG armed}
+      - server_sends: {client: lite, type: attention, fields: {state: listening}}
+      - robot_motors_are: {mode: enabled, within_s: 30}
+      - edge_agent_crashes: lite
+      - daemon_printed: {text: WATCHDOG fired, within_s: 8}
+      - daemon_printed: {text: WATCHDOG rested motors=disabled, within_s: 30}
+      - robot_motors_are: {mode: disabled, within_s: 5}
+      - edge_host_clean
+
+  - name: the link drops mid-turn -> the robot rests; the link back arms the watchdog again
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - server_sends: {client: lite, type: attention, fields: {state: listening}}
+      - robot_motors_are: {mode: enabled, within_s: 30}
+      - kill_process: {process: server}
+      - edge_printed: {client: lite, tag: CLOSED, within_s: 30}
+      - daemon_printed: {text: WATCHDOG fired, within_s: 8}
+      - daemon_printed: {text: WATCHDOG rested motors=disabled, within_s: 30}
+      - robot_motors_are: {mode: disabled, within_s: 5}
+      - restart_process: {process: server}
+      - client_reconnects_within: {client: lite, seconds: 15}
+      - daemon_printed: {text: WATCHDOG armed, count: 2, within_s: 5}
+      - edge_host_clean
+
+  - name: the daemon is hung up on mid-turn -> it rests the robot before it exits
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - server_sends: {client: lite, type: attention, fields: {state: listening}}
+      - robot_motors_are: {mode: enabled, within_s: 30}
+      - kill_process: {process: daemon, signal_name: HUP}
+      - daemon_printed: {text: WATCHDOG daemon-stop motors=on}
+      - restart_process: {process: daemon}
+      - robot_motors_are: {mode: disabled}
+      - edge_host_clean

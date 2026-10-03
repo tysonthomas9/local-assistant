@@ -142,9 +142,39 @@ class EdgeAudioConfig(Section):
     aec: Literal["hw", "sw", "none"] = "none"
 
 
+class EdgeListenConfig(Section):
+    mode: Literal["wake_word", "open_mic", "push_to_talk"] = "wake_word"
+    """`wake_word` (hands-free after a wake word), `open_mic` (any speech starts a turn) or
+    `push_to_talk` (debugging: only `/ptt down` ... `/ptt up`)."""
+
+
+class EdgeVadConfig(Section):
+    """The speech detector (Silero VAD) that opens and ends windows in the listening modes."""
+
+    threshold: float = Field(default=0.5, gt=0, lt=1)
+    start_ms: int = Field(default=160, ge=20)
+    """Speech this long in a row opens a window (open mic, follow-up)."""
+    end_ms: int = Field(default=700, ge=100)
+    """A window ends after this much no speech once speech was heard."""
+    pre_roll_ms: int = Field(default=600, ge=0, le=3000)
+    barge_in_margin_db: float = Field(default=8, ge=0)
+    """While the robot speaks, speech must be this much above the echo-cancelled level."""
+
+
 class EdgeWakeConfig(Section):
-    engine: str = "openwakeword"
-    max_window_s: float = Field(default=15, gt=0, le=15)
+    engine: Literal["openwakeword", "phrase"] = "openwakeword"
+    models: list[str] = Field(default_factory=lambda: ["hey_jarvis"], min_length=1)
+    """openWakeWord model names (or `.onnx` paths), or one phrase for `phrase`. The brain's
+    `welcome` sets each word's threshold."""
+    threshold: float = Field(default=0.4, gt=0, le=1)
+    """Until the brain's `welcome` arrives."""
+    pre_roll_s: float = Field(default=1.5, ge=0, le=3)
+    no_speech_s: float = Field(default=5, gt=0, le=15)
+    """A wake window ends if no speech follows the wake word this long."""
+    phrase_model_dir: str | None = None
+    max_window_s: float = Field(default=120, gt=0, le=120)
+    """Hard cap of every mic window, whoever opens it (the edge clamps longer requests): at
+    most 2 minutes."""
 
 
 class EdgeConfig(Section):
@@ -155,6 +185,8 @@ class EdgeConfig(Section):
     body: Literal["reachy", "console"] = "console"
     """Body driver: the Reachy Mini, or the console (mic and speaker of this machine)."""
     audio: EdgeAudioConfig = Field(default_factory=EdgeAudioConfig)
+    listen: EdgeListenConfig = Field(default_factory=EdgeListenConfig)
+    vad: EdgeVadConfig = Field(default_factory=EdgeVadConfig)
     wake: EdgeWakeConfig = Field(default_factory=EdgeWakeConfig)
 
 

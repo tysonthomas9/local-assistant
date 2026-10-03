@@ -1,0 +1,109 @@
+feature: The edge listens hands-free (wake word, open mic, follow-up) and ignores what is not speech
+tier: core
+description: >
+  The real edge agent (console body) with its real listening: openWakeWord (hey_jarvis) and
+  Silero VAD on this CPU, served by the real brain (echo engine: the reply is the user's own
+  audio, so no models are needed). Golden WAVs are fed as real 20 ms mic frames at the mic
+  input point. wake_word (the default mode): "hey jarvis, what's your name" wakes the edge,
+  whose window carries the question with its pre-roll and ends when the speech ends (vad_end),
+  not after the brain's follow-up time: with follow_up_s 0 the window used to time out after
+  about 0.3 s. The same question without the wake word starts nothing. After a reply the
+  brain's follow-up lets speech start a turn without the wake word; silence in the follow-up
+  sends nothing and the brain goes back to idle with no new turn. open_mic: speech opens a
+  window by itself; claps and music do not. Both work in room noise at -28 dBFS (the middle of
+  a real room's -25 to -31 dBFS), and the noise alone starts nothing.
+scenarios:
+  - name: wake word with follow_up_s 0 -> the window lasts until the speech ends
+    steps:
+      - start_brain: {engine: echo, follow_up_s: 0}
+      - start_edge_agent: {id: desk, listen: wake_word}
+      - edge_listens: {client: desk, mode: wake_word}
+      - feed_golden_wav: {client: desk, name: hey_jarvis_whats_your_name}
+      - listen_mark: desk
+      - wake_detected: {client: desk, model: hey_jarvis, word: hey jarvis, min_score: 0.4}
+      - mic_closed: {client: desk, reason: vad_end, opened_by: wake, min_s: 1.5}
+      - turn_logged: {kind: voice, states: [listening, thinking, speaking]}
+      - brain_state_is: {client: desk, state: idle, within_s: 15}
+      - brain_output_clean
+      - edge_output_clean: desk
+
+  - name: the question without the wake word starts no turn
+    steps:
+      - start_brain: {engine: echo}
+      - start_edge_agent: {id: desk, listen: wake_word}
+      - feed_golden_wav: {client: desk, name: whats_your_name}
+      - listen_mark: desk
+      - golden_wav_fed: {client: desk}
+      - no_turn_for: {client: desk, seconds: 2}
+      - brain_state_is: {client: desk, state: idle}
+      - brain_output_clean
+      - edge_output_clean: desk
+
+  - name: after a reply, speech without the wake word is a follow-up; silence then is no turn
+    steps:
+      - start_brain: {engine: echo, follow_up_s: 4}
+      - start_edge_agent: {id: desk, listen: wake_word}
+      - feed_golden_wav: {client: desk, name: hey_jarvis_whats_your_name}
+      - wake_detected: {client: desk}
+      - mic_closed: {client: desk, reason: vad_end, opened_by: wake}
+      - follow_up_armed: desk
+      - feed_golden_wav: {client: desk, name: hello}
+      - mic_opened: {client: desk, reason: follow_up}
+      - mic_closed: {client: desk, reason: vad_end, opened_by: follow_up}
+      - turn_logged: {kind: voice, states: [listening, thinking, speaking]}
+      - follow_up_armed: desk
+      - no_turn_for: {client: desk, seconds: 6}
+      - brain_state_is: {client: desk, state: idle}
+      - brain_output_clean
+      - edge_output_clean: desk
+
+  - name: open mic -> speech opens a window by itself; a clap and music do not
+    steps:
+      - start_brain: {engine: echo, follow_up_s: 0}
+      - start_edge_agent: {id: desk, listen: open_mic}
+      - edge_listens: {client: desk, mode: open_mic}
+      - feed_golden_wav: {client: desk, name: clap}
+      - listen_mark: desk
+      - golden_wav_fed: {client: desk}
+      - no_turn_for: {client: desk, seconds: 1}
+      - feed_golden_wav: {client: desk, name: music}
+      - listen_mark: desk
+      - golden_wav_fed: {client: desk}
+      - no_turn_for: {client: desk, seconds: 1}
+      - feed_golden_wav: {client: desk, name: hello}
+      - mic_opened: {client: desk, reason: vad}
+      - mic_closed: {client: desk, reason: vad_end, opened_by: vad}
+      - turn_logged: {kind: voice, states: [listening, thinking, speaking]}
+      - brain_output_clean
+      - edge_output_clean: desk
+
+  - name: in room noise (-28 dBFS) the wake word and open mic still work, and noise alone is no turn
+    steps:
+      - start_brain: {engine: echo, follow_up_s: 0}
+      - start_edge_agent: {id: desk, listen: wake_word}
+      - feed_golden_wav: {client: desk, name: room_noise}
+      - listen_mark: desk
+      - golden_wav_fed: {client: desk}
+      - no_turn_for: {client: desk, seconds: 1}
+      - feed_golden_wav: {client: desk, name: hey_jarvis_in_noise}
+      - listen_mark: desk
+      - wake_detected: {client: desk, min_score: 0.4}
+      - mic_closed: {client: desk, reason: vad_end, opened_by: wake, min_s: 1.5}
+      - turn_logged: {kind: voice}
+      - brain_output_clean
+      - edge_output_clean: desk
+
+  - name: open mic in room noise (-28 dBFS) -> the question opens a window, the noise does not
+    steps:
+      - start_brain: {engine: echo, follow_up_s: 0}
+      - start_edge_agent: {id: desk, listen: open_mic}
+      - feed_golden_wav: {client: desk, name: room_noise}
+      - listen_mark: desk
+      - golden_wav_fed: {client: desk}
+      - no_turn_for: {client: desk, seconds: 1}
+      - feed_golden_wav: {client: desk, name: what_time_is_it_in_noise}
+      - mic_opened: {client: desk, reason: vad}
+      - mic_closed: {client: desk, reason: vad_end, opened_by: vad}
+      - turn_logged: {kind: voice}
+      - brain_output_clean
+      - edge_output_clean: desk

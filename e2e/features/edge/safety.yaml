@@ -1,0 +1,52 @@
+feature: Only a human unmutes the edge, and no mic window outlasts two minutes
+tier: core
+description: >
+  Safety rules the edge enforces itself, whatever the brain asks (here the link server console
+  plays the brain, against the real edge agent process). A mute typed at the edge (/mute, a
+  hard mute) is reported to the brain; the brain's privacy {muted: false} is refused
+  (UNMUTE-REFUSED, the edge answers that it is still muted) and a follow-up request then sends
+  no audio. The mute outlives a brain restart: the new session is told the edge is muted. Only
+  /unmute at the edge unmutes it. A brain request for a mic window longer than the hard cap
+  ([edge.wake] max_window_s, at most 120 s) is clamped: a 600 s mic.follow_up opens a window
+  limited to 120 s that closes on its timeout after 120 s, and in the listening modes the
+  follow-up is armed for 120 s.
+scenarios:
+  - name: a mute at the edge holds against the brain's unmute and a reconnect; /unmute lifts it
+    steps:
+      - start_link_server
+      - start_edge_agent: {id: desk}
+      - edge_types: {client: desk, text: /mute}
+      - server_receives: {client: desk, type: privacy, fields: {muted: true, hard: true}}
+      - server_sends: {client: desk, type: privacy, fields: {muted: false}}
+      - edge_printed: {client: desk, tag: UNMUTE-REFUSED, fields: {source: brain}}
+      - server_receives: {client: desk, type: privacy, fields: {muted: true, hard: true}}
+      - server_sends: {client: desk, type: mic.follow_up, fields: {seconds: 5}}
+      - edge_printed: {client: desk, tag: MIC-REFUSED, fields: {reason: follow_up, muted: "true"}}
+      - uplink_carries_no_audio: {client: desk, seconds: 2}
+      - kill_process: {process: server}
+      - restart_process: {process: server}
+      - client_reconnects_within: {client: desk, seconds: 5}
+      - server_receives: {client: desk, type: privacy, fields: {muted: true, hard: true}, within_s: 10}
+      - server_sends: {client: desk, type: privacy, fields: {muted: false}}
+      - edge_printed: {client: desk, tag: UNMUTE-REFUSED, fields: {source: brain}}
+      - edge_types: {client: desk, text: /unmute}
+      - server_receives: {client: desk, type: privacy, fields: {muted: false}}
+      - press_push_to_talk: desk
+      - server_receives: {client: desk, type: vad, fields: {state: start}}
+
+  - name: a 600 s follow-up request opens a window that closes at the 120 s cap
+    steps:
+      - start_link_server
+      - start_edge_agent: {id: desk}
+      - listen_mark: desk
+      - server_sends: {client: desk, type: mic.follow_up, fields: {seconds: 600}}
+      - mic_opened: {client: desk, reason: follow_up, limit_s: 120}
+      - mic_closed: {client: desk, reason: timeout, opened_by: follow_up, open_for_s: 120, within_s: 135}
+      - server_receives: {client: desk, type: vad, fields: {state: end}}
+
+  - name: in the wake word mode a 600 s follow-up is armed for 120 s
+    steps:
+      - start_link_server
+      - start_edge_agent: {id: desk, listen: wake_word}
+      - server_sends: {client: desk, type: mic.follow_up, fields: {seconds: 600}}
+      - edge_printed: {client: desk, tag: FOLLOW-UP, fields: {seconds: "120"}}

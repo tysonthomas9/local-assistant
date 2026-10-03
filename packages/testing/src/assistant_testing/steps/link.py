@@ -230,21 +230,31 @@ async def start_link_client(
 
 @step("kill_process")
 async def kill_process(
-    ctx: ScenarioContext, process: str, signal_name: Literal["KILL", "STOP", "CONT"] = "KILL"
+    ctx: ScenarioContext,
+    process: str,
+    signal_name: Literal["KILL", "STOP", "CONT", "TERM", "HUP"] = "KILL",
+    within_s: float = 60.0,
 ) -> None:
-    """Send a real signal to `server` or a client id: KILL (kill -9), STOP (freeze), CONT."""
-    proc = ctx.processes.get(_process_name(process))
+    """Send a real signal to `server`, a client id or `daemon` (the reachy-mini daemon): KILL
+    (kill -9), STOP (freeze), CONT, TERM or HUP (as when its SSH session drops). After KILL,
+    TERM or HUP the process has exited (TERM and HUP: within `within_s`)."""
+    name = "daemon" if process == "daemon" else _process_name(process)  # steps/edge_host DAEMON
+    proc = ctx.processes.get(name)
     proc.send_signal(signal.Signals[f"SIG{signal_name}"])
     if signal_name == "KILL":
         await proc.wait(10)
+    elif signal_name in ("TERM", "HUP"):
+        code = await proc.wait(within_s)
+        print(f"{process} exited ({code}) after SIG{signal_name}")
 
 
 @step("restart_process")
 async def restart_process(ctx: ScenarioContext, process: str) -> None:
-    """Start a killed process again with the same command line (the server: same port)."""
-    name = _process_name(process)
-    ready = r"^LISTENING " if name == SERVER else None
-    await ctx.processes.restart(name, ready_line=ready)
+    """Start a killed process again with the same command line (the server: same port;
+    `daemon`: the reachy-mini daemon, ready when its API serves)."""
+    name = "daemon" if process == "daemon" else _process_name(process)
+    ready = {SERVER: r"^LISTENING ", "daemon": r"Uvicorn running on "}.get(name)
+    await ctx.processes.restart(name, ready_line=ready, ready_timeout=120 if ready else 30)
     # The new process prints from line 0 again: what was consumed belonged to the old one.
     _link(ctx).consumed.pop(name, None)
 

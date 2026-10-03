@@ -101,6 +101,14 @@ class BodyHealth:
 
 
 @runtime_checkable
+class LinkAware(Protocol):
+    """Optional: a body told whether the edge's link to the brain is up (e.g. the reachy body
+    keeps a heartbeat for the motor watchdog next to its daemon while it is)."""
+
+    def link_changed(self, up: bool) -> None: ...
+
+
+@runtime_checkable
 class ReportsHealth(Protocol):
     """Optional: a body whose hardware can go away and come back while the edge runs.
 
