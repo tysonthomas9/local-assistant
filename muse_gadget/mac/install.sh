@@ -6,10 +6,11 @@
 # Everything lives in ~/assistant-edge/muse-app (nothing else on the Mac changes; uv and the
 # uv-managed Python 3.12 are the ones edge_host_bootstrap.sh already installed):
 #   app/        git checkout of reachy_mini_conversation_app at APP_COMMIT, venv in app/.venv
-#   kokoro/.venv  Kokoro TTS venv (mlx-audio; its torch/spaCy pins don't fit the app's venv)
-#   cache/uv    uv cache;  hf/  HF_HOME with the speech-to-text and Kokoro models and Pollen's emotions
-#   installed, installed-kokoro   stamps: a second run with the same pins only validates (fast)
-# If Kokoro fails to install, the run goes on and replies are spoken with macOS `say`.
+#   kokoro/.venv  Kokoro TTS venv (mlx-audio; its torch/spaCy pins don't fit the app's venv), also
+#               used by the Qwen3-TTS worker
+#   cache/uv    uv cache;  hf/  HF_HOME with the speech-to-text, Kokoro and Qwen3-TTS models and Pollen's emotions
+#   installed, installed-kokoro, installed-qwen3   stamps: a second run with the same pins only validates (fast)
+# If Qwen3-TTS fails to install, replies use Kokoro; if Kokoro fails too, macOS `say`.
 # Written for bash 3.2 (macOS /bin/bash).
 set -euo pipefail
 
@@ -25,6 +26,8 @@ SPACY_EN="https://github.com/explosion/spacy-models/releases/download/en_core_we
 SPACY_EN_SHA256="1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85"
 KOKORO_MODEL="mlx-community/Kokoro-82M-bf16"
 KOKORO_REV="a71e4d38b236d968966a2002c4c895dbd12b1c3c"           # same as kokoro_worker.py
+QWEN3_MODEL="mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"  # ~2.9 GB; runs in the Kokoro venv
+QWEN3_REV="41d3337e8b7f2843a75841595fc14e4b9a7a4b96"            # same as qwen3_worker.py
 
 EDGE="$HOME/assistant-edge"
 M="$EDGE/muse-app"
@@ -94,6 +97,26 @@ else
         rm -f "$M/installed-kokoro"
         say "WARNING: Kokoro TTS not installed; replies will use macOS say"
     fi
+fi
+
+install_qwen3() {
+    local kv="$M/kokoro/.venv" out
+    say "caching Qwen3-TTS model $QWEN3_MODEL (about 2.9 GB the first time)"
+    HF_HUB_DISABLE_PROGRESS_BARS=1 "$kv/bin/python" -c "import huggingface_hub as h; h.snapshot_download('$QWEN3_MODEL', revision='$QWEN3_REV')" >/dev/null 2>&1 || return 1
+    out="$(HF_HUB_OFFLINE=1 "$kv/bin/python" "$M/mac/qwen3_worker.py" < /dev/null 2>/dev/null | head -1)"
+    case $out in ready*) return 0 ;; *) say "Qwen3-TTS worker check failed: $out"; return 1 ;; esac
+}
+qstamp="$kstamp $QWEN3_MODEL@$QWEN3_REV"
+if [ "$(cat "$M/installed-qwen3" 2>/dev/null || true)" = "$qstamp" ]; then
+    say "Qwen3-TTS already installed"
+elif [ ! -f "$M/installed-kokoro" ]; then
+    rm -f "$M/installed-qwen3"
+    say "WARNING: Qwen3-TTS not installed (it needs the Kokoro venv); replies will use macOS say"
+elif install_qwen3; then
+    printf '%s\n' "$qstamp" > "$M/installed-qwen3"
+else
+    rm -f "$M/installed-qwen3"
+    say "WARNING: Qwen3-TTS not installed; replies will use Kokoro"
 fi
 
 APY="$M/app/.venv/bin/python"

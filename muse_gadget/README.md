@@ -281,8 +281,8 @@ Pollen's own app tools, so the robot only ever plays Pollen's moves:
 Pollen's conversation app (pinned at `f58523b`, unmodified) runs on the Mac inside Reachy
 Edge.app, with `MuseHandler` (`mac/`) as its backend: the robot's mic, then Silero VAD (one
 utterance), then local speech-to-text (parakeet-mlx, with mlx-whisper as the fallback), then
-`POST /turn` on the bridge at the Mac's `127.0.0.1:48080`. Muse's reply is spoken with Kokoro-82M
-(MLX, on the Mac; macOS `say` is the fallback) on the robot's speaker, and Pollen's wobbler moves
+`POST /turn` on the bridge at the Mac's `127.0.0.1:48080`. Muse's reply is spoken with Qwen3-TTS
+(MLX, on the Mac; Kokoro-82M and then macOS `say` are the fallbacks) on the robot's speaker, and Pollen's wobbler moves
 the head while it plays.
 It's half-duplex: the mic is ignored while a turn is being transcribed, sent or spoken. There's no
 wake word, so anything said near the robot becomes a turn.
@@ -293,7 +293,8 @@ Run it from the PC:
 muse_gadget/run_poc.sh                  # real Muse gadget (mac_gadget.sh start/stop)
 muse_gadget/run_poc.sh --fake-bridge    # echo bridge: the robot answers "You said: ..."
 # options: --duration SECONDS, --lock-timeout SECONDS, --mic-log SECONDS, --log-transcripts,
-#          --tts kokoro|say, --voice NAME, --volume N (default 25), -- <app args>
+#          --tts qwen3|kokoro|say, --voice NAME, --instruct TEXT, --volume N (default 25),
+#          -- <app args>
 ```
 
 In order, it:
@@ -303,8 +304,9 @@ In order, it:
    time, that clones the app, builds its venv from `mac/app-constraints.txt` (the app's `uv.lock`
    pins: the Mac's uv can't read that lock format), and caches the STT model in
    `muse-app/hf`. It also builds the Kokoro venv `muse-app/kokoro/.venv` from
-   `mac/kokoro-constraints.txt` and caches the Kokoro model (about 1.4 GB in all); if that
-   fails, the run goes on with `say`. Later runs only validate;
+   `mac/kokoro-constraints.txt` and caches the Kokoro model (about 1.4 GB in all) and the
+   Qwen3-TTS model (about 2.9 GB); if Qwen3 fails, the run uses Kokoro, and if Kokoro fails, `say`.
+   Later runs only validate;
 3. starts the bridge: `mac_gadget.sh start`, or `mac/fake_bridge.py` with `--fake-bridge`;
 4. starts the daemon (`mac/run_daemon.py`: API, WebRTC signalling and mDNS all kept on loopback),
    then the app (`mac/run_app.py`), both inside Reachy Edge.app via `edge_app_run.sh`.
@@ -334,6 +336,16 @@ Details:
   robot); `--voice am_michael` is a good male voice, and `mac/muse_tts.py` lists the rest. If
   Kokoro can't load, the run uses `say`; if it fails during a reply, `say` speaks the rest of
   that reply. `--tts say` (with `--voice <macOS voice>`) uses `say` only.
+- **Qwen3-TTS (`--tts qwen3`, the default)**: Qwen3-TTS 1.7B CustomVoice (8-bit,
+  `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit`, pinned) runs as `mac/qwen3_worker.py` in
+  the Kokoro venv (same mlx-audio), and only one TTS model is loaded at a time. The whole reply is
+  rendered in one streaming call; each ~0.5 s chunk is resampled to 16 kHz and queued as it
+  arrives. On the M4 (no robot), the first audio comes about 295 ms after the reply text, rendering
+  runs about 1.7× faster than real time (RTF ~0.58), and loading takes about 5 s with ~3.5 GiB of
+  memory. The speaker is `Aiden` (`--voice Ryan` also works, but Ryan is much slower). `--instruct`
+  sets the style, which changes how a reply is said, never the words: the default is "playful and
+  cheeky, like a friendly cartoon robot", and `--instruct ""` turns it off. If Qwen3 fails before
+  a reply's first audio, `say` speaks that reply.
 - Measured on the M4 (warm, no robot): Kokoro's first audio comes about 175 ms after the reply
   text arrives (1, 2 or 4 sentences), and it renders about 10× faster than real time.
   `say` takes about 530–610 ms, because it renders the whole reply before any of it plays.

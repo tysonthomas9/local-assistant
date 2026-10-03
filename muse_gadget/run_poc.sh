@@ -7,10 +7,13 @@
 #   options: --duration SECONDS (stop by itself), --lock-timeout SECONDS (default: wait forever),
 #            --mic-log SECONDS (log the mic level and VAD score that often),
 #            --log-transcripts (debugging: show each turn's text on this terminal; the log files
-#            on the PC stay redacted), --tts kokoro|say (reply voice engine, default kokoro),
-#            --voice NAME (e.g. af_heart, am_michael), --volume N (robot speaker 0-100, default 25;
-#            the daemon plays a short test sound when it's set), --no-style-hint (send Muse your
-#            words only, without the bridge's "spoken by a desk robot" note),
+#            on the PC stay redacted), --tts qwen3|kokoro|say (reply voice engine, default qwen3),
+#            --voice NAME (qwen3: Aiden (default), Ryan; kokoro: af_heart, am_michael ...),
+#            --instruct TEXT (qwen3's style instruction: how to say it, never what to say; default
+#            "playful and cheeky, like a friendly cartoon robot"; "" for none), --volume N (robot
+#            speaker 0-100, default 25; the daemon plays a short test sound when it's set),
+#            --no-style-hint (send Muse your words only, without the bridge's "spoken by a desk
+#            robot" note),
 #            -- <extra conversation-app args>
 #
 # In order: take the hw-run lock on reachy-mac -> sync MuseHandler + install the pinned app into
@@ -32,7 +35,7 @@ set -uo pipefail
 HOST=reachy-mac
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 LOGDIR="${MUSE_POC_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/muse-poc}"   # outside the repo
-fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=kokoro; voice=; volume=25; style_hint=1; app_args=()
+fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=qwen3; voice=; instruct=; instruct_set=0; volume=25; style_hint=1; app_args=()
 while [ $# -gt 0 ]; do
     case $1 in
         --fake-bridge) fake=1; shift ;;
@@ -42,14 +45,17 @@ while [ $# -gt 0 ]; do
         --log-transcripts) log_transcripts=1; shift ;;
         --tts) tts=$2; shift 2 ;;
         --voice) voice=$2; shift 2 ;;
+        --instruct) instruct=$2; instruct_set=1; shift 2 ;;
         --volume) volume=$2; shift 2 ;;
         --no-style-hint) style_hint=0; shift ;;
         --) shift; app_args=("$@"); break ;;
-        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
         *) echo "run_poc: unknown option $1" >&2; exit 2 ;;
     esac
 done
-case $tts in kokoro|say) ;; *) echo "run_poc: --tts must be kokoro or say" >&2; exit 2 ;; esac
+case $tts in qwen3|kokoro|say) ;; *) echo "run_poc: --tts must be qwen3, kokoro or say" >&2; exit 2 ;; esac
+case $instruct in *[!A-Za-z0-9\ ,.\'!?-]*) echo "run_poc: --instruct may only use letters, digits, spaces and , . ' ! ? -" >&2; exit 2 ;; esac
+[ "${#instruct}" -le 200 ] || { echo "run_poc: --instruct is longer than 200 characters" >&2; exit 2; }
 case $volume in ''|*[!0-9]*) echo "run_poc: --volume must be 0-100" >&2; exit 2 ;; esac
 [ "$volume" -le 100 ] || { echo "run_poc: --volume must be 0-100" >&2; exit 2; }
 case $voice in *[!A-Za-z0-9_]*) echo "run_poc: unsupported voice name: $voice" >&2; exit 2 ;; esac
@@ -156,6 +162,7 @@ EOF
 M='"$HOME/assistant-edge/muse-app"'
 TOOLS_PORT=48081
 TOOLS_FILE="$M/run/robot-tools.$RUN.env"   # the run's robot-tools secret, on the Mac only
+INSTRUCT_FILE="$M/run/tts-instruct.$RUN.txt"   # --instruct (a file: the text has spaces)
 cleaning=0
 cleanup() {
     [ "$cleaning" = 1 ] && return
@@ -187,7 +194,7 @@ cleanup() {
             "$ROOT/mac_gadget.sh" stop
         fi
     fi
-    rsh "rm -f $TOOLS_FILE"
+    rsh "rm -f $TOOLS_FILE $INSTRUCT_FILE"
     for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done
     wait 2>/dev/null
     left="$(rsh "launchctl list | grep -c 'com.assistant.reachy-edge.$RUN\\.' ; true")"
@@ -264,9 +271,17 @@ rsh "curl -s -m 10 -X POST -H 'Content-Type: application/json' -d '{\"volume\":$
 http://127.0.0.1:8000/api/volume/set" >/dev/null
 log "speaker volume: before ${vol_before:-?}, after $(vol_now) (asked $volume)"
 
-log "starting the conversation app with MuseHandler"
+tts_env="-e MUSE_TTS=$tts -e MUSE_TTS_VOICE=$voice"
+if [ "$instruct_set" = 1 ]; then
+    rsh_sh "$RUN" "$instruct" <<'EOF' || { log "could not write the TTS instruction on $HOST"; exit 1; }
+umask 077; mkdir -p "$HOME/assistant-edge/muse-app/run"
+printf '%s\n' "$2" > "$HOME/assistant-edge/muse-app/run/tts-instruct.$1.txt"
+EOF
+    tts_env="$tts_env -e MUSE_TTS_INSTRUCT_FILE=$INSTRUCT_FILE"
+fi
+log "starting the conversation app with MuseHandler (tts $tts)"
 start_job app "-e HF_HOME=~/assistant-edge/muse-app/hf -e HF_HUB_OFFLINE=1 -e MUSE_BRIDGE_URL=http://127.0.0.1:48080 -e MUSE_MIC_LOG=$mic_log -e MUSE_LOG_TRANSCRIPTS=$log_transcripts \
--e MUSE_TTS=$tts -e MUSE_TTS_VOICE=$voice -e MUSE_ROBOT_TOOLS_SECRET_FILE=$TOOLS_FILE -e MUSE_ROBOT_TOOLS_PORT=$TOOLS_PORT \
+$tts_env -e MUSE_ROBOT_TOOLS_SECRET_FILE=$TOOLS_FILE -e MUSE_ROBOT_TOOLS_PORT=$TOOLS_PORT \
 -- $M/mac/exec_python.py $M/app/.venv/bin/python $M/mac/run_app.py --no-camera ${app_args[*]:-}"
 app_ssh=${pids[-1]}
 

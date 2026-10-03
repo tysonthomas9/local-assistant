@@ -3,9 +3,10 @@
 One turn, half-duplex (the POC has no barge-in):
 
     robot mic -> VAD (one utterance) -> local STT on the Mac -> POST /turn on the Muse bridge
-    (127.0.0.1) -> reply text -> TTS (Kokoro-82M sentence by sentence, or macOS `say`; see
-    muse_tts.py) -> PCM frames on output_queue -> the app plays them on the robot's speaker and
-    the daemon's wobbler moves the head. Playback starts as soon as the first sentence is ready.
+    (127.0.0.1) -> reply text -> TTS (Qwen3-TTS streamed, Kokoro-82M sentence by sentence, or
+    macOS `say`; see muse_tts.py) -> PCM frames on output_queue -> the app plays them on the
+    robot's speaker and the daemon's wobbler moves the head. Playback starts as soon as the first
+    chunk (Qwen3) or sentence (Kokoro) is ready.
 
 While a turn is being transcribed, sent, or spoken, mic input is dropped (XVF3800 echo
 cancellation helps, but the POC doesn't rely on it for turn-taking). Transcripts go to the app
@@ -79,7 +80,7 @@ class CallableTts:
 
 
 class MuseHandler(ConversationHandler):
-    """Speech in, Muse's reply spoken (Kokoro or macOS `say`) out."""
+    """Speech in, Muse's reply spoken (Qwen3-TTS, Kokoro or macOS `say`) out."""
 
     def __init__(
         self,
@@ -295,7 +296,7 @@ class MuseHandler(ConversationHandler):
             chunks = self.tts.chunks(text, rate)
             first = True
             while True:
-                # One sentence at a time in a thread; frames of the earlier ones are already playing.
+                # One chunk (sentence) at a time in a thread; frames of the earlier ones are already playing.
                 pcm = await asyncio.to_thread(next, chunks, None)
                 if pcm is None:
                     break

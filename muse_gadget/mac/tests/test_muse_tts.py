@@ -1,4 +1,4 @@
-"""Kokoro TTS path with fake engines: sentence splitting, resampling, fallback to `say`, streaming.
+"""Qwen3 and Kokoro TTS paths with fake engines: sentence splitting, resampling, fallbacks, streaming.
 
     cd muse_gadget/mac && <app venv>/bin/python -m pytest tests -q
 """
@@ -23,7 +23,8 @@ import muse_handler  # noqa: E402
 import muse_tts  # noqa: E402
 from muse_bridge import BridgeClient  # noqa: E402
 from muse_tts import (  # noqa: E402
-    KokoroEngine, KokoroTts, SayTts, child_env, make_tts, resample, split_sentences, trim_silence,
+    KokoroEngine, KokoroTts, Qwen3Engine, Qwen3Tts, SayTts, StreamResampler, child_env, make_tts, qwen3_instruct,
+    resample, split_sentences, trim_silence,
 )
 from muse_vad import EnergyVad, UtteranceSegmenter  # noqa: E402
 
@@ -183,6 +184,148 @@ def test_kokoro_engine_speaks_the_worker_protocol(tmp_path):
     assert engine.proc.poll() is not None
 
 
+# ---------------------------------------------------------------------- Qwen3
+def test_stream_resampler_matches_resampling_the_whole_signal():
+    signal = sine(1.0, hz=330) + sine(1.0, hz=1500, amp=0.1)
+    whole = resample(signal, KOKORO_RATE, 16000)
+    rs = StreamResampler(KOKORO_RATE, 16000)
+    pieces = [rs.feed(signal[i : i + n]) for i, n in ((0, 7), (7, 12000), (12007, 5000), (17007, 6993))]
+    pieces.append(rs.flush())
+    streamed = np.concatenate(pieces)
+    assert streamed.size == whole.size == 16000
+    assert np.max(np.abs(streamed[200:-200] - whole[200:-200])) < 1e-4  # no clicks at piece edges
+    same = StreamResampler(16000, 16000)
+    assert same.feed(sine(0.1, 16000)).size == 1600 and same.flush().size == 0
+
+
+class FakeQwen3Engine:
+    rate = KOKORO_RATE
+
+    def __init__(self, fail_after: int | None = None) -> None:
+        self.calls: list[tuple[str, str, str | None]] = []
+        self.fail_after = fail_after
+
+    def stream(self, text: str, speaker: str, instruct):
+        self.calls.append((text, speaker, instruct))
+        yield np.zeros(int(0.3 * self.rate), np.float32)  # leading silence
+        for i in range(4):
+            if self.fail_after is not None and i >= self.fail_after:
+                raise EOFError("qwen3 worker exited")
+            yield sine(0.5)
+
+    def close(self) -> None:
+        pass
+
+
+def test_qwen3_streams_the_whole_reply_at_the_robot_rate():
+    engine = FakeQwen3Engine()
+    tts = Qwen3Tts(engine, "Ryan", "playful", fallback=FakeSay())
+    chunks = list(tts.chunks("Sure, I can dance!\nWatch this.", 16000))
+    assert engine.calls == [("Sure, I can dance! Watch this.", "Ryan", "playful")]  # one call, one line
+    assert len(chunks) >= 4 and all(c.dtype == np.int16 for c in chunks)
+    total = sum(c.size for c in chunks) / 16000
+    assert abs(total - 2.0) < 0.01  # the silent first chunk is dropped, nothing else lost
+    chunks = list(Qwen3Tts(FakeQwen3Engine()).chunks("Hi.", 16000))
+    assert np.flatnonzero(np.abs(chunks[0]) > 300)[0] / 16000 < 0.01  # starts with speech
+    assert 0.25 < np.abs(np.concatenate(chunks)).max() / 32767 < 0.35  # gain 1
+    assert tts.voices()[0] == "Aiden" and "Ryan" in tts.voices()
+    assert Qwen3Tts(engine, instruct="").instruct is None
+
+
+def test_qwen3_failure_before_audio_falls_back_to_say_and_mid_reply_stops():
+    say = FakeSay()
+    chunks = list(Qwen3Tts(FakeQwen3Engine(fail_after=0), fallback=say).chunks("One two. Three.", 16000))
+    assert say.texts == ["One two. Three."] and len(chunks) == 1
+    say = FakeSay()
+    chunks = list(Qwen3Tts(FakeQwen3Engine(fail_after=2), fallback=say).chunks("One two. Three.", 16000))
+    assert say.texts == [] and 0.9 < sum(c.size for c in chunks) / 16000 < 1.1  # what was rendered
+
+
+FAKE_QWEN3_WORKER = textwrap.dedent('''
+    import json, sys
+    import numpy as np
+    out = sys.stdout.buffer
+    out.write(b"ready 24000\\n"); out.flush()
+    for line in sys.stdin:
+        req = json.loads(line)
+        if req["speaker"] == "Nobody":
+            out.write(b"err LookupError\\n"); out.flush(); continue
+        if req["text"] == "die":
+            sys.exit(3)
+        for i in range(3):
+            n = 100 * len(req["text"]) + i
+            out.write(b"chunk %d\\n" % n + np.full(n, 0.5 if req["instruct"] else 0.25, "<f4").tobytes()); out.flush()
+        out.write(b"end\\n"); out.flush()
+''')
+
+
+def test_qwen3_engine_speaks_the_streaming_protocol(tmp_path):
+    worker = tmp_path / "worker.py"
+    worker.write_text(FAKE_QWEN3_WORKER)
+    engine = Qwen3Engine([sys.executable, str(worker)])
+    try:
+        assert engine.rate == 24000
+        parts = list(engine.stream("hello", "Aiden", "playful"))
+        assert [p.size for p in parts] == [500, 501, 502] and all(np.allclose(p, 0.5) for p in parts)
+        assert np.allclose(next(iter(engine.stream("x" * 400, "Aiden", None))), 0.25)  # abandoned mid-reply
+        assert engine.proc.poll() is not None  # ... so the worker is closed, not reused out of step
+    finally:
+        engine.close()
+    engine = Qwen3Engine([sys.executable, str(worker)])
+    try:
+        with pytest.raises(RuntimeError):
+            list(engine.stream("hello", "Nobody", None))
+        assert len(list(engine.stream("ok", "Aiden", None))) == 3  # still in step after an error
+        with pytest.raises(EOFError):
+            list(engine.stream("die", "Aiden", None))
+        with pytest.raises(EOFError):
+            list(engine.stream("hello", "Aiden", None))
+    finally:
+        engine.close()
+
+
+def test_make_tts_qwen3_is_the_default_and_falls_back_to_kokoro_then_say(monkeypatch, tmp_path, caplog):
+    for key in ("MUSE_TTS", "MUSE_TTS_VOICE", "MUSE_TTS_INSTRUCT", "MUSE_TTS_INSTRUCT_FILE"):
+        monkeypatch.delenv(key, raising=False)
+    started: list[list[str]] = []
+
+    class Engine:
+        rate = KOKORO_RATE
+
+        def __init__(self, cmd):
+            started.append(cmd)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(muse_tts, "Qwen3Engine", Engine)
+    tts = make_tts()
+    assert isinstance(tts, Qwen3Tts) and tts.voice == "Aiden" and tts.instruct == muse_tts.QWEN3_INSTRUCT
+    assert started[-1][1].endswith("qwen3_worker.py") and started[-1][-1] == "Aiden"
+    assert make_tts("qwen3", "ryan").voice == "Ryan" and make_tts("qwen3", "Bob").voice == "Aiden"
+    monkeypatch.undo()
+    monkeypatch.setenv("MUSE_KOKORO_PYTHON", str(tmp_path / "missing" / "python"))  # no model installed
+    tts = make_tts("qwen3")
+    assert isinstance(tts, SayTts)
+    assert "Qwen3-TTS unavailable" in caplog.text and "Kokoro unavailable" in caplog.text
+
+
+def test_qwen3_instruct_comes_from_the_file_then_the_env_then_the_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("MUSE_TTS_INSTRUCT", raising=False)
+    monkeypatch.delenv("MUSE_TTS_INSTRUCT_FILE", raising=False)
+    assert qwen3_instruct() == muse_tts.QWEN3_INSTRUCT
+    monkeypatch.setenv("MUSE_TTS_INSTRUCT", "")
+    assert qwen3_instruct() is None
+    monkeypatch.setenv("MUSE_TTS_INSTRUCT", " deadpan,  dry ")
+    assert qwen3_instruct() == "deadpan, dry"
+    f = tmp_path / "instruct.txt"
+    f.write_text("warm and amused\n")
+    monkeypatch.setenv("MUSE_TTS_INSTRUCT_FILE", str(f))
+    assert qwen3_instruct() == "warm and amused"
+    f.write_text("\n")
+    assert qwen3_instruct() is None
+
+
 def test_child_env_drops_the_app_venvs_paths(monkeypatch):
     monkeypatch.setenv("PYTHONPATH", "/app/venv/gst:/keep/me")
     monkeypatch.setenv("GST_PLUGIN_PATH", "/app/venv/only")
@@ -285,11 +428,18 @@ def test_handler_loads_and_closes_its_own_tts(monkeypatch):
 def test_run_app_takes_the_tts_flags(monkeypatch):
     import run_app
 
-    for key in ("MUSE_TTS", "MUSE_TTS_VOICE"):
+    for key in ("MUSE_TTS", "MUSE_TTS_VOICE", "MUSE_TTS_INSTRUCT"):
         monkeypatch.delenv(key, raising=False)
     rest = run_app.take_own_flags(["run_app.py", "--tts", "say", "--no-camera", "--voice", "Samantha"])
     assert rest == ["run_app.py", "--no-camera"]
     assert os.environ["MUSE_TTS"] == "say" and os.environ["MUSE_TTS_VOICE"] == "Samantha"
+    rest = run_app.take_own_flags(["run_app.py", "--tts", "qwen3", "--instruct", "deadpan, dry", "--debug"])
+    assert rest == ["run_app.py", "--debug"]
+    assert os.environ["MUSE_TTS"] == "qwen3" and os.environ["MUSE_TTS_INSTRUCT"] == "deadpan, dry"
+    run_app.take_own_flags(["run_app.py", "--instruct", ""])
+    assert os.environ["MUSE_TTS_INSTRUCT"] == ""
+    with pytest.raises(SystemExit):
+        run_app.take_own_flags(["run_app.py", "--instruct"])
     with pytest.raises(SystemExit):
         run_app.take_own_flags(["run_app.py", "--tts", "espeak"])
     with pytest.raises(SystemExit):

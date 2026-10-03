@@ -1,9 +1,12 @@
 """Run Pollen's conversation app (pinned, unmodified) with MuseHandler as its backend.
 
-    python run_app.py [--log-transcripts] [--tts kokoro|say] [--voice NAME] [app args, e.g. --no-camera --debug]
+    python run_app.py [--log-transcripts] [--tts qwen3|kokoro|say] [--voice NAME] [--instruct TEXT]
+                      [app args, e.g. --no-camera --debug]
 
---tts picks the reply voice engine (MUSE_TTS; default kokoro, which falls back to macOS `say` if
-it can't load) and --voice its voice (MUSE_TTS_VOICE; Kokoro default af_heart). See muse_tts.py.
+--tts picks the reply voice engine (MUSE_TTS; default qwen3, which falls back to Kokoro and then
+macOS `say` if it can't load), --voice its voice (MUSE_TTS_VOICE; Qwen3 default Aiden, Kokoro
+default af_heart) and --instruct Qwen3's style instruction (MUSE_TTS_INSTRUCT; how to say it, not
+what to say; "" for none). See muse_tts.py.
 
 --log-transcripts (debugging only) lets the app log each turn's text (`role=... content=...`);
 by default MuseHandler doesn't hand the text to the app's logger at all.
@@ -58,12 +61,17 @@ def take_own_flags(argv: list[str]) -> list[str]:
     for a in it:
         if a == "--log-transcripts":
             os.environ["MUSE_LOG_TRANSCRIPTS"] = "1"
+        elif a == "--instruct":
+            value = next(it, None)
+            if value is None:
+                raise SystemExit("run_app: --instruct needs a value (\"\" for none)")
+            os.environ["MUSE_TTS_INSTRUCT"] = value
         elif a in ("--tts", "--voice"):
             value = next(it, "")
             if not value:
                 raise SystemExit(f"run_app: {a} needs a value")
-            if a == "--tts" and value not in ("kokoro", "say"):
-                raise SystemExit("run_app: --tts must be kokoro or say")
+            if a == "--tts" and value not in ("qwen3", "kokoro", "say"):
+                raise SystemExit("run_app: --tts must be qwen3, kokoro or say")
             os.environ["MUSE_TTS" if a == "--tts" else "MUSE_TTS_VOICE"] = value
         else:
             rest.append(a)

@@ -1,6 +1,16 @@
-"""Text-to-speech for MuseHandler: Kokoro-82M (default) or macOS's built-in `say`.
+"""Text-to-speech for MuseHandler: Qwen3-TTS (default), Kokoro-82M or macOS's built-in `say`.
 
-Both turn a reply into 16-bit mono PCM at the robot speaker's rate, which the app plays as is.
+All three turn a reply into 16-bit mono PCM at the robot speaker's rate, which the app plays as is.
+
+Qwen3-TTS (`MUSE_TTS=qwen3`, run_app.py --tts qwen3): Qwen3-TTS 1.7B CustomVoice (8-bit, MLX),
+run by qwen3_worker.py in the Kokoro venv (mlx-audio). The whole reply is rendered in one
+streaming call, and each ~0.5 s chunk is resampled (with carried-over context, so there are no
+clicks at chunk edges) and handed over as soon as it arrives: the robot starts talking after
+about 0.3 s. MUSE_TTS_VOICE picks the speaker (default Aiden). The style instruction (how to say
+it, never what to say) comes from MUSE_TTS_INSTRUCT, or the file MUSE_TTS_INSTRUCT_FILE names;
+the default is QWEN3_INSTRUCT, and an empty value means none. If the worker can't start, the run
+uses Kokoro (and `say` if Kokoro can't start either); if Qwen3 fails before a reply's first
+audio, `say` speaks that reply.
 
 Kokoro (`MUSE_TTS=kokoro`, run_app.py --tts kokoro): Kokoro-82M on MLX, in its own venv
 (~/assistant-edge/muse-app/kokoro/.venv, see install.sh) as a long-lived worker process
@@ -47,6 +57,9 @@ KOKORO_VOICES = (  # the English voices in Kokoro-82M v1.0 (a = American, b = Br
     "am_michael", "am_onyx", "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
     "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
 )
+QWEN3_SPEAKER = "Aiden"  # natural pace; Ryan comes out 1.5-2.5x slower for the same text
+QWEN3_SPEAKERS = ("Aiden", "Ryan", "Eric", "Dylan", "Serena", "Vivian", "Uncle_Fu", "Ono_Anna", "Sohee")
+QWEN3_INSTRUCT = "playful and cheeky, like a friendly cartoon robot"  # the user's pick (delivery only)
 KOKORO_GAIN = 2.0  # Kokoro renders ~2.3x quieter (RMS) than `say`; this brings it close, peak ~0.8
 MAX_SENTENCE_CHARS = 300  # longer sentences are cut at a comma/semicolon/space (Kokoro's limit is 510 phonemes)
 _ABBREV = re.compile(r"\b(?:Mr|Mrs|Ms|Dr|St|Prof|Sr|Jr|vs|etc|e\.g|i\.e|a\.m|p\.m|approx|No)\.$", re.IGNORECASE)
@@ -138,6 +151,51 @@ def resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
 
 def to_int16(audio: np.ndarray, gain: float = 1.0) -> np.ndarray:
     return (np.clip(np.asarray(audio, dtype=np.float32) * gain, -1.0, 1.0) * 32767).astype(np.int16)
+
+
+class StreamResampler:
+    """resample() for audio that arrives in pieces: each piece is resampled with real samples on
+    both sides (CONTEXT input samples kept from before, the last CONTEXT held back until more
+    arrive), so the output matches resampling the whole signal at once, without edge clicks."""
+
+    CONTEXT = 600  # input samples (25 ms at 24 kHz); the polyphase filter needs far fewer
+
+    def __init__(self, src_rate: int, dst_rate: int) -> None:
+        g = gcd(src_rate, dst_rate)
+        self.src_rate, self.dst_rate = src_rate, dst_rate
+        self.up, self.down = dst_rate // g, src_rate // g
+        self.ctx = self.CONTEXT // self.down * self.down  # whole filter phases
+        self._done = np.zeros(0, np.float32)  # already emitted (the last self.ctx samples)
+        self._pending = np.zeros(0, np.float32)
+
+    def _run(self, n: int, pending: np.ndarray) -> np.ndarray:
+        """Emit the output for the first n samples of `pending` (n a multiple of self.down)."""
+        y = resample(np.concatenate([self._done, pending]), self.src_rate, self.dst_rate)
+        start = self._done.size * self.up // self.down
+        out = y[start : start + n * self.up // self.down]
+        self._done = np.concatenate([self._done, pending[:n]])[-self.ctx :] if self.ctx else self._done
+        return out
+
+    def feed(self, audio: np.ndarray) -> np.ndarray:
+        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if self.src_rate == self.dst_rate:
+            return audio
+        self._pending = np.concatenate([self._pending, audio])
+        n = (self._pending.size - self.ctx) // self.down * self.down
+        if n <= 0:
+            return np.zeros(0, np.float32)
+        out = self._run(n, self._pending)
+        self._pending = self._pending[n:]
+        return out
+
+    def flush(self) -> np.ndarray:
+        if self.src_rate == self.dst_rate or self._pending.size == 0:
+            return np.zeros(0, np.float32)
+        n = -(-self._pending.size // self.down) * self.down
+        tail = np.concatenate([self._pending, np.zeros(n - self._pending.size, np.float32)])
+        out = self._run(n, tail)[: int(round(self._pending.size * self.up / self.down))]
+        self._pending = np.zeros(0, np.float32)
+        return out
 
 
 # ---------------------------------------------------------------------- engines
@@ -288,20 +346,134 @@ class KokoroTts:
         self.engine.close()
 
 
-def kokoro_command(voice: str) -> list[str]:
+class Qwen3Engine(KokoroEngine):
+    """Client for qwen3_worker.py (same start-up and framing as Kokoro's, but replies stream)."""
+
+    def stream(self, text: str, speaker: str, instruct: Optional[str]) -> Iterator[np.ndarray]:
+        """float32 mono chunks at self.rate, as the worker renders them."""
+        with self._lock:
+            if self.proc.poll() is not None:
+                raise EOFError("qwen3 worker exited")
+            finished = False
+            try:
+                req = json.dumps({"text": text, "speaker": speaker, "instruct": instruct or None}) + "\n"
+                self.proc.stdin.write(req.encode())  # type: ignore[union-attr]
+                self.proc.stdin.flush()  # type: ignore[union-attr]
+                while True:
+                    deadline = time.monotonic() + self.synth_timeout_s
+                    header = self._read_line(deadline)
+                    if header == "end":
+                        finished = True
+                        return
+                    if header.startswith("err"):
+                        finished = True  # the worker is ready for the next request
+                        raise RuntimeError(f"qwen3 worker: {header}")
+                    if not header.startswith("chunk "):
+                        raise ValueError("qwen3 worker: bad header")
+                    n = int(header.split()[1])
+                    yield np.frombuffer(self._read_exact(4 * n, deadline), dtype="<f4").astype(np.float32)
+            finally:
+                if not finished:
+                    self.close()  # failed or abandoned mid-reply: out of step with the worker
+
+
+class Qwen3Tts:
+    """Qwen3-TTS, the whole reply in one streaming call; `say` speaks it if Qwen3 fails before any audio."""
+
+    name = "qwen3"
+
+    def __init__(self, engine: Qwen3Engine, voice: str = QWEN3_SPEAKER, instruct: Optional[str] = QWEN3_INSTRUCT,
+                 fallback: Optional[Tts] = None, gain: float = 1.0) -> None:
+        self.engine = engine
+        self.voice = voice
+        self.instruct = instruct or None
+        self.fallback = fallback or SayTts()
+        self.gain = gain  # Qwen3 already renders at about Kokoro x2's level (peak ~0.8)
+        resample(np.zeros(240, np.float32), engine.rate, 16000)  # import scipy.signal now, not on the first reply
+
+    def chunks(self, text: str, rate: int) -> Iterator[np.ndarray]:
+        text = " ".join(split_sentences(text))  # one line: mlx-audio would split at line breaks
+        if not text:
+            return
+        rs = StreamResampler(self.engine.rate, rate)
+        started = False
+        try:
+            for audio in self.engine.stream(text, self.voice or QWEN3_SPEAKER, self.instruct):
+                if not started:
+                    loud = np.flatnonzero(np.abs(audio) > 0.01)
+                    if loud.size == 0:
+                        continue  # leading silence
+                    audio = audio[max(0, int(loud[0]) - int(0.03 * self.engine.rate)) :]
+                    started = True
+                out = rs.feed(audio)
+                if out.size:
+                    yield to_int16(out, self.gain)
+        except Exception as e:
+            if started:
+                logger.warning("Qwen3 failed mid-reply (%s); the rest of this reply is dropped", type(e).__name__)
+                return
+            logger.warning("Qwen3 failed (%s); macOS say speaks this reply", type(e).__name__)
+            yield from self.fallback.chunks(text, rate)
+            return
+        out = rs.flush()
+        if out.size:
+            yield to_int16(out, self.gain)
+
+    def voices(self) -> list[str]:
+        return list(QWEN3_SPEAKERS)
+
+    def close(self) -> None:
+        self.engine.close()
+
+
+def qwen3_instruct() -> Optional[str]:
+    """MUSE_TTS_INSTRUCT_FILE's contents, else MUSE_TTS_INSTRUCT, else QWEN3_INSTRUCT; empty means none."""
+    path = os.environ.get("MUSE_TTS_INSTRUCT_FILE")
+    if path:
+        try:
+            return " ".join(Path(path).read_text(encoding="utf-8").split()) or None
+        except OSError as e:
+            logger.warning("can't read MUSE_TTS_INSTRUCT_FILE (%s); using the default style", type(e).__name__)
+    value = os.environ.get("MUSE_TTS_INSTRUCT")
+    if value is not None:
+        return " ".join(value.split()) or None
+    return QWEN3_INSTRUCT
+
+
+def worker_command(script: str, *args: str) -> list[str]:
     here = Path(__file__).resolve().parent
     python = os.environ.get("MUSE_KOKORO_PYTHON") or str(here.parent / "kokoro" / ".venv" / "bin" / "python")
-    return [python, str(here / "kokoro_worker.py"), "--voice", voice]
+    return [python, str(here / script), *args]
+
+
+def kokoro_command(voice: str) -> list[str]:
+    return worker_command("kokoro_worker.py", "--voice", voice)
+
+
+def qwen3_command(speaker: str) -> list[str]:
+    return worker_command("qwen3_worker.py", "--speaker", speaker)
 
 
 def make_tts(backend: Optional[str] = None, voice: Optional[str] = None) -> Tts:
-    """MUSE_TTS=kokoro (default) or say; MUSE_TTS_VOICE picks the voice. Kokoro falls back to say."""
-    backend = (backend or os.environ.get("MUSE_TTS") or "kokoro").strip().lower()
+    """MUSE_TTS=qwen3 (default), kokoro or say; MUSE_TTS_VOICE picks the voice.
+    Qwen3 falls back to Kokoro, Kokoro to say. Only one model is loaded at a time."""
+    backend = (backend or os.environ.get("MUSE_TTS") or "qwen3").strip().lower()
     voice = voice or os.environ.get("MUSE_TTS_VOICE") or None
     if backend == "say":
         return SayTts(voice)
+    if backend == "qwen3":
+        speaker = {s.lower(): s for s in QWEN3_SPEAKERS}.get((voice or QWEN3_SPEAKER).lower())
+        if speaker is None:
+            logger.warning("unknown Qwen3 speaker %r; using %s", voice, QWEN3_SPEAKER)
+            speaker = QWEN3_SPEAKER
+        try:
+            engine = Qwen3Engine(qwen3_command(speaker))
+        except Exception as e:
+            logger.warning("Qwen3-TTS unavailable (%s); using Kokoro", e)
+            return make_tts("kokoro", None)
+        return Qwen3Tts(engine, speaker, qwen3_instruct(), fallback=SayTts())
     if backend != "kokoro":
-        raise ValueError(f"unknown TTS backend {backend!r} (kokoro or say)")
+        raise ValueError(f"unknown TTS backend {backend!r} (qwen3, kokoro or say)")
     voice = voice or KOKORO_VOICE
     if voice not in KOKORO_VOICES:
         logger.warning("unknown Kokoro voice %r; using %s", voice, KOKORO_VOICE)
