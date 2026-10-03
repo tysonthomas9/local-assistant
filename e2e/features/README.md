@@ -244,7 +244,7 @@ remote process group, and teardown stops them. The daemon API (`ssh -L`) and Edg
 | `robot_motors_are` | `mode: enabled \| disabled \| gravity_compensation`, `within_s = 10` | `GET /api/motors/status` says `mode` within `within_s` (printed with the time since `edge_agent_crashes`) |
 | `daemon_printed` | `text`, `count = 1`, `within_s = 10` | The daemon printed a line containing `text` (e.g. the motor watchdog's `WATCHDOG rested motors=disabled`) at least `count` times |
 | `stop_reachy_daemon` | none | SIGTERM; the daemon reports a clean stop and stops answering |
-| `edge_host_clean` | none | Stops this scenario's processes on the edge host, the daemon last; the motors must be disabled by then (else the robot is put to rest, SDK `goto_sleep` and torque off, and the step fails) and nothing from `~/assistant-edge` may still run there. Any teardown also rests the robot before its daemon stops: the motors' torque outlives the daemon |
+| `edge_host_clean` | none | Stops this scenario's processes on the edge host, the daemon last; the motors must be disabled by then (else the robot is put to rest, SDK `goto_sleep` and torque off, and the step fails) and nothing from `~/assistant-edge` may still run there (on the sim: nothing of the sim robot, its daemon and agents). Any teardown also rests the robot before its daemon stops: the motors' torque outlives the daemon |
 
 ### The edge agent and the robot (`steps/edge.py`)
 

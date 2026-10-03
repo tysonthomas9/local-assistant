@@ -339,6 +339,20 @@ def _marked_processes() -> list[str]:
     return found
 
 
+def robot_processes() -> list[str]:
+    """The sim robot's own processes still running: its daemon and the edge agents next to it
+    (not its sound card). None may be left once a scenario stopped them."""
+    done = subprocess.run(
+        ["pgrep", "-af", rf"^[^ ]*python[0-9.]* -m {re.escape(SIM_MODULE)}( |$)"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    found = [line for line in done.stdout.splitlines() if line.strip()]
+    pids = {line.split()[0] for line in found}
+    return found + [line for line in _marked_processes() if line.split()[0] not in pids]
+
+
 def _leftover_processes() -> list[str]:
     done = subprocess.run(
         ["pgrep", "-af", _PROCESS_PATTERN], capture_output=True, text=True, check=False

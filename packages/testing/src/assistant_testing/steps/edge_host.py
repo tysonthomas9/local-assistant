@@ -548,7 +548,8 @@ async def stop_reachy_daemon(ctx: ScenarioContext) -> None:
 async def edge_host_clean(ctx: ScenarioContext) -> None:
     """Stop what this scenario runs on the robot's machine, the daemon last (so the body can
     put the robot to rest through it); the motors must then be disabled, and nothing from
-    ~/assistant-edge may still be running there (no orphans left by the SSH launcher).
+    ~/assistant-edge may still be running there (no orphans left by the SSH launcher). On the
+    sim: none of the sim robot's processes (its daemon, the edge agents next to it).
 
     Motors left enabled are a failure, and the robot is put to rest (SDK `goto_sleep`, torque
     off) before the daemon stops: their torque outlives the daemon and would start the next
@@ -569,7 +570,8 @@ async def edge_host_clean(ctx: ScenarioContext) -> None:
     for proc in procs:
         if proc.name == DAEMON:
             await proc.stop()
-    left = await asyncio.to_thread(eh.leftovers, host)
+    # The sim's own processes only: this PC may run other edge-dir processes (other sessions).
+    left = await asyncio.to_thread(sim.robot_processes if ctx.sim else lambda: eh.leftovers(host))
     if left:
         raise AssertionError(f"still running on {host.label}: {left}")
     if rested:
