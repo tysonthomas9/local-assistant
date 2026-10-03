@@ -61,7 +61,9 @@ One turn, in order:
 3. MuseHandler sends only that text to the bridge (`POST /turn` on `127.0.0.1:48080`).
 4. The gadget passes it to Muse over its encrypted link and reads Muse's reply.
 5. If Muse wants to move the robot, it sends a `client.invoke` for a `reachy.*` command. The gadget calls MuseHandler's robot-tools endpoint, which starts the dance at once with Pollen's own `dance` tool and tells Muse it's in progress.
-6. Qwen3-TTS speaks the reply on the robot's speaker while the robot dances, and Pollen's wobbler moves the head while it plays.
+6. Qwen3-TTS speaks the reply on the robot's speaker while the robot dances, and Pollen's wobbler moves the head while it plays. The reply streams in (`POST /turn?stream=1`): the first sentence is spoken as soon as Muse has written it, without waiting for the rest.
+
+What you say ends after 0.5 s of quiet (`--end-silence`). Each turn logs the time from the end of your speech to the robot's first audio.
 
 It's half-duplex: the mic is ignored while a turn is being transcribed, sent or spoken. There's no wake word, so anything said near the robot becomes a turn.
 
@@ -141,6 +143,7 @@ The first run installs the app, its venvs and the speech models on the Mac (`mac
 | `--volume N` | Robot speaker volume 0-100 (default 100) |
 | `--style-hint` | Opt in: put a short "spoken by a desk robot" note before your words. Off by default |
 | `--duration S`, `--lock-timeout S` | Stop by itself after S seconds; give up waiting for the robot lock |
+| `--end-silence S` | Quiet time that ends what you say, 0.1-5 seconds (default 0.5). Shorter answers sooner but may cut you off mid-pause |
 | `--mic-log S`, `--log-transcripts` | Debugging: log mic level and VAD score; show each turn's text on the terminal |
 | `-- <app args>` | Passed to the conversation app (for example `--no-camera`, `--debug`) |
 

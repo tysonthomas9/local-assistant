@@ -73,6 +73,7 @@ same as on `main`; only the brain differs. `main` keeps the fully local brain.
 | Request | Response |
 |---|---|
 | `POST /turn`, JSON `{"text": "..."}` | 200 `{"reply": "..."}` |
+| `POST /turn?stream=1`, same body | 200 NDJSON: `{"text": "<sentence>"}` per sentence as Muse writes it, then `{"done": true}` (a timeout after some text just ends the stream; errors before any text are the same as `/turn`) |
 | not paired yet | 503 `{"error": "not_paired"}` |
 | paired, but the link to Muse is down | 503 `{"error": "link_down"}` |
 | no reply text within 60 s | 504 `{"error": "timeout"}` (with some text, 200 with the text so far) |
@@ -92,6 +93,11 @@ message, so the bridge reads the reply the way the SDK's ESP32 firmware does
    whole `message.assistant`) until all are done and nothing has arrived for
    0.3 s (a busy `agent.status` keeps the turn open for up to 20 s more), then
    closes the stream and strips markdown so the reply reads well aloud.
+
+With `?stream=1`, each sentence goes out as soon as it ends (`.`, `!` or `?` before a space, or a
+newline), and the rest of a message when its `delta.message_done` comes. Nothing waits for the
+0.3 s settle before it's sent; the settle only decides when the stream ends, so a second message
+that comes late is still sent.
 
 `/chat/history` isn't used: Muse answers it with 403 for a gadget's device
 token.
@@ -336,6 +342,11 @@ Speech-to-text is Qwen3-ASR 0.6B by default (a worker in the Kokoro venv, fallin
 It's half-duplex: the mic is ignored while a turn is being transcribed, sent or spoken. There's no
 wake word, so anything said near the robot becomes a turn.
 
+To start speaking as soon as it can, MuseHandler uses `POST /turn?stream=1`: it speaks the first
+sentence while Muse is still writing the rest, and each later sentence in order. The mic stays off
+until the stream has ended and the audio has played. What you say ends after 0.5 s of quiet
+(`--end-silence SECONDS`, 0.1-5). Each turn logs `end of speech to first audio <ms>` (timings only).
+
 Run it from the PC:
 
 ```bash
@@ -344,7 +355,7 @@ muse_gadget/run_poc.sh --fake-bridge    # echo bridge: the robot answers "You sa
 # options: --duration SECONDS, --lock-timeout SECONDS, --mic-log SECONDS, --log-transcripts,
 #          --tts qwen3|kokoro|say, --voice NAME, --instruct TEXT, --volume N (default 100),
 #          --stt qwen3-asr|parakeet|whisper, --stt-model ID, --style-hint,
-#          -- <app args>
+#          --end-silence SECONDS (default 0.5), -- <app args>
 ```
 
 In order, it:
@@ -400,7 +411,7 @@ Details:
   that reply. `--tts say` (with `--voice <macOS voice>`) uses `say` only.
 - **Qwen3-TTS (`--tts qwen3`, the default)**: Qwen3-TTS 1.7B CustomVoice (8-bit,
   `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit`, pinned) runs as `mac/qwen3_worker.py` in
-  the Kokoro venv (same mlx-audio), and only one TTS model is loaded at a time. The whole reply is
+  the Kokoro venv (same mlx-audio), and only one TTS model is loaded at a time. Each streamed sentence is
   rendered in one streaming call; each ~0.5 s chunk is resampled to 16 kHz and queued as it
   arrives. On the M4 (no robot), the first audio comes about 295 ms after the reply text, rendering
   runs about 1.7× faster than real time (RTF ~0.58), and loading takes about 5 s with ~3.5 GiB of
