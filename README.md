@@ -385,3 +385,9 @@ The suite covers configuration, services, LLM behaviour and tool choice, the Rea
 - [LOCAL_CONVERSATION.md](LOCAL_CONVERSATION.md): the fully local stack, model choice, locality audit, and a log of every feature
 - [FEATURE_PLAN.md](FEATURE_PLAN.md): calculator, lists, privacy mute, wake word, personas, storyteller
 - [MULTI_ASSISTANT_PLAN.md](MULTI_ASSISTANT_PLAN.md): several assistants picked by wake word
+
+## License
+
+This repository is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+
+Third-party code is fetched separately and keeps its own licenses: Pollen Robotics' conversation app and daemon, the speech-to-speech server, the Ollama models and the other models (speech recognition, text-to-speech, wake word).
