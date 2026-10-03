@@ -64,7 +64,7 @@ message, so the bridge reads the reply the way the SDK's ESP32 firmware does
 3. It collects the assistant messages that answer those ids
    (`delta.message_start`, `delta.text_append`, `delta.message_done`, or a
    whole `message.assistant`) until all are done and nothing has arrived for
-   1.5 s (a busy `agent.status` keeps the turn open for up to 20 s more), then
+   0.3 s (a busy `agent.status` keeps the turn open for up to 20 s more), then
    closes the stream and strips markdown so the reply reads well aloud.
 
 `/chat/history` isn't used: Muse answers it with 403 for a gadget's device

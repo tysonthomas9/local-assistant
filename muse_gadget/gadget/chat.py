@@ -34,7 +34,7 @@ DEFAULT_STYLE_HINT = (
     "sentences, with no lists, markdown, emoji or links.]"
 )
 TURN_TIMEOUT_S = 60.0
-SETTLE_S = 1.5
+SETTLE_S = 0.3   # quiet time after the last message is done; each 0.1 s here is reply lag
 BUSY_HOLD_S = 20.0
 WAIT_STEP_S = 0.25
 MAX_MESSAGES = 8
