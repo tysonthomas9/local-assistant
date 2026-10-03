@@ -23,3 +23,16 @@ def test_bad_numbers_refused_before_anything_starts(args):
     done = subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True, timeout=10)
     assert done.returncode == 2
     assert "must be a whole number" in done.stderr
+
+
+@pytest.mark.skipif(not SCRIPT.exists(), reason="run_poc.sh is not in the gadget image")
+def test_bridge_marked_started_before_it_starts():
+    """Cleanup stops a half-started bridge only if bridge_started=1 is set before the start command."""
+    lines = SCRIPT.read_text().splitlines()
+    fake_start = next(i for i, l in enumerate(lines) if "fake_bridge.py" in l and "exec" in l)
+    real_start = next(i for i, l in enumerate(lines) if '"$ROOT/mac_gadget.sh" start' in l)
+    fake_branch = next(i for i, l in enumerate(lines) if 'if [ "$fake" = 1 ]; then' in l and i < fake_start)
+    real_branch = next(i for i in range(fake_start, real_start) if lines[i].strip() == "else")
+    for branch, start in ((fake_branch, fake_start), (real_branch, real_start)):
+        marks = [i for i in range(branch, start) if lines[i].strip().startswith("bridge_started=1")]
+        assert marks, f"no bridge_started=1 between lines {branch + 1} and {start + 1}"
