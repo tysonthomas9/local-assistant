@@ -1,4 +1,4 @@
-"""Speech-to-text benchmark on the Mac: Nemotron 3.5 ASR (mlx-audio) vs parakeet-mlx (today's engine).
+"""Speech-to-text benchmark on the Mac: Nemotron 3.5 ASR and Qwen3-ASR (mlx-audio) vs parakeet-mlx (today's engine).
 
 Phase A of "Nemotron 3.5 ASR vs Parakeet on the Mac": a benchmark only, nothing in the app changes.
 Run it on the Mac in its own venv (mlx-audio needs a newer transformers than the app pins):
@@ -48,6 +48,7 @@ LEAD_S = 0.3
 TAIL_S = 0.8  # muse_vad.Utterance silence_s
 NEMOTRON = "mlx-community/nemotron-3.5-asr-streaming-0.6b"
 PARAKEET = "mlx-community/parakeet-tdt-0.6b-v3"
+QWEN3 = {"qwen3-asr-0.6b": "mlx-community/Qwen3-ASR-0.6B-bf16", "qwen3-asr-1.7b": "mlx-community/Qwen3-ASR-1.7B-8bit"}
 
 # (text, voice). No digits, so WER doesn't depend on number formatting.
 QUESTIONS = [
@@ -176,6 +177,11 @@ class Offline:
             cfg = model.preprocessor_config
             # Same call as muse_stt.parakeet_transcriber
             self.fn = lambda a: model.generate(get_logmel(mx.array(a), cfg))[0].text.strip()
+        elif name in QWEN3:  # Qwen3-ASR: not a streaming model, offline only
+            from mlx_audio.stt import load
+
+            model = load(QWEN3[name])
+            self.fn = lambda a: model.generate(mx.array(a), language="English").text.strip()
         else:  # nemotron-offline: default look-ahead [56,13], best offline accuracy
             from mlx_audio.stt import load
 
@@ -292,7 +298,7 @@ class Streaming:
 
 
 def make_engine(name: str, chunk_s: float):
-    return Offline(name) if name in ("parakeet", "nemotron-offline") else Streaming(name, chunk_s)
+    return Offline(name) if name in ("parakeet", "nemotron-offline", *QWEN3) else Streaming(name, chunk_s)
 
 
 # ----------------------------------------------------------------------------- runner
@@ -350,7 +356,8 @@ def summarize(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
-ENGINES = ["parakeet", "nemotron-offline", "nemotron-stream-0", "nemotron-stream-3", "nemotron-stream-6", "parakeet-stream"]
+ENGINES = ["parakeet", "nemotron-offline", "nemotron-stream-0", "nemotron-stream-3", "nemotron-stream-6", "parakeet-stream",
+           "qwen3-asr-0.6b", "qwen3-asr-1.7b"]
 
 
 def main() -> None:
