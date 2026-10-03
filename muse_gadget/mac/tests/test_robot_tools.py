@@ -9,8 +9,10 @@ import asyncio
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 HERE = Path(__file__).resolve().parent
@@ -127,6 +129,12 @@ class FakeMovementManager:
     def clear_move_queue(self):
         self.calls.append(("clear_move_queue",))
 
+    def queue_move(self, move):
+        self.calls.append(("queue_move", time.monotonic()))
+
+    def set_moving_state(self, duration):
+        pass
+
 
 class FakeRobot:
     class media:  # noqa: N801
@@ -197,3 +205,151 @@ def test_no_secret_no_endpoint():
         return server
 
     assert asyncio.run(main()) is None
+
+
+# ------------------------------------------------------------------ talk first, then move
+class FakeBridge:
+    """Muse in one call: runs the given reachy.* commands through the gadget's client, then replies."""
+
+    base_url = "fake"
+
+    def __init__(self, port_of, commands, reply):
+        self.port_of, self.commands, self.reply, self.results = port_of, commands, reply, []
+
+    def health(self):
+        return {"paired": True, "linked": True}
+
+    def turn(self, text):
+        client = load_gadget_robot().RobotTools(url=f"http://127.0.0.1:{self.port_of()}", secret=SECRET, timeout_s=5)
+        self.results += [client.run(c, p) for c, p in self.commands]
+        return self.reply
+
+
+def tone_s(seconds):
+    return lambda text, rate: np.zeros(int(rate * seconds), dtype=np.int16)
+
+
+def held_handler(mm, commands=(), reply="", speech_s=0.0):
+    deps = ToolDependencies(reachy_mini=FakeRobot(), movement_manager=mm)
+    handler = muse_handler.MuseHandler(
+        deps, transcriber=lambda a: "dance for me", synthesizer=tone_s(speech_s),
+        segmenter=UtteranceSegmenter(EnergyVad()), robot_tools_secret=SECRET, robot_tools_port=0,
+    )
+    handler.bridge = FakeBridge(lambda: handler._robot_tools_server.sockets[0].getsockname()[1], list(commands), reply)
+    return handler
+
+
+def run_session(handler, scenario):
+    async def main():
+        startup = asyncio.create_task(handler.start_up())
+        for _ in range(300):
+            if handler._robot_tools_server is not None:
+                break
+            await asyncio.sleep(0.01)
+        try:
+            return await scenario()
+        finally:
+            await handler.shutdown()
+            await asyncio.wait_for(startup, 5)
+    return asyncio.run(main())
+
+
+def moves(mm):
+    return [c for c in mm.calls if c[0] == "queue_move"]
+
+
+def test_moves_are_answered_at_once_but_start_after_the_reply_has_played():
+    mm = FakeMovementManager()
+    handler = held_handler(mm, [("reachy.dance", {"move": "simple_nod"}), ("reachy.dance", {"move": "yeah_nod"})],
+                           reply="Here I go!", speech_s=0.6)
+
+    async def scenario():
+        await handler._run_turn(np.zeros(16000, dtype=np.float32))
+        queued_at, play_end, before = time.monotonic(), handler._play_end, list(moves(mm))
+        await asyncio.sleep(play_end - time.monotonic() + 0.4)
+        return before, play_end, queued_at
+
+    before, play_end, queued_at = run_session(handler, scenario)
+    assert play_end - queued_at > 0.4, "the reply was still playing when the turn returned"
+    results = handler.bridge.results
+    assert [r["payload"]["status"] for r in results] == [muse_handler.HELD_STATUS] * 2
+    assert [r["payload"]["move"] for r in results] == ["simple_nod", "yeah_nod"]
+    assert before == [], "no move while the reply plays"
+    started = moves(mm)
+    assert len(started) == 2 and all(t >= play_end - 0.05 for _, t in started)
+
+
+def test_no_reply_runs_the_moves_at_turn_end():
+    mm = FakeMovementManager()
+    handler = held_handler(mm, [("reachy.dance", {"move": "simple_nod"})], reply="")
+
+    async def scenario():
+        await handler._run_turn(np.zeros(16000, dtype=np.float32))
+        await asyncio.sleep(0.3)
+
+    run_session(handler, scenario)
+    assert len(moves(mm)) == 1
+
+
+def test_stop_move_runs_at_once_and_drops_held_moves():
+    mm = FakeMovementManager()
+    handler = held_handler(mm, [("reachy.dance", {"move": "simple_nod"}), ("reachy.stop_move", {})],
+                           reply="Okay, stopping.", speech_s=0.2)
+
+    async def scenario():
+        await handler._run_turn(np.zeros(16000, dtype=np.float32))
+        await asyncio.sleep(0.6)
+
+    run_session(handler, scenario)
+    assert handler.bridge.results[1] == {"ok": True, "payload": {"status": "stopped dance and cleared queue"}}
+    assert mm.calls == [("clear_move_queue",)], "the held dance never ran"
+
+
+def test_head_tracking_is_not_held():
+    mm = FakeMovementManager()
+    handler = held_handler(mm, [("reachy.head_tracking", {"enabled": True})], reply="Watching you.", speech_s=1.0)
+
+    async def scenario():
+        await handler._run_turn(np.zeros(16000, dtype=np.float32))
+        return list(mm.calls)
+
+    assert run_session(handler, scenario) == [("set_head_tracking", True)]
+
+
+def test_a_held_move_never_waits_past_the_cap(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(muse_handler, "HOLD_CAP_S", 0.3)
+    mm = FakeMovementManager()
+    handler = held_handler(mm)
+
+    async def scenario():   # a call with no turn to release it
+        called = time.monotonic()
+        await handler._dispatch_robot_tool("dance", {"move": "simple_nod"})
+        await asyncio.sleep(0.15)
+        early = list(moves(mm))
+        await asyncio.sleep(0.5)
+        return called, early
+
+    called, early = run_session(handler, scenario)
+    assert early == []
+    started = moves(mm)
+    assert len(started) == 1 and started[0][1] - called >= 0.29
+    assert "held dance starts" in caplog.text and "(cap)" in caplog.text
+
+
+def test_held_moves_are_dropped_on_shutdown_and_a_new_turn(monkeypatch):
+    monkeypatch.setattr(muse_handler, "HOLD_CAP_S", 0.2)
+    mm = FakeMovementManager()
+    handler = held_handler(mm)
+
+    async def scenario():
+        await handler._dispatch_robot_tool("dance", {"move": "simple_nod"})
+        handler._drop_held("new turn")
+        await handler._dispatch_robot_tool("dance", {"move": "yeah_nod"})
+
+    run_session(handler, scenario)   # shuts down right away, before the cap
+
+    async def after():
+        await asyncio.sleep(0.4)
+    asyncio.run(after())
+    assert moves(mm) == []

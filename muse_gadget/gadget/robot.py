@@ -60,13 +60,17 @@ def _param(type_: str, description: str, enum: tuple[str, ...] | None = None) ->
     return spec
 
 
+# The robot speaks your reply first, then moves (see MuseHandler.HELD_TOOLS).
+_AFTER_SPEAKING = ("The move starts after the robot has spoken your reply, so describe it as about "
+                   "to happen, not as done.")
+
 # command -> (Pollen tool, spec)
 COMMANDS: dict[str, tuple[str, dict]] = {
     "reachy.emotion": ("play_emotion", {
         "description": (
             "Make the robot body show an emotion with one of Pollen's recorded moves (a few "
             "seconds). Use it when a feeling fits your answer, or when asked to show one "
-            "(e.g. 'show me you're happy')."
+            "(e.g. 'show me you're happy'). " + _AFTER_SPEAKING
         ),
         "required": {"emotion": _param("string", "Emotion to show. One of: " + ", ".join(EMOTIONS) + ".", EMOTIONS)},
         "optional": {},
@@ -75,7 +79,7 @@ COMMANDS: dict[str, tuple[str, dict]] = {
     "reachy.dance": ("dance", {
         "description": (
             "Make the robot dance one of Pollen's dance moves (head and antennas). Use it when "
-            "asked to dance or to celebrate. Omit move for a random one."
+            "asked to dance or to celebrate. Omit move for a random one. " + _AFTER_SPEAKING
         ),
         "required": {},
         "optional": {"move": _param("string", "Dance move. One of: " + ", ".join(DANCES) + ".", DANCES)},
@@ -88,7 +92,8 @@ COMMANDS: dict[str, tuple[str, dict]] = {
         "timeout_ms": _TIMEOUT_MS,
     }),
     "reachy.look": ("move_head", {
-        "description": "Turn the robot's head to look left, right, up, down, or back to the front. Use it when asked to look somewhere.",
+        "description": "Turn the robot's head to look left, right, up, down, or back to the front. Use it when asked to look somewhere. "
+                       + _AFTER_SPEAKING,
         "required": {"direction": _param("string", "One of: left, right, up, down, front.", DIRECTIONS)},
         "optional": {},
         "timeout_ms": _TIMEOUT_MS,

@@ -59,6 +59,13 @@ Synthesizer = Callable[[str, int], np.ndarray]  # (text, sample_rate) -> int16 m
 FRAME_S = 0.2  # seconds of reply audio per output_queue item
 TAIL_S = 0.6  # keep the mic closed this long after the reply should have finished playing
 DEFAULT_VOICE = "system"
+# Talk first, then move: Muse's move calls are answered at once (so its turn never waits on the
+# robot), but the move itself waits until the turn's reply has finished playing. It runs at turn
+# end if nothing is spoken, and never later than HOLD_CAP_S after the call.
+HELD_TOOLS = frozenset({"dance", "play_emotion", "move_head"})
+STOP_TOOLS = frozenset({"stop_dance", "stop_emotion"})  # run at once and drop the held moves
+HOLD_CAP_S = 20.0
+HELD_STATUS = "will start after I finish speaking"
 
 
 class CallableTts:
@@ -110,6 +117,10 @@ class MuseHandler(ConversationHandler):
         self._tool_waiters: dict[str, asyncio.Future] = {}
         self._turn_tools: Counter[str] = Counter()  # robot tool calls in the current turn (names only)
         self._turn_tool_s = 0.0  # their total time, start to result
+        self._held: list[tuple[str, dict, float, float]] = []  # (tool, args, called at, cap), in call order
+        self._release_at: Optional[float] = None  # monotonic time the held moves may start (None: not yet)
+        self._held_changed = asyncio.Event()
+        self._held_task: Optional[asyncio.Task[None]] = None
         self.output_queue: asyncio.Queue[Any] = asyncio.Queue()
         self.connection: Optional[str] = None  # LocalStream reads this to show "connected"
         self.bridge = bridge or BridgeClient()
@@ -300,6 +311,8 @@ class MuseHandler(ConversationHandler):
         await self._transcript("user", text)
         self._turn_tools.clear()
         self._turn_tool_s = 0.0
+        self._drop_held("new turn")
+        self._release_at = None  # this turn's moves wait for its reply
         try:
             reply = await asyncio.to_thread(self.bridge.turn, text)
         except BridgeError as e:
@@ -307,7 +320,10 @@ class MuseHandler(ConversationHandler):
             reply = spoken_error(e)
         self._log_turn_tools()
         logger.info("MuseHandler: reply %d chars after %.0f ms", len(reply), (time.perf_counter() - started) * 1000)
-        await self._speak(reply)
+        try:
+            await self._speak(reply)
+        finally:  # all of the reply is queued now; with no reply, _play_end is already past
+            self._release_held(max(self._play_end, time.monotonic()))
 
     async def _speak(self, text: str) -> None:
         text = text.strip()
@@ -369,6 +385,10 @@ class MuseHandler(ConversationHandler):
             await self.tool_manager.shutdown()
 
     async def _stop_robot_tools(self) -> None:
+        self._drop_held("shutdown")
+        task, self._held_task = self._held_task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
         server, self._robot_tools_server = self._robot_tools_server, None
         if server is None:
             return
@@ -395,10 +415,59 @@ class MuseHandler(ConversationHandler):
         """Run one of Pollen's tools through the tool manager, as the HF backend does, and wait for it."""
         started = time.perf_counter()
         try:
+            if tool in HELD_TOOLS:
+                self._hold(tool, args)
+                return {"status": HELD_STATUS, **args}
+            if tool in STOP_TOOLS:
+                self._drop_held(tool)
             return await self._run_robot_tool(tool, args)
         finally:
             self._turn_tools[tool] += 1
             self._turn_tool_s += time.perf_counter() - started
+
+    # ------------------------------------------------------------------ held moves (talk first, then move)
+    def _hold(self, tool: str, args: dict) -> None:
+        now = time.monotonic()
+        self._held.append((tool, dict(args), now, now + HOLD_CAP_S))
+        if self._held_task is None or self._held_task.done():
+            self._held_task = asyncio.create_task(self._run_held(), name="muse-held-moves")
+        self._held_changed.set()
+
+    def _release_held(self, at: float) -> None:
+        self._release_at = at
+        self._held_changed.set()
+
+    def _drop_held(self, reason: str) -> None:
+        if self._held:
+            logger.info("MuseHandler: dropped %d held move(s) (%s)", len(self._held), reason)
+            self._held.clear()
+        self._held_changed.set()
+
+    async def _run_held(self) -> None:
+        """Start the held moves in call order once the reply has played, or each at its cap."""
+        while self._held:
+            now = time.monotonic()
+            released = self._release_at is not None and now >= self._release_at
+            if released or self._held[0][3] <= now:
+                tool, args, called, _ = self._held.pop(0)
+                if not self._is_connected():  # the session is going down: never move after that
+                    self._held.clear()
+                    return
+                logger.info("MuseHandler: held %s starts %.0f ms after the call (%s)", tool,
+                            (now - called) * 1000, "reply played" if released else "cap")
+                try:
+                    await self._run_robot_tool(tool, args)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning("MuseHandler: held %s failed: %s", tool, type(e).__name__)
+                continue
+            target = self._held[0][3] if self._release_at is None else min(self._release_at, self._held[0][3])
+            self._held_changed.clear()
+            try:
+                await asyncio.wait_for(self._held_changed.wait(), max(0.0, target - now))
+            except asyncio.TimeoutError:
+                pass
 
     async def _run_robot_tool(self, tool: str, args: dict) -> dict:
         call_id = f"muse-{uuid.uuid4().hex[:12]}"
