@@ -112,6 +112,7 @@ class MuseHandler(ConversationHandler):
         self.bridge = bridge or BridgeClient()
         self.transcriber = transcriber
         self.stt_engine = "injected" if transcriber else None
+        self._owns_stt = False  # loaded by start_up (so a worker process is closed by shutdown)
         self._startup_voice = None if startup_voice in (None, "", DEFAULT_VOICE) else startup_voice
         self.tts: Optional[Tts] = tts or (CallableTts(synthesizer) if synthesizer else None)
         self._owns_tts = False  # loaded by start_up (so closed by shutdown)
@@ -170,6 +171,7 @@ class MuseHandler(ConversationHandler):
         for result in await asyncio.gather(*loads):
             if isinstance(result, tuple):
                 self.stt_engine, self.transcriber = result
+                self._owns_stt = True
             else:
                 self.tts, self._owns_tts = result, True
         assert self.tts is not None
@@ -212,6 +214,10 @@ class MuseHandler(ConversationHandler):
                 self.output_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        close_stt = getattr(self.transcriber, "close", None) if self._owns_stt else None
+        if close_stt is not None:  # the Qwen3-ASR worker; not while a clip is being transcribed
+            self._owns_stt = False
+            await asyncio.get_running_loop().run_in_executor(self._stt_thread, close_stt)
         if self._owns_tts and self.tts is not None:
             tts, self.tts, self._owns_tts = self.tts, None, False
             async with self._speak_lock:  # not while a sentence is being rendered

@@ -12,6 +12,9 @@
 #            --instruct TEXT (qwen3's style instruction: how to say it, never what to say; default
 #            "playful and cheeky, like a friendly cartoon robot"; "" for none), --volume N (robot
 #            speaker 0-100, default 100; the daemon plays a short test sound when it's set),
+#            --stt parakeet|qwen3-asr|whisper (speech-to-text engine, default parakeet; qwen3-asr falls
+#            back to parakeet if it can't load), --stt-model ID (qwen3-asr: 0.6b (default) or 1.7b,
+#            or a model repo id; parakeet/whisper: a model repo id),
 #            --style-hint (opt in: put the bridge's short "spoken by a desk robot" note before
 #            your words; by default Muse gets your words only),
 #            -- <extra conversation-app args>
@@ -35,7 +38,7 @@ set -uo pipefail
 HOST=reachy-mac
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 LOGDIR="${MUSE_POC_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/muse-poc}"   # outside the repo
-fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=qwen3; voice=; instruct=; instruct_set=0; volume=100; style_hint=0; app_args=()
+fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=qwen3; voice=; instruct=; instruct_set=0; volume=100; style_hint=0; stt=parakeet; stt_model=; app_args=()
 while [ $# -gt 0 ]; do
     case $1 in
         --fake-bridge) fake=1; shift ;;
@@ -47,14 +50,18 @@ while [ $# -gt 0 ]; do
         --voice) voice=$2; shift 2 ;;
         --instruct) instruct=$2; instruct_set=1; shift 2 ;;
         --volume) volume=$2; shift 2 ;;
+        --stt) stt=$2; shift 2 ;;
+        --stt-model) stt_model=$2; shift 2 ;;
         --style-hint) style_hint=1; shift ;;
         --no-style-hint) style_hint=0; shift ;;   # the default; still accepted
         --) shift; app_args=("$@"); break ;;
-        -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
         *) echo "run_poc: unknown option $1" >&2; exit 2 ;;
     esac
 done
 case $tts in qwen3|kokoro|say) ;; *) echo "run_poc: --tts must be qwen3, kokoro or say" >&2; exit 2 ;; esac
+case $stt in parakeet|qwen3-asr|whisper) ;; *) echo "run_poc: --stt must be parakeet, qwen3-asr or whisper" >&2; exit 2 ;; esac
+case $stt_model in *[!A-Za-z0-9._/-]*) echo "run_poc: unsupported --stt-model: $stt_model" >&2; exit 2 ;; esac
 case $instruct in *[!A-Za-z0-9\ ,.\'!?-]*) echo "run_poc: --instruct may only use letters, digits, spaces and , . ' ! ? -" >&2; exit 2 ;; esac
 [ "${#instruct}" -le 200 ] || { echo "run_poc: --instruct is longer than 200 characters" >&2; exit 2; }
 case $volume in ''|*[!0-9]*) echo "run_poc: --volume must be 0-100" >&2; exit 2 ;; esac
@@ -276,7 +283,7 @@ rsh "curl -s -m 10 -X POST -H 'Content-Type: application/json' -d '{\"volume\":$
 http://127.0.0.1:8000/api/volume/set" >/dev/null
 log "speaker volume: before ${vol_before:-?}, after $(vol_now) (asked $volume)"
 
-tts_env="-e MUSE_TTS=$tts -e MUSE_TTS_VOICE=$voice"
+tts_env="-e MUSE_TTS=$tts -e MUSE_TTS_VOICE=$voice -e MUSE_STT=$stt -e MUSE_STT_MODEL=$stt_model"
 if [ "$instruct_set" = 1 ]; then
     rsh_sh "$RUN" "$instruct" <<'EOF' || { log "could not write the TTS instruction on $HOST"; exit 1; }
 umask 077; mkdir -p "$HOME/assistant-edge/muse-app/run"
@@ -284,7 +291,7 @@ printf '%s\n' "$2" > "$HOME/assistant-edge/muse-app/run/tts-instruct.$1.txt"
 EOF
     tts_env="$tts_env -e MUSE_TTS_INSTRUCT_FILE=$INSTRUCT_FILE"
 fi
-log "starting the conversation app with MuseHandler (tts $tts)"
+log "starting the conversation app with MuseHandler (tts $tts, stt $stt${stt_model:+ $stt_model})"
 start_job app "-e HF_HOME=~/assistant-edge/muse-app/hf -e HF_HUB_OFFLINE=1 -e MUSE_BRIDGE_URL=http://127.0.0.1:48080 -e MUSE_MIC_LOG='$mic_log' -e MUSE_LOG_TRANSCRIPTS=$log_transcripts \
 $tts_env -e MUSE_ROBOT_TOOLS_SECRET_FILE=$TOOLS_FILE -e MUSE_ROBOT_TOOLS_PORT=$TOOLS_PORT \
 -- $M/mac/exec_python.py $M/app/.venv/bin/python $M/mac/run_app.py --no-camera ${app_args[*]:-}"

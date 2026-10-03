@@ -301,6 +301,7 @@ utterance), then local speech-to-text (parakeet-mlx, with mlx-whisper as the fal
 `POST /turn` on the bridge at the Mac's `127.0.0.1:48080`. Muse's reply is spoken with Qwen3-TTS
 (MLX, on the Mac; Kokoro-82M and then macOS `say` are the fallbacks) on the robot's speaker, and Pollen's wobbler moves
 the head while it plays.
+`run_poc.sh --stt qwen3-asr [--stt-model 0.6b|1.7b]` uses Qwen3-ASR instead of parakeet (a worker in the Kokoro venv, falling back to parakeet if it can't load); `--stt whisper` uses mlx-whisper.
 It's half-duplex: the mic is ignored while a turn is being transcribed, sent or spoken. There's no
 wake word, so anything said near the robot becomes a turn.
 
