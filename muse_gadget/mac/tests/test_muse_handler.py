@@ -289,3 +289,55 @@ def test_exec_python_drops_the_trampoline_venvs_paths():
         env=env, capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert out == "/keep/me|unset"
+
+
+class FakeWorker:
+    """Stands in for a loaded STT/TTS worker: a real child process that close() stops."""
+
+    name = "fake"
+    voice = None
+
+    def __init__(self) -> None:
+        self.proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+    def __call__(self, audio):
+        return ""
+
+    def voices(self):
+        return []
+
+    def close(self) -> None:
+        self.proc.terminate()
+        self.proc.wait(5)
+
+
+@pytest.mark.parametrize("failing", ["tts", "stt"])
+def test_start_up_closes_the_loaded_worker_when_the_other_fails(monkeypatch, failing):
+    import muse_stt
+    import muse_tts
+
+    started: list[FakeWorker] = []
+
+    def load_stt():
+        if failing == "stt":
+            raise RuntimeError("stt failed to load")
+        w = FakeWorker()
+        started.append(w)
+        return "fake-stt", w
+
+    def load_tts():
+        if failing == "tts":
+            raise RuntimeError("tts failed to load")
+        w = FakeWorker()
+        started.append(w)
+        return w
+
+    monkeypatch.setattr(muse_stt, "make_transcriber", load_stt)
+    monkeypatch.setattr(muse_tts, "make_tts", load_tts)
+    handler = muse_handler.MuseHandler(FakeDeps(), bridge=BridgeClient("http://127.0.0.1:9"),
+                                       segmenter=UtteranceSegmenter(EnergyVad()))
+    with pytest.raises(RuntimeError, match=f"{failing} failed"):
+        asyncio.run(handler.start_up())
+    assert len(started) == 1
+    assert started[0].proc.poll() is not None, "the worker that did load was stopped"
+    assert not handler._owns_stt and not handler._owns_tts

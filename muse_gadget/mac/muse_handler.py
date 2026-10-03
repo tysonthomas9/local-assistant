@@ -168,12 +168,19 @@ class MuseHandler(ConversationHandler):
 
             loads.append(asyncio.to_thread(make_tts))
         started = time.perf_counter()
-        for result in await asyncio.gather(*loads):
+        results = await asyncio.gather(*loads, return_exceptions=True)
+        for result in results:  # own whatever loaded, even if the other one failed
+            if isinstance(result, BaseException):
+                continue
             if isinstance(result, tuple):
                 self.stt_engine, self.transcriber = result
                 self._owns_stt = True
             else:
                 self.tts, self._owns_tts = result, True
+        failed = next((r for r in results if isinstance(r, BaseException)), None)
+        if failed is not None:  # don't leave a worker process behind for the app's retry to pile up
+            await self._close_loaded()
+            raise failed
         assert self.tts is not None
         if self._startup_voice and self._startup_voice in self.tts.voices():
             self.tts.voice = self._startup_voice
@@ -214,10 +221,15 @@ class MuseHandler(ConversationHandler):
                 self.output_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        close_stt = getattr(self.transcriber, "close", None) if self._owns_stt else None
-        if close_stt is not None:  # the Qwen3-ASR worker; not while a clip is being transcribed
-            self._owns_stt = False
-            await asyncio.get_running_loop().run_in_executor(self._stt_thread, close_stt)
+        await self._close_loaded()
+
+    async def _close_loaded(self) -> None:
+        """Close the STT and TTS that start_up loaded (their worker processes), if any."""
+        if self._owns_stt:  # the Qwen3-ASR worker; not while a clip is being transcribed
+            stt, self._owns_stt = self.transcriber, False
+            close_stt = getattr(stt, "close", None)
+            if close_stt is not None:
+                await asyncio.get_running_loop().run_in_executor(self._stt_thread, close_stt)
         if self._owns_tts and self.tts is not None:
             tts, self.tts, self._owns_tts = self.tts, None, False
             async with self._speak_lock:  # not while a sentence is being rendered
