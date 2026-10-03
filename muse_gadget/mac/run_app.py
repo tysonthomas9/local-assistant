@@ -1,6 +1,9 @@
 """Run Pollen's conversation app (pinned, unmodified) with MuseHandler as its backend.
 
-    python run_app.py [--log-transcripts] [app args, e.g. --no-camera --debug]
+    python run_app.py [--log-transcripts] [--tts kokoro|say] [--voice NAME] [app args, e.g. --no-camera --debug]
+
+--tts picks the reply voice engine (MUSE_TTS; default kokoro, which falls back to macOS `say` if
+it can't load) and --voice its voice (MUSE_TTS_VOICE; Kokoro default af_heart). See muse_tts.py.
 
 --log-transcripts (debugging only) lets the app log each turn's text (`role=... content=...`);
 by default MuseHandler doesn't hand the text to the app's logger at all.
@@ -48,10 +51,27 @@ def install() -> None:
     uvicorn.Config.__init__ = config_init_on_loopback  # type: ignore[method-assign]
 
 
+def take_own_flags(argv: list[str]) -> list[str]:
+    """Strip our flags from argv (the app would reject them) and set their env vars."""
+    rest: list[str] = []
+    it = iter(argv)
+    for a in it:
+        if a == "--log-transcripts":
+            os.environ["MUSE_LOG_TRANSCRIPTS"] = "1"
+        elif a in ("--tts", "--voice"):
+            value = next(it, "")
+            if not value:
+                raise SystemExit(f"run_app: {a} needs a value")
+            if a == "--tts" and value not in ("kokoro", "say"):
+                raise SystemExit("run_app: --tts must be kokoro or say")
+            os.environ["MUSE_TTS" if a == "--tts" else "MUSE_TTS_VOICE"] = value
+        else:
+            rest.append(a)
+    return rest
+
+
 def main() -> int:
-    if "--log-transcripts" in sys.argv[1:]:
-        sys.argv = [a for a in sys.argv if a != "--log-transcripts"]
-        os.environ["MUSE_LOG_TRANSCRIPTS"] = "1"
+    sys.argv = take_own_flags(sys.argv)
     install()
     from reachy_mini_conversation_app.main import main as app_main
 

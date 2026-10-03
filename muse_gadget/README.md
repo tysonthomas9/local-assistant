@@ -248,8 +248,9 @@ listener is Podman's `gvproxy` on `127.0.0.1:48080`.
 Pollen's conversation app (pinned at `f58523b`, unmodified) runs on the Mac inside Reachy
 Edge.app, with `MuseHandler` (`mac/`) as its backend: the robot's mic, then Silero VAD (one
 utterance), then local speech-to-text (parakeet-mlx, with mlx-whisper as the fallback), then
-`POST /turn` on the bridge at the Mac's `127.0.0.1:48080`. Muse's reply is rendered with macOS
-`say` and played on the robot's speaker, and Pollen's wobbler moves the head while it plays.
+`POST /turn` on the bridge at the Mac's `127.0.0.1:48080`. Muse's reply is spoken with Kokoro-82M
+(MLX, on the Mac; macOS `say` is the fallback) on the robot's speaker, and Pollen's wobbler moves
+the head while it plays.
 It's half-duplex: the mic is ignored while a turn is being transcribed, sent or spoken. There's no
 wake word, so anything said near the robot becomes a turn.
 
@@ -259,7 +260,7 @@ Run it from the PC:
 muse_gadget/run_poc.sh                  # real Muse gadget (mac_gadget.sh start/stop)
 muse_gadget/run_poc.sh --fake-bridge    # echo bridge: the robot answers "You said: ..."
 # options: --duration SECONDS, --lock-timeout SECONDS, --mic-log SECONDS, --log-transcripts,
-#          -- <app args>
+#          --tts kokoro|say, --voice NAME, -- <app args>
 ```
 
 In order, it:
@@ -268,7 +269,9 @@ In order, it:
 2. copies `mac/` to `~/assistant-edge/muse-app/mac` and runs `mac/install.sh` there. The first
    time, that clones the app, builds its venv from `mac/app-constraints.txt` (the app's `uv.lock`
    pins: the Mac's uv can't read that lock format), and caches the STT model in
-   `muse-app/hf`. Later runs only validate;
+   `muse-app/hf`. It also builds the Kokoro venv `muse-app/kokoro/.venv` from
+   `mac/kokoro-constraints.txt` and caches the Kokoro model (about 1.4 GB in all); if that
+   fails, the run goes on with `say`. Later runs only validate;
 3. starts the bridge: `mac_gadget.sh start`, or `mac/fake_bridge.py` with `--fake-bridge`;
 4. starts the daemon (`mac/run_daemon.py`: API, WebRTC signalling and mDNS all kept on loopback),
    then the app (`mac/run_app.py`), both inside Reachy Edge.app via `edge_app_run.sh`.
@@ -286,8 +289,20 @@ Details:
   `mac/exec_python.py` swaps that process for the daemon's or the app's own Python, so the app
   is still responsible for the mic. It first removes that venv's GStreamer environment
   variables.
-- Reply audio is rendered at the speaker's rate (16 kHz), not 24 kHz, because the app pushes
-  frames to the speaker without resampling.
+- **Voice (`--tts`, `--voice`)**: Kokoro-82M (`mlx-community/Kokoro-82M-bf16`, pinned) runs
+  as a worker process (`mac/kokoro_worker.py`) in its own venv, because mlx-audio needs torch
+  and spaCy versions that don't fit the app's pinned venv. It loads once per app start (about
+  2.5 s, offline from `muse-app/hf`) and warms up on a short phrase. A reply is split into
+  sentences; each is rendered, trimmed of Kokoro's ~0.3 s of leading silence, resampled from 24 kHz
+  to the speaker's rate (16 kHz; the app pushes frames to the speaker without resampling), and
+  queued right away, so the robot starts talking after the first sentence. The default voice
+  is `af_heart` (Kokoro's best-rated English voice: warm and clear, which suits a friendly
+  robot); `--voice am_michael` is a good male voice, and `mac/muse_tts.py` lists the rest. If
+  Kokoro can't load, the run uses `say`; if it fails during a reply, `say` speaks the rest of
+  that reply. `--tts say` (with `--voice <macOS voice>`) uses `say` only.
+- Measured on the M4 (warm, no robot): Kokoro's first audio comes about 175 ms after the reply
+  text arrives (1, 2 or 4 sentences), and it renders about 10× faster than real time.
+  `say` takes about 530–610 ms, because it renders the whole reply before any of it plays.
 - Speaking or listening needs nobody at the Mac, once Reachy Edge has its microphone grant.
 - **What's logged where (no transcripts by default):** prompts and replies aren't kept.
   MuseHandler logs only lengths and timings, and it doesn't hand the text to the upstream app's

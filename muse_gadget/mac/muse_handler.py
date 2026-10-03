@@ -3,8 +3,9 @@
 One turn, half-duplex (the POC has no barge-in):
 
     robot mic -> VAD (one utterance) -> local STT on the Mac -> POST /turn on the Muse bridge
-    (127.0.0.1) -> reply text -> macOS `say` -> PCM frames on output_queue -> the app plays them
-    on the robot's speaker and the daemon's wobbler moves the head.
+    (127.0.0.1) -> reply text -> TTS (Kokoro-82M sentence by sentence, or macOS `say`; see
+    muse_tts.py) -> PCM frames on output_queue -> the app plays them on the robot's speaker and
+    the daemon's wobbler moves the head. Playback starts as soon as the first sentence is ready.
 
 While a turn is being transcribed, sent, or spoken, mic input is dropped (XVF3800 echo
 cancellation helps, but the POC doesn't rely on it for turn-taking). Transcripts go to the app
@@ -31,6 +32,7 @@ from reachy_mini_conversation_app.streaming import AdditionalOutputs
 from reachy_mini_conversation_app.tools.background_tool_manager import BackgroundToolManager
 
 from muse_bridge import BridgeClient, BridgeError, spoken_error
+from muse_tts import Tts
 from muse_vad import UtteranceSegmenter, make_vad, to_mono_16k
 
 logger = logging.getLogger(__name__)
@@ -43,17 +45,27 @@ TAIL_S = 0.6  # keep the mic closed this long after the reply should have finish
 DEFAULT_VOICE = "system"
 
 
-def _default_synthesizer(voice_getter: Callable[[], Optional[str]]) -> Synthesizer:
-    def synth(text: str, rate: int) -> np.ndarray:
-        from muse_tts import synthesize
+class CallableTts:
+    """A plain (text, rate) -> PCM function as a one-chunk Tts (the tests' fake engines)."""
 
-        return synthesize(text, rate, voice=voice_getter())
+    name = "injected"
 
-    return synth
+    def __init__(self, synthesizer: Synthesizer) -> None:
+        self.synthesizer = synthesizer
+        self.voice: Optional[str] = None
+
+    def chunks(self, text: str, rate: int):
+        yield self.synthesizer(text, rate)
+
+    def voices(self) -> list[str]:
+        return []
+
+    def close(self) -> None:
+        pass
 
 
 class MuseHandler(ConversationHandler):
-    """Speech in, Muse's reply spoken with macOS `say` out."""
+    """Speech in, Muse's reply spoken (Kokoro or macOS `say`) out."""
 
     def __init__(
         self,
@@ -64,6 +76,7 @@ class MuseHandler(ConversationHandler):
         bridge: Optional[BridgeClient] = None,
         transcriber: Optional[Transcriber] = None,
         synthesizer: Optional[Synthesizer] = None,
+        tts: Optional[Tts] = None,
         segmenter: Optional[UtteranceSegmenter] = None,
         output_sample_rate: Optional[int] = None,
         log_transcripts: Optional[bool] = None,
@@ -77,8 +90,9 @@ class MuseHandler(ConversationHandler):
         self.bridge = bridge or BridgeClient()
         self.transcriber = transcriber
         self.stt_engine = "injected" if transcriber else None
-        self._voice: Optional[str] = None if startup_voice in (None, "", DEFAULT_VOICE) else startup_voice
-        self.synthesizer = synthesizer or _default_synthesizer(lambda: self._voice)
+        self._startup_voice = None if startup_voice in (None, "", DEFAULT_VOICE) else startup_voice
+        self.tts: Optional[Tts] = tts or (CallableTts(synthesizer) if synthesizer else None)
+        self._owns_tts = False  # loaded by start_up (so closed by shutdown)
         self.segmenter = segmenter or UtteranceSegmenter(make_vad())
         self._output_rate = output_sample_rate
         if log_transcripts is None:
@@ -88,6 +102,7 @@ class MuseHandler(ConversationHandler):
         self._busy = False
         self._busy_until = 0.0
         self._speak_lock = asyncio.Lock()
+        self._play_end = 0.0  # when the audio queued so far should have finished playing
         self._stopped: Optional[asyncio.Event] = None
         self._worker: Optional[asyncio.Task[None]] = None
         # MUSE_MIC_LOG=<seconds>: log the mic level and peak VAD score that often (no audio, no text).
@@ -116,13 +131,28 @@ class MuseHandler(ConversationHandler):
         return self._output_rate
 
     async def start_up(self) -> None:
-        """Load STT, then stay 'connected' until shutdown (the app treats a return as a drop)."""
+        """Load STT and TTS, then stay 'connected' until shutdown (the app treats a return as a drop)."""
         self._stopped = asyncio.Event()
+        loads = []
         if self.transcriber is None:
             from muse_stt import make_transcriber
 
-            self.stt_engine, self.transcriber = await asyncio.to_thread(make_transcriber)
-            logger.info("MuseHandler: speech-to-text %s loaded", self.stt_engine)
+            loads.append(asyncio.to_thread(make_transcriber))
+        if self.tts is None:
+            from muse_tts import make_tts
+
+            loads.append(asyncio.to_thread(make_tts))
+        started = time.perf_counter()
+        for result in await asyncio.gather(*loads):
+            if isinstance(result, tuple):
+                self.stt_engine, self.transcriber = result
+            else:
+                self.tts, self._owns_tts = result, True
+        assert self.tts is not None
+        if self._startup_voice and self._startup_voice in self.tts.voices():
+            self.tts.voice = self._startup_voice
+        logger.info("MuseHandler: speech-to-text %s, text-to-speech %s (voice %s) loaded in %.1f s",
+                    self.stt_engine, self.tts.name, self.tts.voice or DEFAULT_VOICE, time.perf_counter() - started)
         try:
             health = await asyncio.to_thread(self.bridge.health)
             logger.info("MuseHandler: bridge %s health %s", self.bridge.base_url, health)
@@ -155,6 +185,10 @@ class MuseHandler(ConversationHandler):
                 self.output_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        if self._owns_tts and self.tts is not None:
+            tts, self.tts, self._owns_tts = self.tts, None, False
+            async with self._speak_lock:  # not while a sentence is being rendered
+                await asyncio.to_thread(tts.close)
 
     # ------------------------------------------------------------------ mic in
     def _listening(self) -> bool:
@@ -227,16 +261,30 @@ class MuseHandler(ConversationHandler):
         text = text.strip()
         if not text:
             return
+        assert self.tts is not None
         async with self._speak_lock:
             rate = self.output_sample_rate()
-            pcm = await asyncio.to_thread(self.synthesizer, text, rate)
-            pcm = np.asarray(pcm, dtype=np.int16).reshape(-1)
-            await self._transcript("assistant", text)
-            step = max(1, int(rate * FRAME_S))
-            for i in range(0, len(pcm), step):
-                await self.output_queue.put((rate, pcm[i : i + step].reshape(1, -1)))
-            self._busy_until = time.monotonic() + len(pcm) / rate + TAIL_S
-            self._mark_activity("assistant_audio")
+            started = time.perf_counter()
+            chunks = self.tts.chunks(text, rate)
+            first = True
+            while True:
+                # One sentence at a time in a thread; frames of the earlier ones are already playing.
+                pcm = await asyncio.to_thread(next, chunks, None)
+                if pcm is None:
+                    break
+                pcm = np.asarray(pcm, dtype=np.int16).reshape(-1)
+                if first:
+                    logger.info("MuseHandler: first audio after %.0f ms (%s)",
+                                (time.perf_counter() - started) * 1000, self.tts.name)
+                    await self._transcript("assistant", text)
+                    first = False
+                step = max(1, int(rate * FRAME_S))
+                for i in range(0, len(pcm), step):
+                    await self.output_queue.put((rate, pcm[i : i + step].reshape(1, -1)))
+                now = time.monotonic()
+                self._play_end = max(self._play_end, now) + len(pcm) / rate
+                self._busy_until = self._play_end + TAIL_S
+                self._mark_activity("assistant_audio")
 
     async def _transcript(self, role: str, text: str) -> None:
         self._emit_transcript(role, text, True)
@@ -246,7 +294,7 @@ class MuseHandler(ConversationHandler):
             await self.output_queue.put(AdditionalOutputs({"role": role, "content": flat}))
 
     async def say(self, text: str) -> None:
-        """Speak `text` verbatim with `say` (no Muse turn)."""
+        """Speak `text` verbatim with the current TTS (no Muse turn)."""
         text = (text or "").strip()
         if not text:
             raise ValueError("say: empty text")
@@ -259,14 +307,21 @@ class MuseHandler(ConversationHandler):
         return "Muse decides how it answers; app personalities don't apply to the Muse backend."
 
     async def get_available_voices(self) -> list[str]:
+        if self.tts is not None and self.tts.voices():
+            return self.tts.voices()
         voices = [DEFAULT_VOICE]
-        if self._voice:
-            voices.append(self._voice)
+        if self.tts is not None and self.tts.voice:
+            voices.append(self.tts.voice)
         return voices
 
     def get_current_voice(self) -> str:
-        return self._voice or DEFAULT_VOICE
+        return (self.tts.voice if self.tts is not None else None) or DEFAULT_VOICE
 
     async def change_voice(self, voice: str) -> str:
-        self._voice = None if voice in ("", DEFAULT_VOICE) else voice
+        if self.tts is None:
+            return "Speech isn't loaded yet."
+        known = self.tts.voices()
+        if known and voice not in known:
+            return f"Unknown voice {voice}; voices: {', '.join(known)}."
+        self.tts.voice = None if voice in ("", DEFAULT_VOICE) else voice
         return f"Voice set to {self.get_current_voice()}."

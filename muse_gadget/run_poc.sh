@@ -7,7 +7,8 @@
 #   options: --duration SECONDS (stop by itself), --lock-timeout SECONDS (default: wait forever),
 #            --mic-log SECONDS (log the mic level and VAD score that often),
 #            --log-transcripts (debugging: show each turn's text on this terminal; the log files
-#            on the PC stay redacted), -- <extra conversation-app args, e.g. --debug>
+#            on the PC stay redacted), --tts kokoro|say (reply voice engine, default kokoro),
+#            --voice NAME (e.g. af_heart, am_michael), -- <extra conversation-app args, e.g. --debug>
 #
 # In order: take the hw-run lock on reachy-mac -> sync MuseHandler + install the pinned app into
 # ~/assistant-edge/muse-app -> start the bridge (Muse gadget container, or the fake one) -> start
@@ -22,7 +23,7 @@ set -uo pipefail
 HOST=reachy-mac
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 LOGDIR="${MUSE_POC_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/muse-poc}"   # outside the repo
-fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; app_args=()
+fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=kokoro; voice=; app_args=()
 while [ $# -gt 0 ]; do
     case $1 in
         --fake-bridge) fake=1; shift ;;
@@ -30,11 +31,15 @@ while [ $# -gt 0 ]; do
         --lock-timeout) lock_timeout=$2; shift 2 ;;
         --mic-log) mic_log=$2; shift 2 ;;
         --log-transcripts) log_transcripts=1; shift ;;
+        --tts) tts=$2; shift 2 ;;
+        --voice) voice=$2; shift 2 ;;
         --) shift; app_args=("$@"); break ;;
-        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
         *) echo "run_poc: unknown option $1" >&2; exit 2 ;;
     esac
 done
+case $tts in kokoro|say) ;; *) echo "run_poc: --tts must be kokoro or say" >&2; exit 2 ;; esac
+case $voice in *[!A-Za-z0-9_]*) echo "run_poc: unsupported voice name: $voice" >&2; exit 2 ;; esac
 for a in "${app_args[@]}"; do
     case $a in *[!A-Za-z0-9._=-]*) echo "run_poc: unsupported app argument: $a" >&2; exit 2 ;; esac
 done
@@ -186,7 +191,7 @@ locked=1
 
 # ------------------------------------------------------------------ 1. sync + install the app
 log "syncing MuseHandler and installing the pinned app on $HOST"
-(cd "$ROOT/mac" && tar -cf - *.py install.sh app-constraints.txt) \
+(cd "$ROOT/mac" && tar -cf - *.py install.sh app-constraints.txt kokoro-constraints.txt) \
     | rsh "mkdir -p $M/mac $M/run && tar -xf - -C $M/mac" || exit 1
 rsh 'bash -s' < "$ROOT/mac/install.sh" 2>&1 | scrub
 [ "${PIPESTATUS[0]}" = 0 ] || { log "install failed"; exit 1; }
@@ -232,6 +237,7 @@ log "daemon running"
 
 log "starting the conversation app with MuseHandler"
 start_job app "-e HF_HOME=~/assistant-edge/muse-app/hf -e HF_HUB_OFFLINE=1 -e MUSE_BRIDGE_URL=http://127.0.0.1:48080 -e MUSE_MIC_LOG=$mic_log -e MUSE_LOG_TRANSCRIPTS=$log_transcripts \
+-e MUSE_TTS=$tts -e MUSE_TTS_VOICE=$voice \
 -- $M/mac/exec_python.py $M/app/.venv/bin/python $M/mac/run_app.py --no-camera ${app_args[*]:-}"
 app_ssh=${pids[-1]}
 
