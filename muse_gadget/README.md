@@ -260,7 +260,7 @@ Run it from the PC:
 muse_gadget/run_poc.sh                  # real Muse gadget (mac_gadget.sh start/stop)
 muse_gadget/run_poc.sh --fake-bridge    # echo bridge: the robot answers "You said: ..."
 # options: --duration SECONDS, --lock-timeout SECONDS, --mic-log SECONDS, --log-transcripts,
-#          --tts kokoro|say, --voice NAME, -- <app args>
+#          --tts kokoro|say, --voice NAME, --volume N (default 25), -- <app args>
 ```
 
 In order, it:
@@ -279,7 +279,8 @@ In order, it:
 On exit, an error or Ctrl-C, it stops the app, puts the robot to sleep (`goto_sleep`), turns
 the motors off, then stops the daemon, unloads this run's `com.assistant.reachy-edge.*` jobs,
 stops the bridge and releases the lock. It refuses to start if a daemon or bridge it didn't start
-is already running, and it never changes the speaker volume (65).
+is already running. Once the daemon is up it sets the robot's speaker volume to `--volume`
+(default 25; the daemon plays a short test sound) and logs the value before and after.
 
 Details:
 - `mac/run_app.py` swaps `MuseHandler` in for `HuggingFaceRealtimeHandler` in the app's
