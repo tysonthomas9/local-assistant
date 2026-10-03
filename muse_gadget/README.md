@@ -6,16 +6,28 @@ Linux Device SDK ([muse-gadget-sdk](https://github.com/facebookincubator/muse-ga
 robot's conversation app sends the text of what you said to the bridge, and
 the bridge returns Muse's reply as text.
 
-```
-PC (once)                         reachy-mac (every run)
----------                         ----------------------
-pair_on_pc.sh                     mac_gadget.sh start
-  Docker + host BlueZ               Podman (podman-machine-default)
-  musegadget pair  <-- BLE -->        muse-gadget container
-  Muse phone app                        gadget link  <== encrypted ==> Muse
-        |                               /turn bridge on 127.0.0.1:48080
+```text
+PC (once)                         reachy-mac (every run; all ports on 127.0.0.1)
+---------                         -----------------------------------------------
+pair_on_pc.sh                     Pollen's conversation app (Reachy Edge.app), backend MuseHandler:
+  Docker + host BlueZ               robot mic -> Silero VAD -> STT (Qwen3-ASR 0.6B;
+  musegadget pair  <-- BLE -->        parakeet, whisper)
+  Muse phone app                      -> POST /turn {"text"} ---------------------+
+        |                             <- {"reply"} -> TTS (Qwen3-TTS 1.7B, Aiden; |
+        |                                Kokoro, say) -> robot speaker            |
+        |                                                                         v
+        |                         Podman (podman-machine-default)
+        |                           muse-gadget container
+        |                             /turn bridge on 127.0.0.1:48080
+        |                             gadget link  <== encrypted ==>  Muse
+        |                             client.invoke reachy.* --+
+        |                                                      | POST /tool + run secret
+        |                                                      v (host.containers.internal)
+        |                         MuseHandler's robot-tools endpoint 127.0.0.1:48081
+        |                           -> Pollen's tools -> daemon :8000 -> robot motors
+        |
         +-- state files, copied once -->  ~/assistant-edge/muse-state
-            then deleted from the PC   Pollen app (Reachy Edge.app) --POST /turn-->
+            then deleted from the PC
 ```
 
 - **Pairing runs once, on the PC.** The SDK pairs over Bluetooth LE through
@@ -33,8 +45,9 @@ same as on `main`; only the brain differs. `main` keeps the fully local brain.
 
 - **Long-lived.** This branch is never merged into `main`.
 - **Shared fixes come from `main`.** Now and then, merge `main` into this
-  branch. If the top-level README conflicts, keep this branch's
-  "Branches / brains" note.
+  branch. If the top-level `README.md` conflicts, resolve it by keeping
+  this branch's README (`git checkout --ours README.md`): it describes the
+  Muse brain, while `main`'s describes the local one.
 - **Muse-specific code stays in `muse_gadget/`.**
 - **Nothing here is PR'd into `main`.** A fix that both brains need goes to
   `main` first, then comes here with the next merge.
@@ -62,7 +75,7 @@ same as on `main`; only the brain differs. `main` keeps the fully local brain.
 | `POST /turn`, JSON `{"text": "..."}` | 200 `{"reply": "..."}` |
 | not paired yet | 503 `{"error": "not_paired"}` |
 | paired, but the link to Muse is down | 503 `{"error": "link_down"}` |
-| no reply within 60 s | 504 `{"error": "timeout"}` |
+| no reply text within 60 s | 504 `{"error": "timeout"}` (with some text, 200 with the text so far) |
 | Muse refused the message | 502 `{"error": "muse_error"}` |
 | body that isn't JSON (audio included) | 415 `{"error": "unsupported_media_type"}` |
 | JSON without `text` | 400 `{"error": "bad_request"}` |
@@ -198,6 +211,7 @@ Run these from the PC:
 ```bash
 muse_gadget/mac_gadget.sh start    # idempotent
 muse_gadget/mac_gadget.sh status   # machine, container, /health, who listens on 48080
+muse_gadget/mac_gadget.sh logs     # the container's log (names, ids and timings, no text)
 muse_gadget/mac_gadget.sh stop
 ```
 
@@ -253,7 +267,8 @@ Pollen's own app tools, so the robot only ever plays Pollen's moves:
   above (no volume, camera, sleep, memory or web tools) and only those status topics (no Wi-Fi
   address or account). There's no camera or photo command.
 - **Log**: the app log has one line per call, `robot tool <name> -> <result>` (no transcript
-  text); the gadget logs `robot command <name> -> ok|error`.
+  text), and one line per turn with the number of robot tool calls, their names and the total
+  tool time; the gadget logs `robot command <name> -> ok|error`.
 
 ### Robot tools by voice
 
@@ -325,6 +340,7 @@ muse_gadget/run_poc.sh                  # real Muse gadget (mac_gadget.sh start/
 muse_gadget/run_poc.sh --fake-bridge    # echo bridge: the robot answers "You said: ..."
 # options: --duration SECONDS, --lock-timeout SECONDS, --mic-log SECONDS, --log-transcripts,
 #          --tts qwen3|kokoro|say, --voice NAME, --instruct TEXT, --volume N (default 100),
+#          --stt qwen3-asr|parakeet|whisper, --stt-model ID, --style-hint,
 #          -- <app args>
 ```
 
@@ -399,8 +415,9 @@ Details:
   transcript push (`_emit_transcript`). On the Mac, each job's output goes to
   `~/assistant-edge/run/<job>/out.log`, which `run_poc.sh` deletes when the job stops. On the PC,
   each run's daemon and app output is in `~/.local/state/muse-poc/<run>.{daemon,app}.log`
-  (`MUSE_POC_LOGDIR`, outside the repo), with home paths shown as `~` and any `content=...`
-  redacted. The fake bridge logs only turn lengths.
+  (`MUSE_POC_LOGDIR`, outside the repo), with home paths shown as `~` and any `content=...` or
+  `text=...` redacted. Before the gadget container is removed, `run_poc.sh` saves its log the
+  same way to `<run>.gadget.log`. The fake bridge logs only turn lengths.
 - **`--log-transcripts`** (debugging only) lets the app log each turn's text. `run_poc.sh` then
   shows it on your terminal, but the log files on the PC stay redacted. The Mac's `out.log`
   holds the text until the job stops (or until you delete it, if the run was killed with
