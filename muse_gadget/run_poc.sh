@@ -9,7 +9,9 @@
 #            --log-transcripts (debugging: show each turn's text on this terminal; the log files
 #            on the PC stay redacted), --tts kokoro|say (reply voice engine, default kokoro),
 #            --voice NAME (e.g. af_heart, am_michael), --volume N (robot speaker 0-100, default 25;
-#            the daemon plays a short test sound when it's set), -- <extra conversation-app args>
+#            the daemon plays a short test sound when it's set), --no-style-hint (send Muse your
+#            words only, without the bridge's "spoken by a desk robot" note),
+#            -- <extra conversation-app args>
 #
 # In order: take the hw-run lock on reachy-mac -> sync MuseHandler + install the pinned app into
 # ~/assistant-edge/muse-app -> start the bridge (Muse gadget container, or the fake one) -> start
@@ -24,7 +26,7 @@ set -uo pipefail
 HOST=reachy-mac
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 LOGDIR="${MUSE_POC_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/muse-poc}"   # outside the repo
-fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=kokoro; voice=; volume=25; app_args=()
+fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; tts=kokoro; voice=; volume=25; style_hint=1; app_args=()
 while [ $# -gt 0 ]; do
     case $1 in
         --fake-bridge) fake=1; shift ;;
@@ -35,8 +37,9 @@ while [ $# -gt 0 ]; do
         --tts) tts=$2; shift 2 ;;
         --voice) voice=$2; shift 2 ;;
         --volume) volume=$2; shift 2 ;;
+        --no-style-hint) style_hint=0; shift ;;
         --) shift; app_args=("$@"); break ;;
-        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
         *) echo "run_poc: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -212,7 +215,8 @@ if [ "$fake" = 1 ]; then
 else
     [ -x "$ROOT/mac_gadget.sh" ] || { log "muse_gadget/mac_gadget.sh missing (task 1); try --fake-bridge"; exit 1; }
     log "starting the Muse gadget (mac_gadget.sh start)"
-    "$ROOT/mac_gadget.sh" start || { bridge_started=1; exit 1; }
+    [ "$style_hint" = 1 ] || log "style hint off: Muse gets your words only"
+    MUSE_STYLE_HINT_OFF=$((1 - style_hint)) "$ROOT/mac_gadget.sh" start || { bridge_started=1; exit 1; }
 fi
 bridge_started=1
 for _ in $(seq 1 60); do

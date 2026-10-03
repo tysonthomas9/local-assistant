@@ -10,6 +10,9 @@
 #                                      machine only if `start` started it
 #   muse_gadget/mac_gadget.sh status   machine, container, bridge health, listeners
 #
+# MUSE_STYLE_HINT_OFF=1 (start): send messages to Muse without the bridge's
+# "[Spoken aloud by a small desk robot ...]" note (MUSE_STYLE_HINT="" in the gadget).
+#
 # Idempotent. Never changes the Podman machine's settings and never touches
 # other containers or images. The gadget doesn't use the robot (no daemon,
 # motors, mic, speaker or camera), so it doesn't take the hw-run lock.
@@ -19,6 +22,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MAC="reachy-mac"
 PORT="${MUSE_BRIDGE_PORT:-48080}"
+HINT=on; [ "${MUSE_STYLE_HINT_OFF:-0}" = 1 ] && HINT=off
 action="${1:-status}"
 case "$PORT" in ''|*[!0-9]*) echo "MUSE_BRIDGE_PORT must be a number" >&2; exit 2 ;; esac
 
@@ -83,10 +87,11 @@ case "$action" in
     echo "built $IMAGE ($(podman image inspect "$IMAGE" --format '{{.Architecture}}'))"
     ;;
   run)
-    port="$1"
+    port="$1"; hint="${2:-on}"
+    hint_env=(); [ "$hint" = off ] && hint_env=(-e MUSE_STYLE_HINT=)
     mkdir -p "$STATE"; chmod 700 "$STATE"
     want="$(podman image inspect "$IMAGE" --format '{{.Id}}')"
-    if [ "$(container_state)" = running ] && [ "$(podman container inspect "$NAME" --format '{{.Image}}')" = "$want" ]; then
+    if [ "$(container_state)" = running ] && [ "$(podman container inspect "$NAME" --format '{{.Image}} {{index .Config.Labels "muse.style-hint"}}')" = "$want $hint" ]; then
       echo "$NAME already running"
     else
       podman rm -f -t 10 "$NAME" >/dev/null 2>&1 || true
@@ -95,13 +100,14 @@ case "$action" in
         lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print "  " $1, $9}' >&2
         exit 1
       fi
-      podman run -d --name "$NAME" --label muse.gadget=1 --hostname reachy-mini \
+      podman run -d --name "$NAME" --label muse.gadget=1 --label "muse.style-hint=$hint" --hostname reachy-mini \
+        ${hint_env[@]+"${hint_env[@]}"} \
         --userns keep-id:uid=10001,gid=10001 \
         --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
         -v "$STATE:/state" \
         -p "127.0.0.1:$port:48080" \
         "$IMAGE" run >/dev/null
-      echo "started $NAME"
+      echo "started $NAME (style hint $hint)"
     fi
     for _ in $(seq 1 40); do
       curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1 && break
@@ -174,7 +180,7 @@ case "$action" in
             say "building the arm64 image on the Mac ($hash)"
             context_tar | remote build "$hash" | sed 's/^/[mac-gadget] /'
         fi
-        remote run "$PORT" | sed 's/^/[mac-gadget] /'
+        remote run "$PORT" "$HINT" | sed 's/^/[mac-gadget] /'
         ;;
     stop) remote down | sed 's/^/[mac-gadget] /' ;;
     status) remote status "$PORT" | sed 's/^/[mac-gadget] /' ;;
