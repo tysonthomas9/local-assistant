@@ -14,15 +14,22 @@ output queue as AdditionalOutputs unless transcript logging is turned on (`log_t
 or MUSE_LOG_TRANSCRIPTS=1 from `run_app.py --log-transcripts`), because the app logs those at INFO
 as `role=... content=<text>`. MuseHandler's own log lines hold only lengths and timings.
 
+Robot tools: when the run gives a secret (MUSE_ROBOT_TOOLS_SECRET_FILE, see robot_tools.py), the
+handler also serves the robot-tools endpoint on 127.0.0.1 while it's up, so Muse's `reachy.*`
+gadget commands can run a few of Pollen's own tools (emotions, dances, look, face tracking)
+through the app's BackgroundToolManager, as the Hugging Face backend does for its model.
+
 The STT engine, bridge client and TTS are injectable so the unit tests run on the PC.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
@@ -30,11 +37,17 @@ import numpy as np
 
 from reachy_mini_conversation_app.conversation_handler import AudioFrame, ConversationHandler
 from reachy_mini_conversation_app.streaming import AdditionalOutputs
-from reachy_mini_conversation_app.tools.background_tool_manager import BackgroundToolManager
+from reachy_mini_conversation_app.tools.background_tool_manager import (
+    BackgroundToolManager,
+    ToolCallRoutine,
+    ToolNotification,
+)
+from reachy_mini_conversation_app.tools.tool_constants import ToolState
 
 from muse_bridge import BridgeClient, BridgeError, spoken_error
 from muse_tts import Tts
 from muse_vad import UtteranceSegmenter, make_vad, to_mono_16k
+import robot_tools
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +94,18 @@ class MuseHandler(ConversationHandler):
         segmenter: Optional[UtteranceSegmenter] = None,
         output_sample_rate: Optional[int] = None,
         log_transcripts: Optional[bool] = None,
+        robot_tools_secret: Optional[str] = None,
+        robot_tools_port: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.deps = deps
         self.instance_path = instance_path
-        self.tool_manager = BackgroundToolManager()  # never started: Muse can't call the app's tools
+        # Started only with the robot-tools endpoint: Muse's reachy.* commands run Pollen's tools.
+        self.tool_manager = BackgroundToolManager()
+        self._robot_tools_secret = robot_tools_secret if robot_tools_secret is not None else robot_tools.read_secret()
+        self._robot_tools_port = robot_tools_port if robot_tools_port is not None else robot_tools.port_from_env()
+        self._robot_tools_server: Optional[asyncio.AbstractServer] = None
+        self._tool_waiters: dict[str, asyncio.Future] = {}
         self.output_queue: asyncio.Queue[Any] = asyncio.Queue()
         self.connection: Optional[str] = None  # LocalStream reads this to show "connected"
         self.bridge = bridge or BridgeClient()
@@ -166,9 +186,11 @@ class MuseHandler(ConversationHandler):
         self._worker = asyncio.create_task(self._turn_worker(), name="muse-turns")
         self._mark_activity("muse_connected")
         try:
+            await self._start_robot_tools()
             await self._stopped.wait()
         finally:
             self.connection = None
+            await self._stop_robot_tools()
             if self._worker is not None:
                 self._worker.cancel()
                 try:
@@ -183,6 +205,7 @@ class MuseHandler(ConversationHandler):
             self._stopped.set()
         if self._worker is not None:
             self._worker.cancel()
+        await self._stop_robot_tools()
         while not self.output_queue.empty():
             try:
                 self.output_queue.get_nowait()
@@ -305,6 +328,59 @@ class MuseHandler(ConversationHandler):
         if not self._is_connected():
             raise RuntimeError("say: no active session")
         await self._speak(text)
+
+    # ------------------------------------------------------------------ robot tools (Muse's reachy.* commands)
+    async def _start_robot_tools(self) -> None:
+        if not self._robot_tools_secret or self._robot_tools_server is not None:
+            if not self._robot_tools_secret:
+                logger.info("MuseHandler: robot tools off (no run secret)")
+            return
+        self.tool_manager.start_up(tool_callbacks=[self._on_tool_done])
+        server = robot_tools.RobotToolsServer(self._robot_tools_secret, self._dispatch_robot_tool, self._is_connected)
+        try:
+            self._robot_tools_server = await server.serve(robot_tools.DEFAULT_HOST, self._robot_tools_port)
+        except OSError as e:
+            logger.error("MuseHandler: robot tools endpoint failed to start (%s); Muse can't move the robot", e)
+            await self.tool_manager.shutdown()
+
+    async def _stop_robot_tools(self) -> None:
+        server, self._robot_tools_server = self._robot_tools_server, None
+        if server is None:
+            return
+        server.close()
+        try:
+            await server.wait_closed()
+        except Exception:
+            pass
+        await self.tool_manager.shutdown()
+        for fut in self._tool_waiters.values():
+            if not fut.done():
+                fut.cancel()
+        self._tool_waiters.clear()
+        logger.info("MuseHandler: robot tools endpoint closed")
+
+    async def _dispatch_robot_tool(self, tool: str, args: dict) -> dict:
+        """Run one of Pollen's tools through the tool manager, as the HF backend does, and wait for it."""
+        call_id = f"muse-{uuid.uuid4().hex[:12]}"
+        done: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._tool_waiters[call_id] = done
+        try:
+            await self.tool_manager.start_tool(
+                call_id=call_id,
+                tool_call_routine=ToolCallRoutine(tool_name=tool, args_json_str=json.dumps(args), deps=self.deps),
+                is_idle_tool_call=False,
+            )
+            notification: ToolNotification = await done
+        finally:
+            self._tool_waiters.pop(call_id, None)
+        if notification.status == ToolState.COMPLETED:
+            return dict(notification.result or {})
+        return {"error": notification.error or notification.status.value}
+
+    async def _on_tool_done(self, notification: ToolNotification) -> None:
+        done = self._tool_waiters.get(notification.id)
+        if done is not None and not done.done():
+            done.set_result(notification)
 
     # ------------------------------------------------------------------ app settings hooks
     async def apply_personality(self, profile: Optional[str]) -> str:

@@ -9,7 +9,7 @@ from musegadget.noise import (
 )
 from musegadget.noise.transport import decode_request_envelope, encode_response_envelope
 
-from gadget import chat, restrict
+from gadget import chat, restrict, robot
 from gadget.link import RobotLinkSession
 from musegadget.link_client import DeviceDescription
 
@@ -148,7 +148,7 @@ def test_turn_over_real_link_session():
             await asyncio.sleep(0.01)
         params = vm.register["params"]
         assert params["display_name"] == "Reachy Mini"
-        assert set(params["commands_v2"]) == {"device.health"}
+        assert set(params["commands_v2"]) == {"device.health", *robot.COMMANDS}
 
         reply = await chat.turn(session, "hi robot", chat.TurnOptions(settle_s=0.05))
         assert reply == "Hello from Muse."

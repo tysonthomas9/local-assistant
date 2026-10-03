@@ -28,10 +28,10 @@ pair_on_pc.sh                     mac_gadget.sh start
 
 ## What the wrapper changes
 
-- **Commands Muse can call: only `device.health`.** The SDK's `system.run`,
-  `file.read` and `file.write` are left out of the registration, and the
-  executor refuses them anyway (`gadget/restrict.py`). So Muse gets no shell
-  and no file access.
+- **Commands Muse can call: only `device.health` and the robot's `reachy.*`
+  commands** (see "Robot tools" below). The SDK's `system.run`, `file.read`
+  and `file.write` are left out of the registration, and the executor refuses
+  them anyway (`gadget/restrict.py`). So Muse gets no shell and no file access.
 - **Name**: the gadget shows up in Muse as "Reachy Mini" (`MUSE_DISPLAY_NAME`),
   never as the machine's host name. `device.health` reports that name too, and
   the container's host name is `reachy-mini`.
@@ -208,6 +208,39 @@ published port has to reach the container's own interface. That's allowed
 only when `MUSE_BRIDGE_IN_CONTAINER=1`, which is set in the image. Anywhere
 else the bridge refuses any address that isn't loopback. On the Mac, the only
 listener is Podman's `gvproxy` on `127.0.0.1:48080`.
+
+## Robot tools
+
+Muse can move the robot through six gadget commands (`gadget/robot.py`). Each one runs one of
+Pollen's own app tools, so the robot only ever plays Pollen's moves:
+
+| Command | Pollen tool | What it does |
+|---|---|---|
+| `reachy.emotion` `{emotion}` | `play_emotion` | a recorded emotion (`happy`, `sad`, `surprised`, ...) |
+| `reachy.dance` `{move?}` | `dance` | a dance move (random if no move) |
+| `reachy.stop_move` | `stop_dance` | stop the dance or emotion, clear queued moves |
+| `reachy.look` `{direction}` | `move_head` | left, right, up, down or front |
+| `reachy.head_tracking` `{enabled}` | `head_tracking` | the SDK face tracker on or off |
+| `reachy.status` `{topic}` | `robot_status` | `name`, `software` or `imu` only |
+
+- **Path**: Muse → gadget (Podman) → `POST http://host.containers.internal:48081/tool` →
+  MuseHandler's endpoint (`mac/robot_tools.py`) on the Mac's `127.0.0.1:48081` → the app's
+  `BackgroundToolManager`, the same way the Hugging Face backend runs a model's tool call. Podman's
+  gvproxy forwards `host.containers.internal` to the Mac's loopback, so the endpoint is never on
+  the LAN.
+- **Only while a run holds the robot.** The endpoint lives inside the app, which runs only while
+  `run_poc.sh` holds the hw-run lock. With no run, a command answers "robot is asleep". A command
+  never starts the robot.
+- **Per-run secret.** `run_poc.sh` makes a random secret on the Mac (0600 file
+  `~/assistant-edge/muse-app/run/robot-tools.<run>.env`), passes it to the gadget as Podman's
+  `--env-file` and to the app as a file path, and deletes it at cleanup. The endpoint refuses any
+  request without it (401), so nothing else on the Mac can drive the robot.
+- **Allowlist on both ends.** The gadget checks the enums; the endpoint accepts only the tools
+  above (no volume, camera, sleep, memory or web tools) and only those status topics (no Wi-Fi
+  address or account). There's no camera or photo command.
+- **Log**: the app log has one line per call, `robot tool <name> -> <result>` (no transcript
+  text); the gadget logs `robot command <name> -> ok|error`.
+- The bridge's style note asks Muse to "use the reachy.* tools to move when it fits".
 
 ## Token and privacy
 

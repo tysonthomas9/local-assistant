@@ -12,6 +12,10 @@
 #
 # MUSE_STYLE_HINT_OFF=1 (start): send messages to Muse without the bridge's
 # "[Spoken aloud by a small desk robot ...]" note (MUSE_STYLE_HINT="" in the gadget).
+# MUSE_ROBOT_TOOLS_RUN=<run id> (start, from run_poc.sh): give the gadget that run's
+# robot-tools secret (the 0600 file ~/assistant-edge/muse-app/run/robot-tools.<run>.env on
+# the Mac, as --env-file) and point its reachy.* commands at the app's endpoint on the
+# Mac's loopback (host.containers.internal:48081). Without it they answer "robot is asleep".
 #
 # Idempotent. Never changes the Podman machine's settings and never touches
 # other containers or images. The gadget doesn't use the robot (no daemon,
@@ -23,8 +27,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MAC="reachy-mac"
 PORT="${MUSE_BRIDGE_PORT:-48080}"
 HINT=on; [ "${MUSE_STYLE_HINT_OFF:-0}" = 1 ] && HINT=off
+TOOLS_RUN="${MUSE_ROBOT_TOOLS_RUN:-none}"
+TOOLS_PORT="${MUSE_ROBOT_TOOLS_PORT:-48081}"
 action="${1:-status}"
 case "$PORT" in ''|*[!0-9]*) echo "MUSE_BRIDGE_PORT must be a number" >&2; exit 2 ;; esac
+case "$TOOLS_PORT" in ''|*[!0-9]*) echo "MUSE_ROBOT_TOOLS_PORT must be a number" >&2; exit 2 ;; esac
+case "$TOOLS_RUN" in ''|*[!a-z0-9-]*) echo "MUSE_ROBOT_TOOLS_RUN must be a run id" >&2; exit 2 ;; esac
 
 say() { printf '[mac-gadget] %s\n' "$*"; }
 
@@ -87,11 +95,18 @@ case "$action" in
     echo "built $IMAGE ($(podman image inspect "$IMAGE" --format '{{.Architecture}}'))"
     ;;
   run)
-    port="$1"; hint="${2:-on}"
+    port="$1"; hint="${2:-on}"; tools_run="${3:-none}"; tools_port="${4:-48081}"
     hint_env=(); [ "$hint" = off ] && hint_env=(-e MUSE_STYLE_HINT=)
+    # The run's robot-tools secret: podman reads the 0600 file, so it never shows on a command line.
+    tools_env=()
+    tools_file="$HOME/assistant-edge/muse-app/run/robot-tools.$tools_run.env"
+    if [ "$tools_run" != none ]; then
+      [ -s "$tools_file" ] || { echo "no robot-tools secret for run $tools_run" >&2; exit 1; }
+      tools_env=(--env-file "$tools_file" -e "MUSE_ROBOT_TOOLS_URL=http://host.containers.internal:$tools_port")
+    fi
     mkdir -p "$STATE"; chmod 700 "$STATE"
     want="$(podman image inspect "$IMAGE" --format '{{.Id}}')"
-    if [ "$(container_state)" = running ] && [ "$(podman container inspect "$NAME" --format '{{.Image}} {{index .Config.Labels "muse.style-hint"}}')" = "$want $hint" ]; then
+    if [ "$(container_state)" = running ] && [ "$(podman container inspect "$NAME" --format '{{.Image}} {{index .Config.Labels "muse.style-hint"}} {{index .Config.Labels "muse.robot-tools"}}')" = "$want $hint $tools_run" ]; then
       echo "$NAME already running"
     else
       podman rm -f -t 10 "$NAME" >/dev/null 2>&1 || true
@@ -100,14 +115,15 @@ case "$action" in
         lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print "  " $1, $9}' >&2
         exit 1
       fi
-      podman run -d --name "$NAME" --label muse.gadget=1 --label "muse.style-hint=$hint" --hostname reachy-mini \
-        ${hint_env[@]+"${hint_env[@]}"} \
+      podman run -d --name "$NAME" --label muse.gadget=1 --label "muse.style-hint=$hint" \
+        --label "muse.robot-tools=$tools_run" --hostname reachy-mini \
+        ${hint_env[@]+"${hint_env[@]}"} ${tools_env[@]+"${tools_env[@]}"} \
         --userns keep-id:uid=10001,gid=10001 \
         --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
         -v "$STATE:/state" \
         -p "127.0.0.1:$port:48080" \
         "$IMAGE" run >/dev/null
-      echo "started $NAME (style hint $hint)"
+      echo "started $NAME (style hint $hint, robot tools ${tools_run/#none/off})"
     fi
     for _ in $(seq 1 40); do
       curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1 && break
@@ -180,7 +196,7 @@ case "$action" in
             say "building the arm64 image on the Mac ($hash)"
             context_tar | remote build "$hash" | sed 's/^/[mac-gadget] /'
         fi
-        remote run "$PORT" "$HINT" | sed 's/^/[mac-gadget] /'
+        remote run "$PORT" "$HINT" "$TOOLS_RUN" "$TOOLS_PORT" | sed 's/^/[mac-gadget] /'
         ;;
     stop) remote down | sed 's/^/[mac-gadget] /' ;;
     status) remote status "$PORT" | sed 's/^/[mac-gadget] /' ;;

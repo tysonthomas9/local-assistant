@@ -7,7 +7,7 @@
 # uv-managed Python 3.12 are the ones edge_host_bootstrap.sh already installed):
 #   app/        git checkout of reachy_mini_conversation_app at APP_COMMIT, venv in app/.venv
 #   kokoro/.venv  Kokoro TTS venv (mlx-audio; its torch/spaCy pins don't fit the app's venv)
-#   cache/uv    uv cache;  hf/  HF_HOME with the speech-to-text and Kokoro models
+#   cache/uv    uv cache;  hf/  HF_HOME with the speech-to-text and Kokoro models and Pollen's emotions
 #   installed, installed-kokoro   stamps: a second run with the same pins only validates (fast)
 # If Kokoro fails to install, the run goes on and replies are spoken with macOS `say`.
 # Written for bash 3.2 (macOS /bin/bash).
@@ -97,6 +97,17 @@ else
 fi
 
 APY="$M/app/.venv/bin/python"
+# Pollen's recorded emotions (play_emotion, for Muse's reachy.emotion). The app runs offline, so
+# cache the dataset in its HF_HOME once, the way the app's RecordedMoves fetches it (main).
+EMOTIONS="pollen-robotics/reachy-mini-emotions-library"
+if [ "$(cat "$M/installed-emotions" 2>/dev/null || true)" != "$EMOTIONS" ]; then
+    say "caching Pollen's emotions library ($EMOTIONS)"
+    if HF_HUB_DISABLE_PROGRESS_BARS=1 "$APY" -c "import huggingface_hub as h; h.snapshot_download('$EMOTIONS', repo_type='dataset')" >/dev/null; then
+        printf '%s\n' "$EMOTIONS" > "$M/installed-emotions"
+    else
+        say "WARNING: emotions library not cached; reachy.emotion will report an error"
+    fi
+fi
 cd "$M/mac"
 HF_HUB_OFFLINE=1 "$APY" - <<'EOF'
 import importlib.metadata as m

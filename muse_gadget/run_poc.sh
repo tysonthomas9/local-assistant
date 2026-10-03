@@ -16,6 +16,9 @@
 # In order: take the hw-run lock on reachy-mac -> sync MuseHandler + install the pinned app into
 # ~/assistant-edge/muse-app -> start the bridge (Muse gadget container, or the fake one) -> start
 # the daemon, then the app, both inside Reachy Edge.app (edge_app_run.sh). Ctrl-C to stop.
+# Robot tools: a per-run secret (a 0600 file on the Mac, made there, never on the PC) goes to the
+# gadget (its reachy.* commands) and to the app (MuseHandler's endpoint on the Mac's 127.0.0.1:48081,
+# Pollen's own moves only). Deleted at cleanup.
 # On exit, error or Ctrl-C: stop the app, robot goto_sleep, motors off, stop the daemon and every
 # com.assistant.reachy-edge.<this run>.* job, stop the bridge, release the lock.
 # It never deletes another run's lock (it waits) and never stops a daemon it didn't start; it
@@ -39,7 +42,7 @@ while [ $# -gt 0 ]; do
         --volume) volume=$2; shift 2 ;;
         --no-style-hint) style_hint=0; shift ;;
         --) shift; app_args=("$@"); break ;;
-        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
         *) echo "run_poc: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -148,6 +151,8 @@ EOF
 }
 
 M='"$HOME/assistant-edge/muse-app"'
+TOOLS_PORT=48081
+TOOLS_FILE="$M/run/robot-tools.$RUN.env"   # the run's robot-tools secret, on the Mac only
 cleaning=0
 cleanup() {
     [ "$cleaning" = 1 ] && return
@@ -179,6 +184,7 @@ cleanup() {
             "$ROOT/mac_gadget.sh" stop
         fi
     fi
+    rsh "rm -f $TOOLS_FILE"
     for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done
     wait 2>/dev/null
     left="$(rsh "launchctl list | grep -c 'com.assistant.reachy-edge.$RUN\\.' ; true")"
@@ -207,6 +213,12 @@ rsh 'bash -s' < "$ROOT/mac/install.sh" 2>&1 | scrub
 if [ "$(rsh 'curl -s -m 3 -o /dev/null -w %{http_code} http://127.0.0.1:48080/health')" != 000 ]; then
     log "something already answers on the Mac's 127.0.0.1:48080; not starting a bridge over it"; exit 1
 fi
+if [ "$(rsh "curl -s -m 3 -o /dev/null -w %{http_code} http://127.0.0.1:$TOOLS_PORT/")" != 000 ]; then
+    log "something already answers on the Mac's 127.0.0.1:$TOOLS_PORT (robot tools); not starting"; exit 1
+fi
+rsh "umask 077; mkdir -p $M/run && printf 'MUSE_ROBOT_TOOLS_SECRET=%s\n' \
+\"\$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')\" > $TOOLS_FILE && [ -s $TOOLS_FILE ]" \
+    || { log "could not write the robot-tools secret on $HOST"; exit 1; }
 if [ "$fake" = 1 ]; then
     log "starting the fake echo bridge"
     rsh "cd $M/mac && echo \$\$ > ../run/fake-bridge.$RUN.pid && exec ../app/.venv/bin/python fake_bridge.py" \
@@ -216,7 +228,8 @@ else
     [ -x "$ROOT/mac_gadget.sh" ] || { log "muse_gadget/mac_gadget.sh missing (task 1); try --fake-bridge"; exit 1; }
     log "starting the Muse gadget (mac_gadget.sh start)"
     [ "$style_hint" = 1 ] || log "style hint off: Muse gets your words only"
-    MUSE_STYLE_HINT_OFF=$((1 - style_hint)) "$ROOT/mac_gadget.sh" start || { bridge_started=1; exit 1; }
+    MUSE_STYLE_HINT_OFF=$((1 - style_hint)) MUSE_ROBOT_TOOLS_RUN=$RUN MUSE_ROBOT_TOOLS_PORT=$TOOLS_PORT \
+        "$ROOT/mac_gadget.sh" start || { bridge_started=1; exit 1; }
 fi
 bridge_started=1
 for _ in $(seq 1 60); do
@@ -250,7 +263,7 @@ log "speaker volume: before ${vol_before:-?}, after $(vol_now) (asked $volume)"
 
 log "starting the conversation app with MuseHandler"
 start_job app "-e HF_HOME=~/assistant-edge/muse-app/hf -e HF_HUB_OFFLINE=1 -e MUSE_BRIDGE_URL=http://127.0.0.1:48080 -e MUSE_MIC_LOG=$mic_log -e MUSE_LOG_TRANSCRIPTS=$log_transcripts \
--e MUSE_TTS=$tts -e MUSE_TTS_VOICE=$voice \
+-e MUSE_TTS=$tts -e MUSE_TTS_VOICE=$voice -e MUSE_ROBOT_TOOLS_SECRET_FILE=$TOOLS_FILE -e MUSE_ROBOT_TOOLS_PORT=$TOOLS_PORT \
 -- $M/mac/exec_python.py $M/app/.venv/bin/python $M/mac/run_app.py --no-camera ${app_args[*]:-}"
 app_ssh=${pids[-1]}
 

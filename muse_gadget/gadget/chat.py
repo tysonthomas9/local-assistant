@@ -31,7 +31,8 @@ log = logging.getLogger(__name__)
 DEFAULT_SESSION_ID = "06cab6b7-2197-526c-90eb-7aef229fdea5"
 DEFAULT_STYLE_HINT = (
     "[Spoken aloud by a small desk robot. Answer in one to three short, plain "
-    "sentences, with no lists, markdown, emoji or links.]"
+    "sentences, with no lists, markdown, emoji or links. Use the reachy.* tools "
+    "to move when it fits.]"
 )
 TURN_TIMEOUT_S = 60.0
 SETTLE_S = 0.3   # quiet time after the last message is done; each 0.1 s here is reply lag

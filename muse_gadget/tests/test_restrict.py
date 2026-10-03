@@ -9,8 +9,9 @@ from musegadget.identity import Identity
 
 def test_registered_commands_exclude_shell_and_files():
     specs = restrict.command_specs()
-    assert set(specs) == {"device.health"}
-    for blocked in ("system.run", "file.read", "file.write"):
+    assert set(specs) == {"device.health", "reachy.emotion", "reachy.dance", "reachy.stop_move",
+                          "reachy.look", "reachy.head_tracking", "reachy.status"}
+    for blocked in ("system.run", "file.read", "file.write", "device.ota"):
         assert blocked not in specs
 
 
