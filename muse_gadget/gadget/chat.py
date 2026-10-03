@@ -1,44 +1,54 @@
 """One text turn with Muse: send the user's words, wait for Muse's reply.
 
 ``POST /chat/stream`` only acknowledges the message (it returns the new
-``message_id``); the reply lands in the chat history. So, as the ESP32
-firmware does (``esp32/components/muse/muse_chat_link.c``):
+``message_id``). The reply arrives as events on a ``POST /chat/subscribe``
+NDJSON stream on the same session, as in the ESP32 firmware
+(``esp32/components/muse/muse_chat_session.cpp``):
 
-1. read the newest history row to mark where the chat ends;
-2. post the message and keep its ``message_id``;
-3. read history rows after the mark until the assistant's replies to that
-   message are complete (``display_text_ready``), then wait a short settle
-   time for any follow-up reply rows.
+1. open the subscription, so no reply event is missed;
+2. post the message and keep the ids its ack names;
+3. collect assistant messages that answer those ids (``delta.message_start``,
+   ``delta.text_append``, ``delta.message_done`` or a whole
+   ``message.assistant``) until every one is done and nothing has arrived for
+   a short settle time. A busy agent (``agent.status``) keeps the turn open.
 
 Message and reply text are never logged.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import time
-from dataclasses import dataclass
-from typing import Awaitable, Callable, Protocol
-from urllib.parse import urlencode
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import Callable, Protocol
 
 log = logging.getLogger(__name__)
 
-DEFAULT_SESSION_ID = "reachy-mini-robot"
+# The robot's own side chat. Muse refuses a session_id that isn't a UUID
+# (HTTP 400 invalid_params); this one is uuid5(NAMESPACE_URL, "reachy-mini-robot").
+DEFAULT_SESSION_ID = "06cab6b7-2197-526c-90eb-7aef229fdea5"
 DEFAULT_STYLE_HINT = (
     "[Spoken aloud by a small desk robot. Answer in one to three short, plain "
     "sentences, with no lists, markdown, emoji or links.]"
 )
 TURN_TIMEOUT_S = 60.0
-POLL_S = 0.5
 SETTLE_S = 1.5
-HISTORY_LIMIT = 10
+BUSY_HOLD_S = 20.0
+WAIT_STEP_S = 0.25
+MAX_MESSAGES = 8
+REPLY_EVENTS = ("delta.message_start", "delta.text_append", "delta.message_done", "message.assistant")
+
+
+class Subscription(Protocol):
+    async def next(self, timeout: float) -> dict | None: ...
+    async def close(self) -> None: ...
 
 
 class Link(Protocol):
     async def send_chat(self, message: str, session_id: str | None = None) -> dict: ...
-    async def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, object]: ...
+    async def subscribe(self, session_id: str | None = None) -> Subscription: ...
 
 
 class TurnError(Exception):
@@ -55,8 +65,8 @@ class TurnOptions:
     session_id: str | None = DEFAULT_SESSION_ID
     style_hint: str = DEFAULT_STYLE_HINT
     timeout_s: float = TURN_TIMEOUT_S
-    poll_s: float = POLL_S
     settle_s: float = SETTLE_S
+    busy_hold_s: float = BUSY_HOLD_S
 
 
 def compose(text: str, style_hint: str) -> str:
@@ -64,33 +74,24 @@ def compose(text: str, style_hint: str) -> str:
     return f"{style_hint}\n{text}" if style_hint else text
 
 
-def history_path(after_seq: int | None, session_id: str | None, limit: int) -> str:
-    query: dict = {"limit": limit}
-    if after_seq is not None:
-        query["after_seq"] = after_seq
-    if session_id:
-        query["session_id"] = session_id
-    return "/chat/history?" + urlencode(query)
-
-
-def rows(page: object) -> list[dict]:
-    """History rows from ``{"ok":true,"result":{"chat_events":[...]}}``, oldest first."""
-    if not isinstance(page, dict):
-        return []
-    result = page.get("result") if isinstance(page.get("result"), dict) else page
-    events = result.get("chat_events")
-    if not isinstance(events, list):
-        return []
-    found = [r for r in events if isinstance(r, dict) and isinstance(r.get("seq"), int)]
-    return sorted(found, key=lambda r: r["seq"])
-
-
-def message_id(ack: object) -> str:
+def user_ids(ack: object) -> set[str]:
+    """The ids the ``/chat/stream`` ack names (``message_id``, ``reply_to_message_id``)."""
     if not isinstance(ack, dict):
-        return ""
+        return set()
     result = ack.get("result") if isinstance(ack.get("result"), dict) else ack
-    value = result.get("message_id")
-    return value if isinstance(value, str) else ""
+    found = (result.get(k) for k in ("message_id", "reply_to_message_id"))
+    return {v for v in found if isinstance(v, str) and v}
+
+
+_CODE = re.compile(r"^[A-Za-z0-9_.:-]{1,60}$")
+
+
+def error_code(response: object) -> str:
+    """The error's code if it looks like one (an identifier, never free text)."""
+    error = response.get("error") if isinstance(response, dict) else None
+    if isinstance(error, dict):
+        error = error.get("code") or error.get("type")
+    return error if isinstance(error, str) and _CODE.match(error) else ""
 
 
 _MARKDOWN = re.compile(r"(\*\*|__|`+|^#+\s*|^\s*[-*]\s+)", re.MULTILINE)
@@ -101,65 +102,143 @@ def speakable(text: str) -> str:
     return " ".join(_MARKDOWN.sub("", text).split())
 
 
+@dataclass
+class _Message:
+    text: str = ""
+    final: str = ""
+    done: bool = False
+
+
+@dataclass
+class _Reply:
+    """The assistant messages of one turn, bound as the firmware binds them."""
+
+    ours: set[str]
+    messages: dict[str, _Message] = field(default_factory=dict)
+    foreign: set[str] = field(default_factory=set)
+    last_seq: int = 0
+    busy: bool = False
+    last_event: float | None = None
+    last_content: float | None = None
+    first_content: float | None = None
+    seen: Counter = field(default_factory=Counter)
+
+    def on_event(self, line: dict, now: float) -> None:
+        if line.get("type") != "event":
+            return   # the subscription ack
+        seq = line.get("seq")
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            if 0 < seq <= self.last_seq:
+                return
+            self.last_seq = max(self.last_seq, seq)
+        event = line.get("event") or ""
+        payload = line.get("payload") if isinstance(line.get("payload"), dict) else {}
+        self.seen[str(event)[:40]] += 1
+        if event in ("agent.status", "task.status"):
+            code, status = payload.get("activity_code"), payload.get("status")
+            if isinstance(code, str):
+                self.busy = bool(code) and code not in ("online", "idle")
+            elif isinstance(status, str):
+                self.busy = bool(status) and status not in ("completed", "failed")
+            self.last_event = now
+            return
+        if event not in REPLY_EVENTS:
+            return
+        msg_id = next((v for v in (payload.get("message_id"), line.get("message_id"), payload.get("id"))
+                       if isinstance(v, str) and v), None)
+        message = self._bind(msg_id, payload) if msg_id else None
+        if message is None:
+            self.seen["(not ours)"] += 1
+            return
+        self.last_event = self.last_content = now
+        if self.first_content is None:
+            self.first_content = now
+        if event == "delta.text_append":
+            text = payload.get("text")
+            if isinstance(text, str):
+                message.text += text
+        elif event in ("delta.message_done", "message.assistant"):
+            final = payload.get("display_text")
+            if not isinstance(final, str):
+                final = payload.get("content")
+            if event == "delta.message_done" or payload.get("display_text_ready") is not False:
+                message.done = True
+                if isinstance(final, str) and final.strip():
+                    message.final = final
+
+    def _bind(self, msg_id: str, payload: dict) -> _Message | None:
+        if msg_id in self.messages:
+            return self.messages[msg_id]
+        if msg_id in self.foreign:
+            return None
+        parent = payload.get("reply_to_message_id") or payload.get("parent_message_id")
+        # Once the ack names our message, replies to anything else are someone else's,
+        # and so are that message's later events (which may not name the parent again).
+        if isinstance(parent, str) and parent and parent not in self.ours and parent not in self.messages:
+            self.foreign.add(msg_id)
+            return None
+        if len(self.messages) >= MAX_MESSAGES:
+            return None
+        self.messages[msg_id] = _Message()
+        return self.messages[msg_id]
+
+    def finished(self, now: float, options: TurnOptions) -> bool:
+        if not self.messages or not all(m.done for m in self.messages.values()):
+            return False
+        if self.busy and self.last_content is not None and now - self.last_content < options.busy_hold_s:
+            return False
+        return self.last_event is None or now - self.last_event >= options.settle_s
+
+    def text(self) -> str:
+        parts = [(m.final or m.text).strip() for m in self.messages.values()]
+        return " ".join(speakable(p) for p in parts if p)
+
+
 async def turn(
     link: Link,
     text: str,
     options: TurnOptions = TurnOptions(),
     *,
     clock: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> str:
     """Send ``text`` to Muse and return its reply. Raises ``TurnError``."""
-    deadline = clock() + options.timeout_s
+    started = clock()
+    deadline = started + options.timeout_s
     session_id = options.session_id or None
-
-    status, page = await link.request("GET", history_path(None, session_id, 1))
-    if status != 200:
-        log.warning("chat history unavailable: HTTP %s", status)
-        raise TurnError("muse_error", 502)
-    newest = rows(page)
-    after = newest[-1]["seq"] if newest else 0
-
-    ack = await link.send_chat(compose(text, options.style_hint), session_id)
-    note_id = message_id(ack.get("response")) if ack.get("ok") else ""
-    if not note_id:
-        log.warning("Muse did not take the message: HTTP %s", ack.get("status"))
-        raise TurnError("muse_error", 502)
-    log.info("sent a %d-character turn", len(text))
-
-    parts: list[str] = []
-    after_note = False
-    last_reply = None
-    while True:
-        now = clock()
-        if last_reply is not None and now - last_reply >= options.settle_s:
-            break
-        if now >= deadline:
-            if parts:
+    try:
+        sub = await link.subscribe(session_id)
+    except ConnectionError:
+        raise   # the bridge answers link_down
+    except Exception as exc:
+        log.warning("chat subscription refused: %s", getattr(exc, "status", type(exc).__name__))
+        raise TurnError("muse_error", 502) from None
+    reply: _Reply | None = None
+    try:
+        ack = await link.send_chat(compose(text, options.style_hint), session_id)
+        ours = user_ids(ack.get("response")) if ack.get("ok") else set()
+        if not ours:
+            log.warning("Muse did not take the message: HTTP %s %s", ack.get("status"),
+                        error_code(ack.get("response")))
+            raise TurnError("muse_error", 502)
+        log.info("sent a %d-character turn", len(text))
+        reply = _Reply(ours)
+        while True:
+            now = clock()
+            if reply.finished(now, options):
                 break
-            raise TurnError("timeout", 504)
-        status, page = await link.request("GET", history_path(after, session_id, HISTORY_LIMIT))
-        if status != 200:
-            log.warning("chat history unavailable: HTTP %s", status)
-            await sleep(options.poll_s)
-            continue
-        for row in rows(page):
-            if row["seq"] <= after:
-                continue
-            event = row.get("event_name")
-            if event == "message.user":
-                after_note = row.get("message_id") == note_id
-            elif event == "message.assistant":
-                reply_to = row.get("reply_to_message_id") or ""
-                if (reply_to == note_id) if reply_to else after_note:
-                    if not row.get("display_text_ready"):
-                        break  # still being written: read it again
-                    reply = row.get("display_text")
-                    if isinstance(reply, str) and reply.strip():
-                        parts.append(reply.strip())
-                        last_reply = clock()
-            after = row["seq"]
-        await sleep(options.poll_s)
-    reply = " ".join(speakable(p) for p in parts)
-    log.info("got a %d-character reply", len(reply))
-    return reply
+            if now >= deadline:
+                if reply.text():
+                    break
+                raise TurnError("timeout", 504)
+            event = await sub.next(min(WAIT_STEP_S, deadline - now))
+            if event is not None:
+                reply.on_event(event, clock())
+    finally:
+        await sub.close()
+        if reply is not None:
+            log.info("events: %s", dict(reply.seen))   # names and counts only
+    answer = reply.text()
+    first = reply.first_content - started if reply.first_content is not None else -1
+    log.info("got a %d-character reply in %d message(s); first text after %.2fs, turn %.2fs",
+             len(answer), len(reply.messages), first, clock() - started)
+    return answer

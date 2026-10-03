@@ -6,7 +6,7 @@ import pytest
 from gadget import bridge, chat
 from fakes import FakeLink
 
-FAST = chat.TurnOptions(poll_s=0, settle_s=0, timeout_s=2)
+FAST = chat.TurnOptions(settle_s=0, timeout_s=2)
 
 
 async def http(port: int, method: str, path: str, body: bytes = b"", content_type: str | None = None):
@@ -74,7 +74,7 @@ def test_audio_and_non_json_get_415_bad_text_400():
 def test_timeout_is_504():
     status, body = with_bridge(
         lambda port: http(port, "POST", "/turn", b'{"text": "silence"}', "application/json"),
-        FakeLink({}), options=chat.TurnOptions(poll_s=0.05, settle_s=0, timeout_s=0.3))
+        FakeLink({}), options=chat.TurnOptions(settle_s=0, timeout_s=0.3))
     assert (status, body) == (504, {"error": "timeout"})
 
 

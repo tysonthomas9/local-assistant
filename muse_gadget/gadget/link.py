@@ -1,8 +1,9 @@
 """The gadget's connection to Muse, wrapped for the robot.
 
-``RobotLinkSession`` adds one thing to the SDK's ``LinkSession``: a generic
-request on the same encrypted session (the bridge needs ``GET /chat/history``
-to read Muse's reply, as the ESP32 firmware does).
+``RobotLinkSession`` adds one thing to the SDK's ``LinkSession``: the
+``POST /chat/subscribe`` NDJSON event stream on the same encrypted session,
+which carries Muse's replies (as in the ESP32 firmware,
+``esp32/components/muse/muse_chat_session.cpp``).
 
 ``RobotService`` is the SDK's ``Service`` with the restricted command list,
 the neutral display name and ``RobotLinkSession``.
@@ -28,29 +29,120 @@ from gadget import restrict
 log = logging.getLogger(__name__)
 
 
+SUBSCRIBE_PATH = "/chat/subscribe"
+MAX_EVENT_LINE = 256 * 1024
+
+
+class Subscription:
+    """One ``POST /chat/subscribe`` stream: NDJSON chat events, one per line."""
+
+    def __init__(self, session: "RobotLinkSession", stream_id: int) -> None:
+        self._session = session
+        self.stream_id = stream_id
+        self.opened: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._events: asyncio.Queue = asyncio.Queue()
+        self._buf = bytearray()
+        self._ended = False
+
+    # Called by the session's read loop for every frame on this stream.
+    def on_frame(self, frame) -> None:
+        if self._ended:
+            return
+        if frame.kind == "reset":
+            self._end(ConnectionError("subscription reset"))
+            return
+        if frame.kind == "response":
+            status = frame.value.status
+            if not self.opened.done():
+                self.opened.set_result(status)
+            if status >= 400:
+                self._end(None)
+                return
+            data, ended = frame.value.body, frame.value.end_body
+        else:
+            data, ended = frame.value.data, frame.value.end_body
+        self._feed(data)
+        if ended:
+            self._end(None)
+
+    def _feed(self, data: bytes) -> None:
+        self._buf += data
+        while True:
+            cut = self._buf.find(b"\n")
+            if cut < 0:
+                if len(self._buf) > MAX_EVENT_LINE:
+                    self._buf.clear()   # an oversized line: drop it, as the firmware does
+                return
+            line = bytes(self._buf[:cut]).strip()
+            del self._buf[:cut + 1]
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                self._events.put_nowait(event)
+
+    def _end(self, error: Exception | None) -> None:
+        self._ended = True
+        if not self.opened.done():
+            if error is not None:
+                self.opened.set_exception(error)
+            else:
+                self.opened.set_result(0)
+        self._events.put_nowait(None)
+
+    async def next(self, timeout: float) -> dict | None:
+        """The next event, or None after ``timeout`` seconds. Raises ConnectionError once it ends."""
+        try:
+            event = await asyncio.wait_for(self._events.get(), max(timeout, 0))
+        except asyncio.TimeoutError:
+            return None
+        if event is None:
+            self._events.put_nowait(None)
+            raise ConnectionError("subscription ended")
+        return event
+
+    async def close(self) -> None:
+        self._session._requests.pop(self.stream_id, None)
+        if not self._ended:
+            self._ended = True
+            try:
+                await self._session._send_frames(self._session._transport.encrypt_reset(self.stream_id))
+            except Exception:
+                pass
+
+
 class RobotLinkSession(LinkSession):
-    async def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, object]:
-        """Send one request on this session; return ``(status, decoded JSON or text)``."""
-        data = json.dumps(body).encode() if body is not None else b""
+    async def subscribe(self, session_id: str | None = None) -> Subscription:
+        """Open ``POST /chat/subscribe``; returns once the VM answered with a status."""
+        body = json.dumps({"session_id": session_id} if session_id else {}).encode()
         headers = [
+            Header("Content-Type", "application/json"),
+            Header("accept", "application/x-ndjson"),
             Header("x-request-id", str(uuid.uuid4())),
             Header("x-app-id", link_client.APP_ID),
         ]
-        if body is not None:
-            headers.insert(0, Header("Content-Type", "application/json"))
-        encrypted = self._transport.encrypt_http_request(method, path, data, headers=headers)
-        pending = link_client._Request(asyncio.get_running_loop().create_future())
-        self._requests[encrypted.stream_id] = pending
+        encrypted = self._transport.encrypt_http_request("POST", SUBSCRIBE_PATH, body, headers=headers)
+        sub = Subscription(self, encrypted.stream_id)
+        self._requests[encrypted.stream_id] = sub
         try:
             await self._send_frames(encrypted.frames)
-            status, raw = await asyncio.wait_for(pending.done, link_client.REQUEST_TIMEOUT_S)
-        finally:
-            self._requests.pop(encrypted.stream_id, None)
-        try:
-            decoded = json.loads(raw) if raw else None
-        except json.JSONDecodeError:
-            decoded = raw.decode("utf-8", errors="replace")[:2000]
-        return status, decoded
+            status = await asyncio.wait_for(asyncio.shield(sub.opened), link_client.REQUEST_TIMEOUT_S)
+        except BaseException:
+            await sub.close()
+            raise
+        if not 200 <= status < 300:
+            await sub.close()
+            raise SubscribeRefused(status)
+        return sub
+
+
+class SubscribeRefused(Exception):
+    def __init__(self, status: int) -> None:
+        super().__init__(status)
+        self.status = status
 
 
 @dataclass

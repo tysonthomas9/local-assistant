@@ -56,15 +56,24 @@ pair_on_pc.sh                     mac_gadget.sh start
 | `GET /health` | 200 `{"paired": bool, "linked": bool}` |
 
 How a turn works (`gadget/chat.py`). `POST /chat/stream` only acknowledges the
-message, so the bridge does what the SDK's ESP32 firmware does:
+message, so the bridge reads the reply the way the SDK's ESP32 firmware does
+(`esp32/components/muse/muse_chat_session.cpp`):
 
-1. It reads the newest chat-history row, to mark where the chat ends.
-2. It posts the text and keeps the new `message_id`.
-3. It polls `/chat/history` after the mark until Muse's reply rows to that
-   message are complete, then strips markdown so the reply reads well aloud.
+1. It opens a `POST /chat/subscribe` NDJSON event stream on the same session.
+2. It posts the text and keeps the ids the ack names.
+3. It collects the assistant messages that answer those ids
+   (`delta.message_start`, `delta.text_append`, `delta.message_done`, or a
+   whole `message.assistant`) until all are done and nothing has arrived for
+   1.5 s (a busy `agent.status` keeps the turn open for up to 20 s more), then
+   closes the stream and strips markdown so the reply reads well aloud.
+
+`/chat/history` isn't used: Muse answers it with 403 for a gadget's device
+token.
 
 Turns run one at a time. Each one goes to a fixed side chat
-(`MUSE_SESSION_ID`, default `reachy-mini-robot`) and starts with a short note
+(`MUSE_SESSION_ID`, default the fixed UUID
+`06cab6b7-2197-526c-90eb-7aef229fdea5`; Muse refuses a `session_id` that isn't
+a UUID with 400 `invalid_params`) and starts with a short note
 asking for brief, spoken-style answers (`MUSE_STYLE_HINT`; set it to an empty
 string to turn it off). The bridge logs only how long messages and replies
 are, never what they say.
@@ -217,18 +226,22 @@ listener is Podman's `gvproxy` on `127.0.0.1:48080`.
   expanded on the Mac.
 - Terms (gadgets.muse.ai/sdk-terms): personal, non-commercial use, and only
   your own Muse account. The bridge uses only documented SDK paths: text
-  `/chat/stream` turns and chat history reads.
+  `/chat/stream` turns and the `/chat/subscribe` event stream the ESP32
+  firmware uses.
 
-## Known open points (to check once paired)
+## Notes from the first paired run (2026-10-03)
 
-- **Side chat and history.** The bridge passes `session_id` to
-  `/chat/history` as well. If Muse's history ignores `session_id`, replies in
-  a side chat won't be found, and every turn ends in a 504. If that happens,
-  set `MUSE_SESSION_ID=` (empty) to use the main chat. The ESP32 firmware
-  doesn't use side chats, so this is untested against the real service.
-- The history row fields (`seq`, `event_name`, `message_id`,
-  `reply_to_message_id`, `display_text`, `display_text_ready`) come from the
-  ESP32 firmware, not from API docs.
+- **Side chat.** The firmware subscribes with an empty body (`{}`) and posts
+  to the main chat. With a `session_id` on `/chat/stream` and `{}` on
+  `/chat/subscribe`, the stream carried only status events, so every turn
+  timed out. The bridge therefore sends the same `session_id` in the
+  subscribe body (`{"session_id": "..."}`), and the reply events arrive. With
+  `MUSE_SESSION_ID=` (empty) it posts to the main chat and subscribes with
+  `{}`, exactly as the firmware does.
+- The event fields (`type`, `seq`, `event`, `payload.message_id`,
+  `payload.reply_to_message_id`, `payload.text`, `payload.display_text`,
+  `display_text_ready`, `activity_code`) come from the ESP32 firmware, not
+  from API docs.
 
 ## POC run
 
