@@ -143,7 +143,8 @@ them afterwards.
 
 1. **GATT MTU 256.** Android writes packets up to `MTU - 3` bytes and fails
    above 512. The symptom: pairing gets as far as Wi-Fi, then the app says
-   "Couldn't connect".
+   "Couldn't connect". We needed this one in practice: our pairing failed
+   exactly that way until the MTU was set to 256.
    ```bash
    sudo cp /etc/bluetooth/main.conf /etc/bluetooth/main.conf.pre-muse
    sudo sed -i 's/^#\?\s*ExchangeMTU\s*=.*/ExchangeMTU = 256/' /etc/bluetooth/main.conf

@@ -241,7 +241,9 @@ class MuseHandler(ConversationHandler):
     async def _transcript(self, role: str, text: str) -> None:
         self._emit_transcript(role, text, True)
         if self.log_transcripts:
-            await self.output_queue.put(AdditionalOutputs({"role": role, "content": text}))
+            # One line, so run_poc.sh's line-by-line redaction covers all of it.
+            flat = " ".join(text.split())
+            await self.output_queue.put(AdditionalOutputs({"role": role, "content": flat}))
 
     async def say(self, text: str) -> None:
         """Speak `text` verbatim with `say` (no Muse turn)."""

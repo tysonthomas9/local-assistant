@@ -127,21 +127,41 @@ else
 fi
 [[ "$token" =~ $TOKEN_RE ]] || die "that is not a valid SDK token; copy it again from gadgets.muse.ai"
 
+# On exit, error or a signal: stop the pairing container (so it stops
+# advertising), then wipe the state unless it still has to reach the Mac.
+PAIR_NAME="muse-gadget-pair"
+STATE="" paired=0 pair_pid=""
+cleanup() {
+    trap '' INT TERM HUP
+    if [ -n "$pair_pid" ]; then
+        docker rm -f "$PAIR_NAME" >/dev/null 2>&1 || true
+        kill "$pair_pid" 2>/dev/null || true
+        wait "$pair_pid" 2>/dev/null || true
+        pair_pid=""
+    fi
+    [ "$paired" = 1 ] || [ -z "$STATE" ] || wipe_dir "$STATE"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 STATE="$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/muse-pair.XXXXXX")"
 chmod 700 "$STATE"
-paired=0
-cleanup() { [ "$paired" = 1 ] || wipe_dir "$STATE"; }
-trap cleanup EXIT
 ( umask 077; printf '%s\n' "$token" > "$STATE/sdk_token" )
 unset token
 
 say "opening Bluetooth setup for $((timeout / 60)) minutes"
 say "on your phone: Muse app > Developer mode on > add a device > pick the MuseGadget… name shown below"
 tty_flag=(); [ -t 0 ] && tty_flag=(-t)
-if ! docker run --rm -i "${tty_flag[@]}" --name muse-gadget-pair "${DOCKER_BLUEZ[@]}" \
-        -v "$STATE:/state" "$IMAGE" pair --timeout "$timeout"; then
-    die "pairing did not complete; nothing was kept"
-fi
+# In the background so a signal reaches our traps at once (bash would wait for
+# a foreground docker first); stdin is passed on explicitly.
+docker run --rm -i "${tty_flag[@]}" --name "$PAIR_NAME" "${DOCKER_BLUEZ[@]}" \
+    -v "$STATE:/state" "$IMAGE" pair --timeout "$timeout" <&0 &
+pair_pid=$!
+pair_rc=0
+wait "$pair_pid" || pair_rc=$?
+pair_pid=""
+[ "$pair_rc" = 0 ] || die "pairing did not complete; nothing was kept"
 [ -s "$STATE/pairing.json" ] || die "pairing did not save credentials; nothing was kept"
 paired=1
 copy_to_mac "$STATE"

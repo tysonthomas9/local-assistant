@@ -176,6 +176,23 @@ def test_run_poc_redacts_transcripts_in_its_logs():
     assert tees and all("redact" in line for line in tees)
 
 
+def test_multi_line_transcripts_are_redacted_whole(bridge_url, monkeypatch):
+    # console.py logs `role=%s content=%s`; a multi-line text must not leak lines past the first.
+    monkeypatch.setenv("MUSE_LOG_TRANSCRIPTS", "1")
+    handler = make_handler(bridge_url, lambda a: "hello robot\nmy secret plan\r\n  part two")
+    _, outputs = asyncio.run(drive(handler, mic_frames()))
+    texts = [o.args[0] for o in outputs if isinstance(o, AdditionalOutputs)]
+    assert {"role": "user", "content": "hello robot my secret plan part two"} in texts
+    assert texts and all("\n" not in t["content"] and "\r" not in t["content"] for t in texts)
+    script = (HERE.parent.parent / "run_poc.sh").read_text()
+    redact = next(line for line in script.splitlines() if line.startswith("redact()"))
+    log = "".join("INFO console: role=%s content=%s\n" % (t["role"], t["content"]) for t in texts)
+    out = subprocess.run(["bash", "-c", redact + "\nredact"], input=log, capture_output=True,
+                         text=True, check=True).stdout
+    assert "secret" not in out and "part two" not in out and "hello" not in out
+    assert out.count("content=<redacted>") == len(texts)
+
+
 def test_mic_is_ignored_while_the_robot_speaks(bridge_url):
     calls: list[int] = []
 
