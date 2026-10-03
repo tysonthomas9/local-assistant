@@ -8,7 +8,10 @@ One turn, half-duplex (the POC has no barge-in):
 
 While a turn is being transcribed, sent, or spoken, mic input is dropped (XVF3800 echo
 cancellation helps, but the POC doesn't rely on it for turn-taking). Transcripts go to the app
-through `_emit_transcript` and as AdditionalOutputs (the app logs those).
+only through `_emit_transcript` (its UI/JSON-RPC push, never logged). They are not put on the
+output queue as AdditionalOutputs unless transcript logging is turned on (`log_transcripts=True`,
+or MUSE_LOG_TRANSCRIPTS=1 from `run_app.py --log-transcripts`), because the app logs those at INFO
+as `role=... content=<text>`. MuseHandler's own log lines hold only lengths and timings.
 
 The STT engine, bridge client and TTS are injectable so the unit tests run on the PC.
 """
@@ -63,6 +66,7 @@ class MuseHandler(ConversationHandler):
         synthesizer: Optional[Synthesizer] = None,
         segmenter: Optional[UtteranceSegmenter] = None,
         output_sample_rate: Optional[int] = None,
+        log_transcripts: Optional[bool] = None,
     ) -> None:
         super().__init__()
         self.deps = deps
@@ -77,6 +81,9 @@ class MuseHandler(ConversationHandler):
         self.synthesizer = synthesizer or _default_synthesizer(lambda: self._voice)
         self.segmenter = segmenter or UtteranceSegmenter(make_vad())
         self._output_rate = output_sample_rate
+        if log_transcripts is None:
+            log_transcripts = os.environ.get("MUSE_LOG_TRANSCRIPTS") == "1"
+        self.log_transcripts = log_transcripts  # opt-in: the app would log the text
         self._utterances: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=1)
         self._busy = False
         self._busy_until = 0.0
@@ -207,8 +214,7 @@ class MuseHandler(ConversationHandler):
             logger.info("MuseHandler: empty transcript (%.1f s of audio), ignored", len(utterance) / 16000)
             return
         logger.info("MuseHandler: heard %d chars in %.0f ms", len(text), stt_ms)
-        self._emit_transcript("user", text, True)
-        await self.output_queue.put(AdditionalOutputs({"role": "user", "content": text}))
+        await self._transcript("user", text)
         try:
             reply = await asyncio.to_thread(self.bridge.turn, text)
         except BridgeError as e:
@@ -225,13 +231,17 @@ class MuseHandler(ConversationHandler):
             rate = self.output_sample_rate()
             pcm = await asyncio.to_thread(self.synthesizer, text, rate)
             pcm = np.asarray(pcm, dtype=np.int16).reshape(-1)
-            self._emit_transcript("assistant", text, True)
-            await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": text}))
+            await self._transcript("assistant", text)
             step = max(1, int(rate * FRAME_S))
             for i in range(0, len(pcm), step):
                 await self.output_queue.put((rate, pcm[i : i + step].reshape(1, -1)))
             self._busy_until = time.monotonic() + len(pcm) / rate + TAIL_S
             self._mark_activity("assistant_audio")
+
+    async def _transcript(self, role: str, text: str) -> None:
+        self._emit_transcript(role, text, True)
+        if self.log_transcripts:
+            await self.output_queue.put(AdditionalOutputs({"role": role, "content": text}))
 
     async def say(self, text: str) -> None:
         """Speak `text` verbatim with `say` (no Muse turn)."""

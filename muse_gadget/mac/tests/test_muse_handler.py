@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -91,7 +93,16 @@ async def drive(handler: muse_handler.MuseHandler, frames) -> tuple[list, list]:
     return transcripts, outputs
 
 
-def test_recorded_utterance_becomes_a_spoken_reply(bridge_url):
+def make_handler(bridge_url, transcribe, **kwargs):
+    return muse_handler.MuseHandler(
+        FakeDeps(), bridge=BridgeClient(bridge_url), transcriber=transcribe, synthesizer=tone,
+        segmenter=UtteranceSegmenter(EnergyVad()), **kwargs,
+    )
+
+
+def test_recorded_utterance_becomes_a_spoken_reply(bridge_url, monkeypatch, caplog):
+    monkeypatch.delenv("MUSE_LOG_TRANSCRIPTS", raising=False)
+    caplog.set_level(logging.DEBUG)
     heard: list[np.ndarray] = []
 
     def transcribe(audio: np.ndarray) -> str:
@@ -113,12 +124,56 @@ def test_recorded_utterance_becomes_a_spoken_reply(bridge_url):
     assert ("user", "hello robot", True) in transcripts
     assert ("assistant", "You said: hello robot", True) in transcripts
 
+    # No transcript text for the app to log, and none in any log record.
+    assert not any(isinstance(o, AdditionalOutputs) for o in outputs)
     audio = [o for o in outputs if isinstance(o, tuple)]
+    assert len(audio) == len(outputs)
+    assert caplog.records
+    assert not [r for r in caplog.records if "hello robot" in r.getMessage()]
+    assert audio and all(rate == 16000 and pcm.dtype == np.int16 and pcm.ndim == 2 for rate, pcm in audio)
+    assert sum(pcm.size for _, pcm in audio) == tone("You said: hello robot", 16000).size
+
+
+def test_log_transcripts_opt_in_hands_the_text_to_the_app(bridge_url, monkeypatch):
+    monkeypatch.setenv("MUSE_LOG_TRANSCRIPTS", "1")
+    handler = make_handler(bridge_url, lambda a: "hello robot")
+    assert handler.log_transcripts
+    _, outputs = asyncio.run(drive(handler, mic_frames()))
     texts = [o.args[0] for o in outputs if isinstance(o, AdditionalOutputs)]
     assert {"role": "user", "content": "hello robot"} in texts
     assert {"role": "assistant", "content": "You said: hello robot"} in texts
-    assert audio and all(rate == 16000 and pcm.dtype == np.int16 and pcm.ndim == 2 for rate, pcm in audio)
-    assert sum(pcm.size for _, pcm in audio) == tone("You said: hello robot", 16000).size
+    assert not make_handler(bridge_url, lambda a: "", log_transcripts=False).log_transcripts
+
+
+def test_run_app_turns_the_flag_into_the_env(monkeypatch):
+    import run_app
+
+    monkeypatch.delenv("MUSE_LOG_TRANSCRIPTS", raising=False)
+    monkeypatch.setattr(run_app, "install", lambda: (_ for _ in ()).throw(SystemExit(0)))
+    monkeypatch.setattr(sys, "argv", ["run_app.py", "--no-camera", "--log-transcripts"])
+    with pytest.raises(SystemExit):
+        run_app.main()
+    assert sys.argv == ["run_app.py", "--no-camera"]
+    assert os.environ["MUSE_LOG_TRANSCRIPTS"] == "1"
+
+
+def test_run_poc_redacts_transcripts_in_its_logs():
+    script = (HERE.parent.parent / "run_poc.sh").read_text()
+    redact = [line for line in script.splitlines() if line.startswith("redact()")]
+    assert len(redact) == 1
+    lines = (
+        "2026-10-03 10:00:00 INFO console: role=user content=hello robot, my secret plan\n"
+        "2026-10-03 10:00:02 INFO console: role=assistant content=You said: hello robot\n"
+        "2026-10-03 10:00:03 INFO muse_handler: MuseHandler: heard 11 chars in 120 ms\n"
+    )
+    out = subprocess.run(["bash", "-c", redact[0] + "\nredact"], input=lines, capture_output=True,
+                         text=True, check=True).stdout
+    assert "hello robot" not in out and "secret" not in out
+    assert "role=user content=<redacted>" in out and "role=assistant content=<redacted>" in out
+    assert "heard 11 chars in 120 ms" in out
+    # Every path to a log file on the PC goes through redact.
+    tees = [line for line in script.splitlines() if "$LOGDIR/$RUN" in line and ("tee" in line or ">>" in line)]
+    assert tees and all("redact" in line for line in tees)
 
 
 def test_mic_is_ignored_while_the_robot_speaks(bridge_url):
@@ -142,8 +197,10 @@ def test_say_speaks_verbatim_without_a_turn():
     async def run():
         handler = muse_handler.MuseHandler(
             FakeDeps(), bridge=BridgeClient("http://127.0.0.1:9"), transcriber=lambda a: "",
-            synthesizer=tone, segmenter=UtteranceSegmenter(EnergyVad()),
+            synthesizer=tone, segmenter=UtteranceSegmenter(EnergyVad()), log_transcripts=False,
         )
+        spoken: list = []
+        handler.set_transcript_observer(lambda role, text, final: spoken.append((role, text)))
         with pytest.raises(RuntimeError):
             await handler.say("hi")
         startup = asyncio.create_task(handler.start_up())
@@ -153,11 +210,12 @@ def test_say_speaks_verbatim_without_a_turn():
         items = [handler.output_queue.get_nowait() for _ in range(handler.output_queue.qsize())]
         await handler.shutdown()
         await startup
-        return items
+        return items, spoken
 
-    items = asyncio.run(run())
-    assert items[0].args[0] == {"role": "assistant", "content": "Hello there"}
-    assert sum(pcm.size for _, pcm in items[1:]) == tone("Hello there", 16000).size
+    items, spoken = asyncio.run(run())
+    assert spoken == [("assistant", "Hello there")]
+    assert all(isinstance(i, tuple) for i in items)
+    assert sum(pcm.size for _, pcm in items) == tone("Hello there", 16000).size
 
 
 def test_bridge_errors_become_spoken_messages(bridge_url):
@@ -207,7 +265,6 @@ def test_launcher_swaps_the_backend():
 
 
 def test_exec_python_drops_the_trampoline_venvs_paths():
-    import subprocess
 
     env = dict(os.environ, PYTHONPATH=f"{sys.prefix}/gst:/keep/me", MUSE_PROBE=f"{sys.prefix}/only")
     out = subprocess.run(

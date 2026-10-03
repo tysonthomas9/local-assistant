@@ -244,7 +244,8 @@ Run it from the PC:
 ```bash
 muse_gadget/run_poc.sh                  # real Muse gadget (mac_gadget.sh start/stop)
 muse_gadget/run_poc.sh --fake-bridge    # echo bridge: the robot answers "You said: ..."
-# options: --duration SECONDS, --lock-timeout SECONDS, --mic-log SECONDS, -- <app args>
+# options: --duration SECONDS, --lock-timeout SECONDS, --mic-log SECONDS, --log-transcripts,
+#          -- <app args>
 ```
 
 In order, it:
@@ -274,9 +275,18 @@ Details:
 - Reply audio is rendered at the speaker's rate (16 kHz), not 24 kHz, because the app pushes
   frames to the speaker without resampling.
 - Speaking or listening needs nobody at the Mac, once Reachy Edge has its microphone grant.
-- **Transcripts in logs:** the upstream app logs every turn (`role=user content=...`). The logs
-  of each run go to `~/.local/state/muse-poc/` on the PC (`MUSE_POC_LOGDIR`), never into the
-  repo. Delete them when you're done. MuseHandler itself logs only lengths and timings.
+- **What's logged where (no transcripts by default):** prompts and replies aren't kept.
+  MuseHandler logs only lengths and timings, and it doesn't hand the text to the upstream app's
+  logger (which would print `role=... content=<text>`). The text goes only to the app's live
+  transcript push (`_emit_transcript`). On the Mac, each job's output goes to
+  `~/assistant-edge/run/<job>/out.log`, which `run_poc.sh` deletes when the job stops. On the PC,
+  each run's daemon and app output is in `~/.local/state/muse-poc/<run>.{daemon,app}.log`
+  (`MUSE_POC_LOGDIR`, outside the repo), with home paths shown as `~` and any `content=...`
+  redacted. The fake bridge logs only turn lengths.
+- **`--log-transcripts`** (debugging only) lets the app log each turn's text. `run_poc.sh` then
+  shows it on your terminal, but the log files on the PC stay redacted. The Mac's `out.log`
+  holds the text until the job stops (or until you delete it, if the run was killed with
+  `kill -9`).
 
 Tests (on the PC, with the app's venv; the Silero test runs when the `silero-vad` wheel is
 importable):

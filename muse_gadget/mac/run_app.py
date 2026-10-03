@@ -1,6 +1,9 @@
 """Run Pollen's conversation app (pinned, unmodified) with MuseHandler as its backend.
 
-    python run_app.py [app args, e.g. --no-camera --debug]
+    python run_app.py [--log-transcripts] [app args, e.g. --no-camera --debug]
+
+--log-transcripts (debugging only) lets the app log each turn's text (`role=... content=...`);
+by default MuseHandler doesn't hand the text to the app's logger at all.
 
 The app builds its backend in `main.run()` -> `build_handler()`, which imports
 `HuggingFaceRealtimeHandler` from `reachy_mini_conversation_app.huggingface_realtime` each time
@@ -46,6 +49,9 @@ def install() -> None:
 
 
 def main() -> int:
+    if "--log-transcripts" in sys.argv[1:]:
+        sys.argv = [a for a in sys.argv if a != "--log-transcripts"]
+        os.environ["MUSE_LOG_TRANSCRIPTS"] = "1"
     install()
     from reachy_mini_conversation_app.main import main as app_main
 

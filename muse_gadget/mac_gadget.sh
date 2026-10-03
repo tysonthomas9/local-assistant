@@ -46,6 +46,11 @@ MARK="$BASE/started-machine"
 action="$1"; shift
 
 machine_state() { podman machine inspect "$MACHINE" --format '{{.State}}' 2>/dev/null || echo missing; }
+# The machine's last-up time, recorded in the marker right after we start it. If it differs at
+# `stop`, the machine went through a stop/start that wasn't ours (e.g. a crashed run left the
+# marker and someone started the machine by hand later), so the marker no longer applies.
+machine_lastup() { podman machine inspect "$MACHINE" --format '{{.LastUp}}' 2>/dev/null || true; }
+marker_valid() { [ -s "$MARK" ] && [ "$(cat "$MARK")" = "$(machine_lastup)" ]; }
 container_state() { podman container inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null || echo none; }
 
 case "$action" in
@@ -55,10 +60,15 @@ case "$action" in
     [ "$st" != missing ] || { echo "no $MACHINE on the Mac" >&2; exit 1; }
     if [ "$st" != running ]; then
       podman machine start "$MACHINE" >/dev/null
-      : > "$MARK"
+      machine_lastup > "$MARK"
       echo "started $MACHINE (it was $st)"
     else
-      [ -e "$MARK" ] && echo "$MACHINE already running (started by us earlier)" || echo "$MACHINE already running (left as is)"
+      if marker_valid; then
+        echo "$MACHINE already running (started by us earlier)"
+      else
+        rm -f "$MARK"   # left by a run that didn't stop it; this machine start isn't ours
+        echo "$MACHINE already running (left as is)"
+      fi
     fi
     ;;
   image-hash)
@@ -107,6 +117,10 @@ case "$action" in
     else
       echo "$NAME not present"
     fi
+    if [ -e "$MARK" ] && ! marker_valid; then
+      rm -f "$MARK"
+      echo "ignoring a stale started-machine marker: $MACHINE was restarted since"
+    fi
     if [ -e "$MARK" ]; then
       others=0
       [ "$(machine_state)" = running ] && others="$(podman ps -q | wc -l | tr -d ' ')"
@@ -123,7 +137,7 @@ case "$action" in
     ;;
   status)
     port="$1"
-    echo "machine: $(machine_state)$([ -e "$MARK" ] && echo ', started by mac_gadget.sh')"
+    echo "machine: $(machine_state)$(marker_valid && echo ', started by mac_gadget.sh')"
     if [ "$(machine_state)" = running ]; then
       echo "container: $(container_state)"
       printf 'health: '; curl -fsS --max-time 3 "http://127.0.0.1:$port/health" 2>/dev/null || printf 'no answer'

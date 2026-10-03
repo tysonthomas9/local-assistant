@@ -6,7 +6,8 @@
 #   muse_gadget/run_poc.sh --fake-bridge    echo bridge ("You said ...") instead of Muse
 #   options: --duration SECONDS (stop by itself), --lock-timeout SECONDS (default: wait forever),
 #            --mic-log SECONDS (log the mic level and VAD score that often),
-#            -- <extra conversation-app args, e.g. --debug>
+#            --log-transcripts (debugging: show each turn's text on this terminal; the log files
+#            on the PC stay redacted), -- <extra conversation-app args, e.g. --debug>
 #
 # In order: take the hw-run lock on reachy-mac -> sync MuseHandler + install the pinned app into
 # ~/assistant-edge/muse-app -> start the bridge (Muse gadget container, or the fake one) -> start
@@ -14,21 +15,23 @@
 # On exit, error or Ctrl-C: stop the app, robot goto_sleep, motors off, stop the daemon and every
 # com.assistant.reachy-edge.<this run>.* job, stop the bridge, release the lock.
 # It never deletes another run's lock (it waits), never stops a daemon it didn't start, and
-# never changes the speaker volume. Output from the Mac shows its home directory as ~.
+# never changes the speaker volume. Output from the Mac shows its home directory as ~, and
+# transcript text (`content=...`) is redacted in the log files under ~/.local/state/muse-poc/.
 set -uo pipefail
 
 HOST=reachy-mac
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-LOGDIR="${MUSE_POC_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/muse-poc}"   # outside the repo: the app logs transcripts
-fake=0; duration=0; lock_timeout=0; mic_log=0; app_args=()
+LOGDIR="${MUSE_POC_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/muse-poc}"   # outside the repo
+fake=0; duration=0; lock_timeout=0; mic_log=0; log_transcripts=0; app_args=()
 while [ $# -gt 0 ]; do
     case $1 in
         --fake-bridge) fake=1; shift ;;
         --duration) duration=$2; shift 2 ;;
         --lock-timeout) lock_timeout=$2; shift 2 ;;
         --mic-log) mic_log=$2; shift 2 ;;
+        --log-transcripts) log_transcripts=1; shift ;;
         --) shift; app_args=("$@"); break ;;
-        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
         *) echo "run_poc: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -43,6 +46,9 @@ OWNER="run=$RUN machine=$MID pid=$$ since=$(date +%s)"
 mkdir -p "$LOGDIR"
 log() { printf '[run_poc %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 scrub() { sed -u -e 's#/Users/[^/ ]*#~#g' -e 's#/home/[^/ ]*#~#g'; }
+# The app logs AdditionalOutputs as `role=<r> content=<text>`. MuseHandler only emits those with
+# --log-transcripts, but whatever reaches a log file on the PC goes through this first.
+redact() { sed -u -e 's/\(role=[A-Za-z_]*\) content=.*/\1 content=<redacted>/'; }
 rsh() { ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "$@"; }
 rsh_sh() { rsh "sh -s --$(printf ' %q' "$@")"; }   # rsh_sh <args...> < script: args keep their spaces
 
@@ -95,11 +101,16 @@ EOF
 
 # ------------------------------------------------------------------ jobs inside Reachy Edge.app
 pids=()           # local ssh processes we started
-daemon_started=0; bridge_started=0; locked=0
+daemon_started=0; bridge_started=0; locked=0; lock_tried=0
 start_job() {     # start_job <name> <remote args for edge_app_run.sh, already quoted for sh>
     local name=$1 args=$2
-    rsh "ASSISTANT_TEST_RUN=$RUN sh \"\$HOME/assistant-edge/src/scripts/edge_app_run.sh\" $name $args" \
-        < /dev/null 2>&1 | scrub | tee -a "$LOGDIR/$RUN.$name.log" | sed -u "s/^/[$name] /" &
+    if [ "$log_transcripts" = 1 ]; then   # text on the terminal only, never in the log file
+        rsh "ASSISTANT_TEST_RUN=$RUN sh \"\$HOME/assistant-edge/src/scripts/edge_app_run.sh\" $name $args" \
+            < /dev/null 2>&1 | scrub | tee >(redact >> "$LOGDIR/$RUN.$name.log") | sed -u "s/^/[$name] /" &
+    else
+        rsh "ASSISTANT_TEST_RUN=$RUN sh \"\$HOME/assistant-edge/src/scripts/edge_app_run.sh\" $name $args" \
+            < /dev/null 2>&1 | scrub | redact | tee -a "$LOGDIR/$RUN.$name.log" | sed -u "s/^/[$name] /" &
+    fi
     pids+=($!)
 }
 api() {           # api <GET|POST> <path>: the daemon's REST API on the Mac's loopback
@@ -130,6 +141,11 @@ cleanup() {
     [ "$cleaning" = 1 ] && return
     cleaning=1
     trap '' INT TERM HUP
+    if [ "$locked" != 1 ]; then   # stopped before or while taking the lock: nothing else started
+        # release_lock only removes a lock that names this run, so it's safe if we never got it.
+        [ "$lock_tried" = 1 ] && release_lock
+        return 0
+    fi
     log "cleaning up"
     stop_jobs app SIGINT | scrub   # the app shuts down cleanly on SIGINT (KeyboardInterrupt)
     if [ "$daemon_started" = 1 ]; then
@@ -159,10 +175,14 @@ cleanup() {
     log "done (logs: $LOGDIR/$RUN.*.log)"
 }
 
+# Traps first, so a signal at any point (even right after the lock is taken) releases it.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+lock_tried=1
 take_lock || exit 1
 locked=1
-trap 'cleanup; exit 130' INT TERM HUP
-trap cleanup EXIT
 
 # ------------------------------------------------------------------ 1. sync + install the app
 log "syncing MuseHandler and installing the pinned app on $HOST"
@@ -211,7 +231,7 @@ done
 log "daemon running"
 
 log "starting the conversation app with MuseHandler"
-start_job app "-e HF_HOME=~/assistant-edge/muse-app/hf -e HF_HUB_OFFLINE=1 -e MUSE_BRIDGE_URL=http://127.0.0.1:48080 -e MUSE_MIC_LOG=$mic_log \
+start_job app "-e HF_HOME=~/assistant-edge/muse-app/hf -e HF_HUB_OFFLINE=1 -e MUSE_BRIDGE_URL=http://127.0.0.1:48080 -e MUSE_MIC_LOG=$mic_log -e MUSE_LOG_TRANSCRIPTS=$log_transcripts \
 -- $M/mac/exec_python.py $M/app/.venv/bin/python $M/mac/run_app.py --no-camera ${app_args[*]:-}"
 app_ssh=${pids[-1]}
 
