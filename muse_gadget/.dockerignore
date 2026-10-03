@@ -1,0 +1,6 @@
+mac/
+run_poc.sh
+README.md
+*.sh
+**/__pycache__
+**/.pytest_cache

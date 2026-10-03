@@ -1,0 +1,230 @@
+# Muse gadget for Reachy Mini
+
+This lets the robot talk to [Muse](https://gadgets.muse.ai). Muse's open-source
+Linux Device SDK ([muse-gadget-sdk](https://github.com/facebookincubator/muse-gadget-sdk),
+`linux/`) is packaged as a container, together with a small HTTP bridge. The
+robot's conversation app sends the text of what you said to the bridge, and
+the bridge returns Muse's reply as text.
+
+```
+PC (once)                         reachy-mac (every run)
+---------                         ----------------------
+pair_on_pc.sh                     mac_gadget.sh start
+  Docker + host BlueZ               Podman (podman-machine-default)
+  musegadget pair  <-- BLE -->        muse-gadget container
+  Muse phone app                        gadget link  <== encrypted ==> Muse
+        |                               /turn bridge on 127.0.0.1:48080
+        +-- state files, copied once -->  ~/assistant-edge/muse-state
+            then deleted from the PC   Pollen app (Reachy Edge.app) --POST /turn-->
+```
+
+- **Pairing runs once, on the PC.** The SDK pairs over Bluetooth LE through
+  Linux BlueZ. Podman's VM on the Mac can't reach the Mac's Bluetooth.
+- **Runtime is on the Mac**, in Podman. The bridge is published on the Mac's
+  `127.0.0.1` only, so only programs on the Mac can call it.
+- **The upstream SDK is never edited.** It's pinned to commit
+  `7e88df2bbb3fa92403024b9d161d798f937d6716` (see `Containerfile`) and
+  installed with uv. Everything robot-specific lives in `gadget/`.
+
+## What the wrapper changes
+
+- **Commands Muse can call: only `device.health`.** The SDK's `system.run`,
+  `file.read` and `file.write` are left out of the registration, and the
+  executor refuses them anyway (`gadget/restrict.py`). So Muse gets no shell
+  and no file access.
+- **Name**: the gadget shows up in Muse as "Reachy Mini" (`MUSE_DISPLAY_NAME`),
+  never as the machine's host name. `device.health` reports that name too, and
+  the container's host name is `reachy-mini`.
+- **One process**: the gadget link and the HTTP bridge run together
+  (`python -m gadget run`).
+- **Runs as a regular user** (uid 10001) with all capabilities dropped,
+  no-new-privileges and a read-only root filesystem.
+- **No state in the image.** The identity, pairing and SDK token live in
+  `MUSEGADGET_STATE_DIR` (`/state`), a mounted volume.
+
+## The bridge
+
+| Request | Response |
+|---|---|
+| `POST /turn`, JSON `{"text": "..."}` | 200 `{"reply": "..."}` |
+| not paired yet | 503 `{"error": "not_paired"}` |
+| paired, but the link to Muse is down | 503 `{"error": "link_down"}` |
+| no reply within 60 s | 504 `{"error": "timeout"}` |
+| Muse refused the message | 502 `{"error": "muse_error"}` |
+| body that isn't JSON (audio included) | 415 `{"error": "unsupported_media_type"}` |
+| JSON without `text` | 400 `{"error": "bad_request"}` |
+| `GET /health` | 200 `{"paired": bool, "linked": bool}` |
+
+How a turn works (`gadget/chat.py`). `POST /chat/stream` only acknowledges the
+message, so the bridge does what the SDK's ESP32 firmware does:
+
+1. It reads the newest chat-history row, to mark where the chat ends.
+2. It posts the text and keeps the new `message_id`.
+3. It polls `/chat/history` after the mark until Muse's reply rows to that
+   message are complete, then strips markdown so the reply reads well aloud.
+
+Turns run one at a time. Each one goes to a fixed side chat
+(`MUSE_SESSION_ID`, default `reachy-mini-robot`) and starts with a short note
+asking for brief, spoken-style answers (`MUSE_STYLE_HINT`; set it to an empty
+string to turn it off). The bridge logs only how long messages and replies
+are, never what they say.
+
+Speech-to-text runs on the Mac, so the bridge accepts text only.
+
+## Build and test
+
+```bash
+# PC, amd64 (Docker)
+docker build -f muse_gadget/Containerfile -t localhost/muse-gadget:latest muse_gadget
+docker run --rm --entrypoint sh localhost/muse-gadget:latest -c \
+  'cd /opt/muse-sdk/linux && python -m pytest -q -p no:cacheprovider tests;
+   cd /opt/gadget && python -m pytest -q -p no:cacheprovider tests'
+```
+
+On the Mac (arm64), `mac_gadget.sh start` builds the image whenever the
+sources have changed (the image is labelled with a hash of the build context).
+To run the same tests there:
+`ssh reachy-mac 'PATH=/opt/homebrew/bin:$PATH podman run --rm --entrypoint sh localhost/muse-gadget:latest -c "cd /opt/gadget && python -m pytest -q -p no:cacheprovider tests"'`.
+
+The wrapper's tests (`tests/`) use a fake Muse link and a fake Muse VM that
+speaks the SDK's real encrypted protocol. They check four things: `/turn`
+returns the reply, the registered commands exclude `system.run` and `file.*`,
+the display name isn't the host name, and the bridge binds only to loopback.
+
+## Pairing (once, on the PC)
+
+You need:
+- an **SDK token** from gadgets.muse.ai > Account > SDK tokens (`mgst_…`);
+- the **Muse app** on your phone, signed in, with **Developer mode** on;
+- the phone near this PC.
+
+1. Optional: check that everything except the phone step works. This builds
+   the image, checks that the container can reach BlueZ, and checks SSH to the
+   Mac:
+   ```bash
+   muse_gadget/pair_on_pc.sh --check
+   ```
+2. Save the token to a file that only you can read, outside the repo. Or skip
+   this step and paste the token at the hidden prompt in step 3.
+   ```bash
+   install -m 600 /dev/null ~/.config/muse-sdk-token && nano ~/.config/muse-sdk-token
+   ```
+3. Pair:
+   ```bash
+   muse_gadget/pair_on_pc.sh --token-file ~/.config/muse-sdk-token
+   # or: muse_gadget/pair_on_pc.sh   (asks for the token, hidden)
+   ```
+   The terminal shows a name like `MuseGadgetA1B2C3`. In the Muse app, add a
+   device and pick that name. Setup stays open for 10 minutes (`--timeout`).
+4. When the app says it's paired, the script copies the state to
+   `reachy-mac:~/assistant-edge/muse-state` (folder 0700, files 0600). It then
+   deletes the state from the PC (shred, then delete). If the copy fails, the
+   state stays in a private temporary folder, and the script prints the
+   command that retries the copy (`--copy-only DIR`).
+5. Start the gadget on the Mac: `muse_gadget/mac_gadget.sh start`. Then check
+   that `/health` says `"paired": true, "linked": true`.
+
+If the Mac already has a paired gadget, the script stops. Pass `--force` to
+pair a new one and replace it. To remove the old device, delete it in the
+Muse app.
+
+**Why pairing needs extra Docker options.** Docker's default AppArmor
+profile blocks all D-Bus traffic, so the short-lived pairing container runs
+with `--security-opt apparmor=unconfined`. To make up for it, it runs as your
+user, not root, with every capability dropped and `no-new-privileges`. It
+only gets the host's D-Bus system socket and a private temporary state
+folder.
+
+### Optional BlueZ tweaks on the PC (sudo; only if pairing fails)
+
+Upstream's installer makes two BlueZ changes on the host. Ours doesn't touch
+the host. Make these changes only if pairing fails as described, and undo
+them afterwards.
+
+1. **GATT MTU 256.** Android writes packets up to `MTU - 3` bytes and fails
+   above 512. The symptom: pairing gets as far as Wi-Fi, then the app says
+   "Couldn't connect".
+   ```bash
+   sudo cp /etc/bluetooth/main.conf /etc/bluetooth/main.conf.pre-muse
+   sudo sed -i 's/^#\?\s*ExchangeMTU\s*=.*/ExchangeMTU = 256/' /etc/bluetooth/main.conf
+   grep -n '^ExchangeMTU' /etc/bluetooth/main.conf   # must show it under [GATT]
+   sudo systemctl restart bluetooth
+   # undo:
+   sudo mv /etc/bluetooth/main.conf.pre-muse /etc/bluetooth/main.conf && sudo systemctl restart bluetooth
+   ```
+2. **Battery plugin off.** BlueZ reads a connecting phone's battery level.
+   iPhones answer only over a bonded link, so BlueZ asks the phone to bond, and
+   iOS pairing can drop. The symptom: an iPhone disconnects during setup.
+   ```bash
+   sudo mkdir -p /etc/systemd/system/bluetooth.service.d
+   printf '[Service]\nExecStart=\nExecStart=/usr/libexec/bluetooth/bluetoothd --noplugin=battery\n' \
+     | sudo tee /etc/systemd/system/bluetooth.service.d/zz-muse-gadget.conf
+   sudo systemctl daemon-reload && sudo systemctl restart bluetooth
+   # undo:
+   sudo rm /etc/systemd/system/bluetooth.service.d/zz-muse-gadget.conf
+   sudo systemctl daemon-reload && sudo systemctl restart bluetooth
+   ```
+   Before you add this, check that `systemctl cat bluetooth` shows the same
+   `ExecStart` path.
+
+## Running on the Mac
+
+Run these from the PC:
+
+```bash
+muse_gadget/mac_gadget.sh start    # idempotent
+muse_gadget/mac_gadget.sh status   # machine, container, /health, who listens on 48080
+muse_gadget/mac_gadget.sh stop
+```
+
+- `start` starts `podman-machine-default` only if it's stopped, and records
+  that it did (in `~/assistant-edge/muse-gadget/started-machine` on the Mac).
+  It never changes the machine's settings. It builds the arm64 image on the
+  Mac if needed, then runs the `muse-gadget` container with
+  `-p 127.0.0.1:48080:48080` and the state folder mounted. If something else
+  already listens on 48080 (for example a fake bridge), it stops with an
+  error.
+- `stop` removes only the `muse-gadget` container. It stops the machine only
+  if `start` started it, and leaves it running if other containers have
+  started since then.
+- The gadget doesn't use the robot (no daemon, motors, mic, speaker or
+  camera), so it doesn't take the hw-run lock. Whatever drives the robot takes
+  the lock itself.
+- To clean up completely, run `stop`, then (with the machine running)
+  `podman rmi localhost/muse-gadget:latest` on the Mac.
+
+Inside the container the bridge listens on `0.0.0.0:48080`, because a
+published port has to reach the container's own interface. That's allowed
+only when `MUSE_BRIDGE_IN_CONTAINER=1`, which is set in the image. Anywhere
+else the bridge refuses any address that isn't loopback. On the Mac, the only
+listener is Podman's `gvproxy` on `127.0.0.1:48080`.
+
+## Token and privacy
+
+- The SDK token is read from a file or a hidden prompt, never from a
+  command-line argument, and it is never printed. It's stored only as
+  `sdk_token` (0600) in the gadget's state folder. The gadget reports it to
+  Muse when it refreshes its device token, as the SDK does. It's never in git,
+  the image, notes or logs.
+- The pairing (`pairing.json`) holds the device's access and refresh tokens
+  for your Muse account. It exists only on the Mac (0600). Treat it like a
+  password.
+- If Meta revokes the token, or you stop using this, delete the device in the
+  Muse app and delete `~/assistant-edge/muse-state` on the Mac.
+- This repo never contains the Mac's address, user name, host name or home
+  path. The scripts reach the Mac only as `reachy-mac`, and `$HOME` is
+  expanded on the Mac.
+- Terms (gadgets.muse.ai/sdk-terms): personal, non-commercial use, and only
+  your own Muse account. The bridge uses only documented SDK paths: text
+  `/chat/stream` turns and chat history reads.
+
+## Known open points (to check once paired)
+
+- **Side chat and history.** The bridge passes `session_id` to
+  `/chat/history` as well. If Muse's history ignores `session_id`, replies in
+  a side chat won't be found, and every turn ends in a 504. If that happens,
+  set `MUSE_SESSION_ID=` (empty) to use the main chat. The ESP32 firmware
+  doesn't use side chats, so this is untested against the real service.
+- The history row fields (`seq`, `event_name`, `message_id`,
+  `reply_to_message_id`, `display_text`, `display_text_ready`) come from the
+  ESP32 firmware, not from API docs.

@@ -1,0 +1,60 @@
+# Muse gadget for Reachy Mini: the pinned Muse Linux Device SDK plus the
+# robot wrapper and /turn bridge (gadget/). Builds for linux/amd64 (Docker on
+# the PC, used for pairing) and linux/arm64 (Podman on the Mac, runtime).
+#
+# No state, token or pairing is ever in the image: they live in
+# $MUSEGADGET_STATE_DIR (/state), a mounted volume.
+
+FROM docker.io/library/debian:bookworm-slim
+
+# The SDK, pinned to one commit and never edited.
+ARG MUSE_SDK_REPO=https://github.com/facebookincubator/muse-gadget-sdk
+ARG MUSE_SDK_COMMIT=7e88df2bbb3fa92403024b9d161d798f937d6716
+ARG UV_VERSION=0.11.6
+
+# python3-dbus and python3-gi come from Debian: the SDK's Bluetooth pairing
+# needs them and they don't build from PyPI without a compiler toolchain.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 python3-venv python3-dbus python3-gi git ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
+      | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh \
+ && uv --version
+
+RUN git init -q /opt/muse-sdk \
+ && git -C /opt/muse-sdk remote add origin "$MUSE_SDK_REPO" \
+ && git -C /opt/muse-sdk fetch -q --depth 1 origin "$MUSE_SDK_COMMIT" \
+ && git -C /opt/muse-sdk checkout -q FETCH_HEAD \
+ && test "$(git -C /opt/muse-sdk rev-parse HEAD)" = "$MUSE_SDK_COMMIT" \
+ && rm -rf /opt/muse-sdk/.git /opt/muse-sdk/esp32 /opt/muse-sdk/skills
+
+# A venv that also sees Debian's dbus and gi modules.
+RUN uv venv -q --system-site-packages --python /usr/bin/python3 /opt/venv \
+ && uv pip install -q --no-cache --python /opt/venv/bin/python /opt/muse-sdk/linux pytest
+
+COPY gadget /opt/gadget/gadget
+COPY tests /opt/gadget/tests
+
+RUN groupadd --gid 10001 muse \
+ && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /state --shell /usr/sbin/nologin muse \
+ && mkdir -p /state && chown muse:muse /state && chmod 0700 /state
+
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONPATH=/opt/gadget \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    MUSEGADGET_STATE_DIR=/state \
+    MUSEGADGET_SOCKET=/tmp/musegadget.sock \
+    MUSE_DISPLAY_NAME="Reachy Mini" \
+    MUSE_BRIDGE_IN_CONTAINER=1 \
+    MUSE_BRIDGE_HOST=0.0.0.0 \
+    MUSE_BRIDGE_PORT=48080
+
+USER 10001:10001
+WORKDIR /opt/gadget
+VOLUME ["/state"]
+EXPOSE 48080
+ENTRYPOINT ["python", "-m", "gadget"]
+CMD ["run"]
