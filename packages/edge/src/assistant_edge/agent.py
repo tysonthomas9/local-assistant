@@ -90,7 +90,14 @@ from typing import Any, Literal
 
 from pydantic import JsonValue
 
-from assistant_contracts.body import AudioFrame, Body, LinkAware, ReportsHealth, StopsGently
+from assistant_contracts.body import (
+    AudioFrame,
+    Body,
+    HearsVoice,
+    LinkAware,
+    ReportsHealth,
+    StopsGently,
+)
 from assistant_contracts.capabilities import Capabilities
 from assistant_contracts.common import Aec
 from assistant_contracts.frames import Frame, FrameKind
@@ -148,6 +155,8 @@ PRE_ROLL_MS = 300
 """Audio before the energy trigger fired that is sent when its window opens."""
 TURN_AUDIO_BYTES = TURN_SECONDS * 16000 * 2
 MIC_CAP_S = 120.0
+VOICE_REASONS = ("wake", "vad", "follow_up", "energy")
+"""Mic windows opened by a voice: the body may turn toward it (`HearsVoice`)."""
 """Hard cap of any mic window (user decision 2026-10-03): `max_window_s` is clamped to it."""
 WAKE_SPEECH_MS = 240
 """In a wake window, speech counts as the request once this much of it (in all) follows the
@@ -461,9 +470,10 @@ class EdgeAgent:
                 task = asyncio.create_task(self._express(message), name="express")
                 self._asks.add(task)
                 task.add_done_callback(self._asks.discard)
-            case LookAt():
-                ok = self.body.motion is not None and await self.body.motion.look_at(message.target)
-                await self._result(message, ok, None if ok else "look_at is not supported")
+            case LookAt():  # a turn may first wake the robot: the link keeps reading meanwhile
+                task = asyncio.create_task(self._look_at(message), name="look_at")
+                self._asks.add(task)
+                task.add_done_callback(self._asks.discard)
             case Snapshot():
                 await self._snapshot(message)
             case PlaySound():
@@ -505,6 +515,21 @@ class EdgeAgent:
             await self._result(message, False, f"{type(exc).__name__}: {exc}")
             return
         await self._result(message, ok, None if ok else f"no expression {message.name!r}")
+
+    async def _look_at(self, message: LookAt) -> None:
+        motion = self.body.motion
+        try:
+            ok = motion is not None and await motion.look_at(message.target)
+        except Exception as exc:
+            await self._result(message, False, f"{type(exc).__name__}: {exc}")
+            return
+        await self._result(message, ok, None if ok else "look_at is not supported")
+
+    async def _voice_heard(self, body: HearsVoice, reason: str) -> None:
+        try:
+            await body.voice_heard(reason)
+        except Exception as exc:
+            emit("BODY-ERROR", {"detail": f"voice_heard: {type(exc).__name__}: {exc}"})
 
     async def _snapshot(self, message: Snapshot) -> None:
         camera = self.body.camera
@@ -653,6 +678,10 @@ class EdgeAgent:
             self._follow_until = 0.0  # a follow-up opens one window
         emit("MIC-OPEN", reason=reason, barge_in=str(barge_in).lower(), limit_s=f"{limit_s:g}")
         await self.send(vad)
+        if reason in VOICE_REASONS and isinstance(self.body, HearsVoice):
+            task = asyncio.create_task(self._voice_heard(self.body, reason), name="voice-heard")
+            self._asks.add(task)
+            task.add_done_callback(self._asks.discard)
 
     async def _close_window(self, reason: str) -> None:
         window, self.window = self.window, None

@@ -5,12 +5,13 @@ to the brain is up (`ReachyBody.link_changed`), and removes it when it stops. Th
 runs in the daemon's process (`python -m assistant_robot_reachy.daemon`), not in the edge
 agent that might die. It arms on the first heartbeat written after it started. Armed, once the
 heartbeat is older than `STALE_S` or gone (the edge agent died, froze or stopped, or its link
-or the SSH tunnel under it dropped), it disarms, and if the motors are on it puts the robot to
-rest the way the tests do: the SDK's `goto_sleep` through the daemon's own REST API, then the
-motors off. A fresh heartbeat (the agent back, its link up again) arms it again.
+or the SSH tunnel under it dropped), it disarms and switches Pollen's daemon-side face tracker
+off (it would go on turning the head toward a face), and if the motors are on it puts the
+robot to rest the way the tests do: the SDK's `goto_sleep` through the daemon's own REST API,
+then the motors off. A fresh heartbeat (the agent back, its link up again) arms it again.
 
 It prints one line per event: `WATCHDOG armed`, `WATCHDOG fired reason=... motors=...` and
-`WATCHDOG rested motors=...` (or `WATCHDOG error ...`).
+`WATCHDOG rested motors=... tracking=off` (or `WATCHDOG error ...`).
 """
 
 import json
@@ -64,6 +65,11 @@ class DaemonApi:
         """The motors' control mode: enabled, disabled or gravity_compensation."""
         return str(self._call("/api/motors/status").get("mode"))
 
+    def tracking_off(self) -> str:
+        """Pollen's face tracker off; "off" (the daemon's answer)."""
+        answer = self._call("/api/media/tracking/disable", "POST")
+        return "on" if (answer or {}).get("enabled") else "off"
+
     def rest(self) -> str:
         """`goto_sleep`, wait for it to end, then the motors off; the motors' mode after."""
         self._call("/api/move/play/goto_sleep", "POST")
@@ -86,8 +92,10 @@ class Watchdog:
         path: Path = HEARTBEAT,
         stale_s: float = STALE_S,
         started: float | None = None,
+        tracking_off: Callable[[], str] = lambda: "off",
     ) -> None:
         self.motors, self.rest, self.path, self.stale_s = motors, rest, path, stale_s
+        self.tracking_off = tracking_off
         self.started = time.time() if started is None else started
         self.armed = False
         self.seen = 0.0
@@ -114,8 +122,9 @@ class Watchdog:
             return None
         reason = "gone" if beat is None else f"stale_{now - beat:.1f}s"
         mode = self.motors()  # if the daemon does not answer: still armed, the next check retries
+        tracking = self.tracking_off()  # nothing may turn the head toward a face any more
         self.armed = False
-        emit("WATCHDOG", "fired", reason=reason, motors=mode)
+        emit("WATCHDOG", "fired", reason=reason, motors=mode, tracking=tracking)
         if mode == "disabled":
             return "fired: already at rest"
         try:
@@ -123,7 +132,7 @@ class Watchdog:
         except Exception:
             self.armed = True  # not rested: the next check tries again
             raise
-        emit("WATCHDOG", "rested", motors=after)
+        emit("WATCHDOG", "rested", motors=after, tracking=tracking)
         return f"rested: motors {after}"
 
     def run(self, stop: threading.Event, poll_s: float = POLL_S) -> None:
@@ -143,7 +152,7 @@ class Watchdog:
 def start(api_base: str, path: Path = HEARTBEAT) -> threading.Event:
     """Run the watchdog in a daemon thread; set the returned event to stop it."""
     api = DaemonApi(api_base)
-    dog = Watchdog(api.motors, api.rest, path)
+    dog = Watchdog(api.motors, api.rest, path, tracking_off=api.tracking_off)
     stop = threading.Event()
     threading.Thread(target=dog.run, args=(stop,), name="motor-watchdog", daemon=True).start()
     return stop

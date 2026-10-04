@@ -9,7 +9,19 @@ from assistant_testing.steps import (
     link,
     listen,
     speech,
+    tracking,
     try_it,
 )
 
-__all__ = ["brain", "contracts", "core", "edge", "edge_host", "link", "listen", "speech", "try_it"]
+__all__ = [
+    "brain",
+    "contracts",
+    "core",
+    "edge",
+    "edge_host",
+    "link",
+    "listen",
+    "speech",
+    "tracking",
+    "try_it",
+]

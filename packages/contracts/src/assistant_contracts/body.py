@@ -109,6 +109,14 @@ class LinkAware(Protocol):
 
 
 @runtime_checkable
+class HearsVoice(Protocol):
+    """Optional: a body told that a mic window opened for a voice (`reason`: wake, vad,
+    follow_up, energy), e.g. to turn toward it. The edge does not wait for it."""
+
+    async def voice_heard(self, reason: str) -> None: ...
+
+
+@runtime_checkable
 class StopsGently(Protocol):
     """Optional on an `AudioIO`: stop the speech now playing after `ms` more, with a `fade_ms`
     fade-out, as a person stops talking when interrupted (the edge's barge-in); the other

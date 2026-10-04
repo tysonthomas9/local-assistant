@@ -1,0 +1,159 @@
+feature: The robot turns toward you and keeps looking at you
+tier: [sim, hw]
+description: >
+  Person tracking (S8g), driven through the real edge agent and its reachy body by the link
+  server console. While the robot is awake, Pollen's daemon-side face tracker follows a face
+  (`[body.reachy] tracking`, voice+face by default): TRACKING on when the robot wakes, paused
+  (weight 0) at the captured look-at pose while the robot speaks and on again afterwards, the
+  pose held 1.5 s after the face was last seen (before Pollen's tracker would recenter at 2 s),
+  off when the robot goes to rest. The brain switches following at runtime
+  (`look_at{target: {kind: user, follow: false|true}}`) and turns the head toward a direction
+  (`look_at{target: {kind: doa}}`); a voice that opens a mic window makes the body read the
+  XVF3800's direction of arrival and turn toward it (VOICE-TURN). A turn is a move of ours: at
+  most 10 degrees of yaw from neutral, at 10 degrees a second. Killing the edge mid-tracking
+  makes the watchdog switch the tracker off and rest the robot, motors off. Measured by the
+  sampler next to the daemon (20 Hz): the turn's sign, size and fastest rotation, the held
+  pose, Pollen's limits (head 65, body 160 degrees); written to artifacts/tracking-*.json.
+  The simulated robot has no camera and no XVF3800: its daemon answers that it cannot track
+  (TRACKING camera=false) and reads no direction (VOICE-TURN why=no_doa), so the face and the
+  voice direction through the air are hw only (the last two scenarios; the hw ones need no face
+  in view of the camera except in the face scenario, and the edge host's speaker on the
+  robot's left).
+scenarios:
+  - name: tracking on when awake, paused while speaking, holds without a face, off at rest
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 12}}
+      - edge_printed: {client: lite, tag: TRACKING-MODE, fields: {mode: voice+face}}
+      - server_sends: {client: lite, type: attention, fields: {state: listening}}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: "on", weight: "1", reason: awake}, within_s: 30}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: hold, reason: no_face}, within_s: 3}
+      - robot_head_holds: {seconds: 2, max_deg: 1.5, what: hold-no-face}
+      - server_sends: {client: lite, type: attention, fields: {state: speaking}}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: paused, weight: "0", reason: speaking}}
+      - edge_printed: {client: lite, tag: MOTION, fields: {attention: speaking}}
+      - server_streams_speech: {client: lite, stream: 1, clip: "tone:220:4"}
+      - robot_head_holds: {seconds: 3, max_deg: 15, max_mean_deg: 3, what: paused-while-speaking}
+      - playback_reported: {client: lite, stream: 1, state: done, within_s: 10}
+      - server_sends: {client: lite, type: attention, fields: {state: idle}}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: "on", weight: "1", reason: spoke}}
+      - robot_sleeps_after_idle: {client: lite, seconds: 12}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: "off", reason: rest}, within_s: 15}
+      - robot_motors_are: {mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: the brain switches following off and on; with tracking off in the config it refuses
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 6}}
+      - server_sends: {client: lite, type: attention, fields: {state: listening}}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: "on", reason: awake}, within_s: 30}
+      - edge_answers: {client: lite, type: look_at, fields: {target: {kind: user, follow: false}}}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: "off", reason: brain}}
+      - edge_printed: {client: lite, tag: FOLLOW, fields: {"on": "false", ok: "true", awake: "true"}}
+      - edge_answers: {client: lite, type: look_at, fields: {target: {kind: user, follow: true}}}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: "on", reason: brain}}
+      - server_sends: {client: lite, type: attention, fields: {state: idle}}
+      - robot_sleeps_after_idle: {client: lite, seconds: 6}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: "off", reason: rest}, within_s: 15}
+      - robot_motors_are: {mode: disabled}
+      - kill_process: {process: "client:lite", signal_name: TERM}
+      - start_edge_agent: {id: lite2, body: reachy, where: edge_host, body_options: {tracking: "off"}}
+      - edge_printed: {client: lite2, tag: TRACKING-MODE, fields: {mode: "off"}}
+      - edge_answers: {client: lite2, type: look_at, fields: {target: {kind: user, follow: true}}, ok: false, error_contains: not supported}
+      - edge_output_clean: lite2
+      - edge_host_clean
+
+  - name: a direction turns the head toward it, slowly, at most 10 degrees, then it rests
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 6}}
+      - robot_state_read: {control_mode: disabled}
+      - robot_turns_toward: {client: lite, doa: 60}
+      - robot_turns_toward: {client: lite, doa: -60, min_deg: 15}
+      - robot_turns_toward: {client: lite, doa: 0}
+      - robot_sleeps_after_idle: {client: lite, seconds: 6}
+      - robot_motors_are: {mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: a wake word makes the body look for the voice's direction
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: wake_word, body_options: {idle_sleep_s: 6}}
+      - edge_listens: {client: lite, mode: wake_word}
+      - server_sends: {client: lite, type: attention, fields: {state: listening}}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: "on", reason: awake}, within_s: 30}
+      - feed_golden_wav: {client: lite, name: hey_jarvis_whats_your_name}
+      - edge_printed: {client: lite, tag: MIC-OPEN, fields: {reason: wake}, within_s: 15}
+      - edge_printed: {client: lite, tag: VOICE-TURN, fields: {reason: wake}, within_s: 15}
+      - golden_wav_fed: {client: lite}
+      - server_sends: {client: lite, type: attention, fields: {state: idle}}
+      - robot_sleeps_after_idle: {client: lite, seconds: 6}
+      - robot_motors_are: {mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: the edge killed mid-tracking -> the tracker off, the robot at rest, motors off
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - daemon_printed: {text: WATCHDOG armed}
+      - server_sends: {client: lite, type: attention, fields: {state: listening}}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: "on", reason: awake}, within_s: 30}
+      - robot_motors_are: {mode: enabled}
+      - edge_agent_crashes: lite
+      - daemon_printed: {text: "tracking=off", within_s: 8}
+      - daemon_printed: {text: WATCHDOG rested motors=disabled tracking=off, within_s: 30}
+      - robot_motors_are: {mode: disabled, within_s: 5}
+      - edge_host_clean
+
+  - name: a voice on the robot's left turns its head to the left (hw, the XVF3800 through the air)
+    tier: hw
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: wake_word, body_options: {idle_sleep_s: 6}}
+      - edge_printed: {client: lite, tag: TRACKING-MODE, fields: {mode: voice+face, doa: "true"}}
+      - room_quiet: {client: lite}
+      - voice_turned_toward: {client: lite, name: hey_jarvis_whats_your_name, side: left}
+      - server_sends: {client: lite, type: attention, fields: {state: idle}}
+      - robot_sleeps_after_idle: {client: lite, seconds: 6}
+      - robot_motors_are: {mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: the head follows a face moved left then right (hw, the camera; frames saved)
+    tier: hw
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server: {save_jpegs: true}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 6}}
+      - server_sends: {client: lite, type: attention, fields: {state: listening}}
+      - edge_printed: {client: lite, tag: TRACKING, fields: {state: "on", camera: "true", reason: awake}, within_s: 30}
+      - robot_follows_face: {client: lite}
+      - server_sends: {client: lite, type: attention, fields: {state: idle}}
+      - robot_sleeps_after_idle: {client: lite, seconds: 6}
+      - robot_motors_are: {mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean

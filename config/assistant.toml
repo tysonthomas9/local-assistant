@@ -82,6 +82,7 @@ max_window_s = 120                 # hard cap of every mic window (at most 120 s
 connection = "localhost_only"
 expressions = "config/bodies/reachy.toml"
 idle_sleep_s = 120                 # awake during a conversation; asleep (motors off) after this long idle
+tracking = "voice+face"            # turn toward a voice (DOA), then follow the face; "face" or "off"
 
 [observability]
 otlp = ""

@@ -4,13 +4,14 @@ These are debugging tools (and the peers the e2e features drive), not test doubl
 the production `LinkServer` / `LinkClient` over a real WebSocket.
 
     python -m assistant_link.server --console [--host 127.0.0.1] [--port 8770] [--accept-opus]
+        [--jpeg-dir DIR]
     python -m assistant_link.client --console --device-id desk [--url ...] [--opus] [--proto 1.0]
 
 Every output line is `TAG key=value ... [json]`; the JSON (if any) starts at the first `{`.
 Server tags: LISTENING, CONNECTED, RECV, FRAME, SENT, SENT-FRAME, REFUSED, DISCONNECTED,
 STREAMED, JPEG, CONSOLE-ERROR. A received 0x01 mic frame's FRAME line carries its level
 (`dbfs=`); 0x03 chunks of one slot are joined and, once a whole JPEG has arrived, printed as
-`JPEG device= slot= bytes= width= height=`.
+`JPEG device= slot= bytes= width= height=` (with `--jpeg-dir`, also written there: `path=`).
 Client tags: WELCOME, RECV, FRAME, SENT, SENT-FRAME, FRAME-REFUSED, REFUSED, CLOSED, RETRY,
 GAVE-UP, CONSOLE-ERROR. Both: FLOOD-STARTED, FLOOD-DONE, FLOOD-STOPPED.
 DISCONNECTED and CLOSED carry `stalled=true` when the write-stall watchdog dropped the link.
@@ -42,6 +43,7 @@ import wave
 import zlib
 from collections.abc import Awaitable, Callable
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any
 
 from assistant_contracts.capabilities import Capabilities
@@ -237,8 +239,10 @@ async def stream_speech(conn: Connection, stream_id: int, clip: str, options: li
 
 
 class ServerConsole:
-    def __init__(self, accept_opus: bool) -> None:
+    def __init__(self, accept_opus: bool, jpeg_dir: str | None = None) -> None:
         self.accept_opus = accept_opus
+        self.jpeg_dir = Path(jpeg_dir) if jpeg_dir else None
+        self.jpegs = 0
         self.server: LinkServer | None = None
         self.jpeg: dict[tuple[str, int], bytearray] = {}
 
@@ -276,8 +280,15 @@ class ServerConsole:
             data += frame.payload
             if data.endswith(b"\xff\xd9"):
                 size = jpeg_size(bytes(data)) or (0, 0)
+                saved = {}
+                if self.jpeg_dir is not None:
+                    self.jpegs += 1
+                    self.jpeg_dir.mkdir(parents=True, exist_ok=True)
+                    path = self.jpeg_dir / f"{conn.device_id}-{self.jpegs:03d}.jpg"
+                    path.write_bytes(bytes(data))
+                    saved["path"] = path
                 emit("JPEG", device=conn.device_id, slot=frame.stream, bytes=len(data),
-                     width=size[0], height=size[1])  # fmt: skip
+                     width=size[0], height=size[1], **saved)  # fmt: skip
                 del self.jpeg[key]
 
     async def on_disconnect(self, conn: Connection, code: int | None, reason: str) -> None:
@@ -338,10 +349,11 @@ def server_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--token", default=os.environ.get(DEV_TOKEN_ENV, DEFAULT_DEV_TOKEN))
     parser.add_argument("--accept-opus", action="store_true", help="accept 0x05 Opus frames")
+    parser.add_argument("--jpeg-dir", help="also write each whole JPEG received to this directory")
     args = parser.parse_args(argv)
     if not args.console:
         parser.error("only --console mode exists here; the brain runs the server (S4)")
-    console = ServerConsole(args.accept_opus)
+    console = ServerConsole(args.accept_opus, args.jpeg_dir)
     server = LinkServer(console, DevTokenVerifier(args.token), host=args.host, port=args.port)
     console.server = server
 

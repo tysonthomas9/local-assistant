@@ -11,8 +11,17 @@ goes through `MotionArbiter` (Pollen's MovementManager, `moves`).
 
 Its `[body.reachy]` table: `connection` (the SDK's connection mode, `localhost_only`),
 `expressions` (a TOML file whose `[moves]` table adds or replaces expression -> Pollen move
-names over the built-in `EMOTION_MOVES`) and `idle_sleep_s` (120: how long the robot stays
-awake at neutral after a turn before it goes to sleep with its motors off).
+names over the built-in `EMOTION_MOVES`), `idle_sleep_s` (120: how long the robot stays
+awake at neutral after a turn before it goes to sleep with its motors off) and `tracking`
+(`voice+face`, the default: turn toward a voice and follow a face; `face`; `off`).
+
+Person tracking (S8g): while the robot is awake, Pollen's daemon-side face tracker follows a
+face (paused while the robot speaks, holding the pose once the face is gone; TRACKING lines).
+When a mic window opens for a voice (a wake word, speech in open mic, a follow-up) the body
+reads the XVF3800's direction of arrival from the daemon and turns the head toward it, slowly
+and at most 10 degrees (VOICE-TURN), until the tracker finds a face there. The brain switches
+following at runtime with `look_at{target: {kind: user, follow: true|false}}` and turns the
+head toward a direction with `look_at{target: {kind: doa, doa: degrees}}`.
 
 The robot wakes for the first turn (or expression) and stays awake during a conversation:
 the movement manager holds its pose, plays the attention poses and expressions in order, and
@@ -31,7 +40,6 @@ back.
 
 TODO(phase 3):
 - A precise playback clock from the sink's real position instead of the paced estimate.
-- Face tracking (`MovementManager.set_head_tracking`; off by default, as in Pollen's app).
 """
 
 import asyncio
@@ -55,11 +63,12 @@ from assistant_contracts.capabilities import (
     Capabilities,
     MotionCaps,
 )
-from assistant_contracts.common import Aec, AttentionState, LookTarget
+from assistant_contracts.common import Aec, AttentionState, LookAtDoa, LookAtUser, LookTarget
 from assistant_core.playback import PacedPlayer
 from assistant_robot_reachy import watchdog
 from assistant_robot_reachy.arbiter import (
     DAEMON_URL,
+    TRACKING_MODES,
     MotionArbiter,
     RobotUnavailable,
     connect_mini,
@@ -299,9 +308,46 @@ class ReachyMotion:
         return ok
 
     async def look_at(self, target: LookTarget) -> bool:
-        """TODO(phase 3): look_at_world / look_at_image and face tracking."""
-        del target
+        """`user`: follow the user's face (`follow`) or stop; `doa`: turn toward a direction
+        (degrees, positive: the robot's left). TODO(phase 3): look_at_world / look_at_image."""
+        if isinstance(target, LookAtUser):
+            arbiter = self._arbiter()
+            ok = await asyncio.to_thread(arbiter.set_follow, target.follow, "brain")
+            emit("FOLLOW", on=str(target.follow).lower(), ok=str(ok).lower(),
+                 awake=str(arbiter.attending).lower())  # fmt: skip
+            return ok
+        if isinstance(target, LookAtDoa):
+            return await self.turn_toward(target.doa, "look_at")
         return False
+
+    async def turn_toward(self, doa_deg: float, reason: str) -> bool:
+        """Turn the head toward a direction (VOICE-TURN), waking the robot if it is at rest."""
+        arbiter = self._arbiter()
+        self._cancel_idle_timer()  # activity: the idle timeout starts again after it
+        try:
+            done = await asyncio.to_thread(arbiter.turn_toward, doa_deg, reason)
+        except Exception as exc:
+            emit("MOTION-ERROR", {"detail": f"{type(exc).__name__}: {exc}"}, turn=reason)
+            return False
+        finally:
+            if arbiter.attending and self._idle_now():
+                self._start_idle_timer()
+        emit("VOICE-TURN", done, turned="true", reason=reason)
+        return True
+
+    async def voice_heard(self, reason: str) -> None:
+        """A mic window opened for a voice: with `tracking = "voice+face"`, turn toward the
+        XVF3800's direction of arrival (none on a robot without the board: skipped)."""
+        arbiter = self.body.arbiter
+        if self.body.tracking != "voice+face" or arbiter is None or not self.body.healthy:
+            return
+        reading = await asyncio.to_thread(arbiter.read_doa)
+        if reading is None:
+            emit("VOICE-TURN", turned="false", reason=reason, why="no_doa")
+            return
+        doa, speech = reading
+        emit("DOA", deg=f"{doa:.1f}", speech=str(speech).lower(), reason=reason)
+        await self.turn_toward(doa, reason)
 
 
 class _JpegEncoder:
@@ -387,9 +433,13 @@ class ReachyBody:
         connection: str = "localhost_only",
         expressions: str | None = None,
         idle_sleep_s: float = 120.0,
+        tracking: str = "voice+face",
     ) -> None:
         if not 0 < idle_sleep_s <= 3600:
             raise ValueError(f"[body.reachy] idle_sleep_s {idle_sleep_s}: 0 < seconds <= 3600")
+        if tracking not in TRACKING_MODES:
+            raise ValueError(f"[body.reachy] tracking {tracking!r}: one of {TRACKING_MODES}")
+        self.tracking = tracking
         self.daemon_url = daemon_url
         self.connection = connection
         self.moves = expression_moves(expressions)
@@ -417,7 +467,13 @@ class ReachyBody:
         mini.media.start_recording()
         mini.media.start_playing()
         self.mini = mini
-        self.arbiter = MotionArbiter(mini, daemon_url=self.daemon_url, alive=self._alive)
+        self.arbiter = MotionArbiter(
+            mini,
+            daemon_url=self.daemon_url,
+            alive=self._alive,
+            tracking=self.tracking,
+            on_event=lambda tag, **fields: emit(tag, **fields),
+        )
         self.arbiter.emotions.update(self.moves)
 
     def _alive(self) -> bool:
@@ -454,16 +510,20 @@ class ReachyBody:
         aec = await asyncio.to_thread(aec_status)
         emit("AEC", {**aec, "tuning": tuning})
         size = self.camera.size()
+        arbiter = self.arbiter
+        doa = arbiter is not None and await asyncio.to_thread(arbiter.read_doa) is not None
+        emit("TRACKING-MODE", mode=self.tracking, doa=str(doa).lower())
         self._watch = asyncio.create_task(self._watch_daemon(), name="reachy-health")
         self._beat = asyncio.create_task(self._heartbeat(), name="reachy-heartbeat")
         return Capabilities(
             audio_in=AudioInCaps(rate=16000, aec="hw"),
             motion=MotionCaps(
                 expressions=sorted({*self.arbiter.emotions, "random"}) if self.arbiter else [],
+                look_at=["doa"] if self.tracking == "off" else ["user", "doa"],
                 attention=True,
             ),
             camera=CameraCaps(w=size[0], h=size[1]) if size else None,
-            doa=False,
+            doa=doa,
         )
 
     def link_changed(self, up: bool) -> None:
@@ -494,8 +554,13 @@ class ReachyBody:
         await self.audio.close()
         await asyncio.to_thread(self._disconnect)
 
+    async def voice_heard(self, reason: str) -> None:
+        """`HearsVoice`: a mic window opened for a voice (the edge does not wait for it)."""
+        await self.motion.voice_heard(reason)
+
     async def events(self) -> AsyncIterator[BodyEvent]:
-        """TODO(phase 3): DOA from the XVF3800 (`get_DoA`) and IMU taps (wireless model)."""
+        """TODO(phase 3): IMU taps (wireless model). The DOA is read on a voice instead
+        (`voice_heard`)."""
         await asyncio.Event().wait()
         return
         yield  # pragma: no cover

@@ -19,12 +19,13 @@ It also keeps the robot safe when nothing looks after it (two more wraps, upstre
 - stopping the daemon (SIGTERM, SIGINT, and SIGHUP too, as when the SSH session that started
   it drops) puts a robot whose motors are on to rest first (upstream's `reset_to_sleep`,
   which ends with the motors off), even with `--no-goto-sleep-on-stop`; a robot already at
-  rest (motors off) is not moved.
+  rest (motors off) is not moved. Pollen's face tracker is switched off first.
 
 On a macOS edge host the tests start it inside "Reachy Edge.app" (scripts/edge_app_run.sh),
 the process macOS holds responsible for its camera and microphone use.
 """
 
+import contextlib
 import signal
 import sys
 from typing import Any
@@ -72,6 +73,8 @@ def _patch_rest_on_stop() -> None:
     stop = Daemon.stop
 
     async def stop_at_rest(self: Any, goto_sleep_on_stop: bool = True) -> Any:
+        with contextlib.suppress(Exception):  # no backend: nothing tracks
+            self.backend.disable_head_tracking()
         try:
             on = self.backend.get_motor_control_mode() != MotorControlMode.Disabled
         except Exception:

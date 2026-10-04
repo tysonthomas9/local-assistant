@@ -14,13 +14,18 @@ manager runs. The robot wakes once (the first attention state or expression) and
   `MAX_HEAD_DEG` (head) and `MAX_ANTENNA_DEG` (antennas), over at least `MIN_MOVE_S` per leg,
   and never turn the body;
 - the manager stops commanding as soon as the body's link heartbeat is stale (the motor
-  watchdog then rests the robot unopposed);
+  watchdog then rests the robot unopposed), and switches Pollen's face tracker off;
+- person tracking (S8g): Pollen's daemon-side face tracker follows a face while the robot is
+  awake (within Pollen's limits, an SDK motion like the recorded moves); a voice turn of ours
+  is at most `moves.MAX_TURN_DEG` of yaw, at `moves.TURN_DEG_PER_S`; going to rest switches
+  the tracker off first and returns to neutral at that speed;
 - on any exception (or a manager whose `set_target` keeps failing) the arbiter ends with
   `goto_sleep()` and torque off (best effort) and re-raises, so the caller reports the failure.
 """
 
 import json
 import logging
+import math
 import os
 import random
 import threading
@@ -32,7 +37,14 @@ from typing import Any
 
 import numpy as np
 
-from assistant_robot_reachy.moves import GotoMove, MovementManager, Played, Pose, RecordedMove
+from assistant_robot_reachy.moves import (
+    GotoMove,
+    MovementManager,
+    Played,
+    Pose,
+    RecordedMove,
+    glide_s,
+)
 
 log = logging.getLogger(__name__)
 
@@ -195,6 +207,56 @@ def robot_ready(base: str = DAEMON_URL) -> tuple[bool, str]:
     return True, "daemon running, backend ready"
 
 
+def daemon_post(path: str, body: Any = None, timeout_s: float = 3.0, base: str = DAEMON_URL) -> Any:
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(
+        f"{base}{path}", data=data, method="POST", headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        return json.loads(response.read() or b"null")
+
+
+DOA_READS = 3
+TRACKING_MODES = ("voice+face", "face", "off")
+"""`[body.reachy] tracking`: turn toward a voice and follow a face, only follow a face, or
+neither."""
+
+
+class DaemonTracker:
+    """Pollen's daemon-side face tracker through the daemon's REST API (`/api/media/tracking`:
+    the same backend calls as the SDK's `start_head_tracking(weight)`, `stop_head_tracking()`
+    and `get_tracked_face()`, with the daemon's answer: a daemon without a camera, as the
+    headless simulator, says it cannot track)."""
+
+    def __init__(self, base: str = DAEMON_URL) -> None:
+        self.base = base
+
+    def enable(self, weight: float) -> bool:
+        answer = daemon_post("/api/media/tracking/enable", {"weight": weight}, base=self.base)
+        return bool((answer or {}).get("enabled"))
+
+    def disable(self) -> None:
+        daemon_post("/api/media/tracking/disable", base=self.base)
+
+    def face(self) -> bool:
+        answer = daemon_json("/api/media/tracking/face", timeout_s=1.0, base=self.base)
+        return bool(((answer or {}).get("face_target") or {}).get("detected"))
+
+    def doa_deg(self) -> tuple[float, bool] | None:
+        """The XVF3800's direction of arrival in degrees from straight ahead (positive: the
+        robot's left, as head yaw) and whether it hears speech; None without the board."""
+        reading = None
+        for attempt in range(DOA_READS):  # the daemon's poller lands its first reading ~0.1 s
+            reading = daemon_json("/api/state/doa", timeout_s=1.0, base=self.base)
+            if reading or attempt == DOA_READS - 1:
+                break
+            time.sleep(0.12)
+        if not reading:
+            return None
+        # Pollen's angle: 0 = left, pi/2 = front, pi = right.
+        return 90.0 - math.degrees(float(reading["angle"])), bool(reading["speech_detected"])
+
+
 @dataclass(frozen=True)
 class QueuedEmotion:
     """An emotion's recorded move on the manager's queue (and the goto to its first frame)."""
@@ -212,17 +274,35 @@ class MotionArbiter:
     when it is not, leaving the robot to the motor watchdog)."""
 
     def __init__(
-        self, mini: Any, *, daemon_url: str = DAEMON_URL, alive: Callable[[], bool] | None = None
+        self,
+        mini: Any,
+        *,
+        daemon_url: str = DAEMON_URL,
+        alive: Callable[[], bool] | None = None,
+        tracking: str = "voice+face",
+        on_event: Callable[..., None] | None = None,
     ) -> None:
+        if tracking not in TRACKING_MODES:
+            raise ValueError(f"[body.reachy] tracking {tracking!r}: one of {TRACKING_MODES}")
         self.mini = mini
         self.daemon_url = daemon_url
+        self.tracking = tracking
+        self.follow = tracking != "off"
+        """Follow a face while awake (the brain may switch it at runtime)."""
+        self.tracker = DaemonTracker(daemon_url)
         self.listening = False
         self.speaking = False
         self._lock = threading.Lock()
         self.emotions: dict[str, str] = dict(EMOTION_MOVES)
         self._library: Any = None
         self.last_move: dict[str, Any] | None = None
-        self.manager = MovementManager(mini, alive=alive or (lambda: True), on_failure=self._failed)
+        self.manager = MovementManager(
+            mini,
+            alive=alive or (lambda: True),
+            on_failure=self._failed,
+            tracker=self.tracker,
+            on_event=on_event,
+        )
         self._neutral: np.ndarray | None = None
         """The neutral head pose while the robot is awake for the conversation, else None."""
         self._neutral_antennas: tuple[float, float] = (0.0, 0.0)
@@ -319,7 +399,11 @@ class MotionArbiter:
         sleep = self._sleep_after or state in ("muted", "sleeping")
         if neutral is not None and self.manager.running:
             self.manager.clear()
-            reached = self._goto(neutral, self._neutral_antennas, state)
+            # The tracker lets go of the head where it is; from there back to neutral, slowly.
+            self.manager.set_head_tracking(False, reason=state)
+            turned = self.manager.bake_base()
+            seconds = max(ATTENTION_MOVE_S, glide_s(turned))
+            reached = self._goto(neutral, self._neutral_antennas, state, seconds)
         else:
             reached = time.monotonic()
         self.manager.stop()
@@ -348,6 +432,8 @@ class MotionArbiter:
             return False
         if not self.manager.running:
             self.manager.start(self._present())
+            if self.follow:
+                self.manager.set_head_tracking(True, reason="awake")
         return True
 
     def _present(self) -> Pose:
@@ -374,15 +460,72 @@ class MotionArbiter:
         self._neutral_t = time.monotonic()
         self.failure = None
         self.manager.start(present)
+        if self.follow:
+            self.manager.set_head_tracking(True, reason="awake")
         return self._neutral
 
-    def _goto(self, head: np.ndarray, antennas: tuple[float, float], label: str) -> float:
-        """Move to `head` over `ATTENTION_MOVE_S` after the queued moves; when it was reached."""
+    def _goto(
+        self,
+        head: np.ndarray,
+        antennas: tuple[float, float],
+        label: str,
+        seconds: float = ATTENTION_MOVE_S,
+    ) -> float:
+        """Move to `head` over `seconds` after the queued moves; when it was reached."""
         played = self.manager.queue(
-            GotoMove(self.manager.last_pose(), (head, antennas, 0.0), ATTENTION_MOVE_S, label)
+            GotoMove(self.manager.last_pose(), (head, antennas, 0.0), seconds, label)
         )
-        self._wait(played, ATTENTION_MOVE_S)
+        self._wait(played, seconds)
         return played.ended or time.monotonic()
+
+    # ------------------------------------------------------------ person tracking
+
+    def set_follow(self, on: bool, reason: str) -> bool:
+        """The brain switches face following on or off at runtime; False (refused) when
+        `[body.reachy] tracking` is off. Off: the pose is held, then glides back to neutral."""
+        if self.tracking == "off":
+            return False
+        with self._lock:
+            self.follow = on
+            if not self.attending:
+                return True  # applied when the robot wakes
+            if on:
+                self.manager.set_head_tracking(True, reason=reason)
+            else:
+                self.manager.set_head_tracking(False, reason=reason)
+                self.manager.glide_home()
+        return True
+
+    def turn_toward(self, doa_deg: float, reason: str) -> dict[str, Any]:
+        """Turn the head toward a voice at `doa_deg` (positive: the robot's left): at most
+        `MAX_TURN_DEG` of yaw from neutral, slowly, waking the robot first if it is at rest;
+        the face tracker takes over once it finds a face there. What was done, with the
+        glide's start and end on this machine's monotonic clock."""
+        with self._lock:
+            ok, detail = robot_ready(self.daemon_url)
+            if not ok:
+                raise RobotUnavailable(detail)
+            try:
+                self._awake()
+                t_start = time.monotonic()
+                yaw, seconds = self.manager.turn_toward(doa_deg)
+            except Exception:
+                self._rest_safely("a failed voice turn")
+                raise
+        return {
+            "reason": reason,
+            "doa_deg": round(doa_deg, 1),
+            "yaw_deg": round(yaw, 1),
+            "seconds": round(seconds, 2),
+            "t_start": round(t_start, 3),
+            "t_end": round(t_start + seconds, 3),
+        }
+
+    def read_doa(self) -> tuple[float, bool] | None:
+        try:
+            return self.tracker.doa_deg()
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
 
     def _wait(self, played: Played, seconds: float) -> None:
         """Wait for a queued move to end (the moves before it included)."""
@@ -477,7 +620,7 @@ class MotionArbiter:
         self._cleanup(after)
 
     def _cleanup(self, after: str) -> None:
-        for cleanup in (self.mini.goto_sleep, self.mini.disable_motors):
+        for cleanup in (self.tracker.disable, self.mini.goto_sleep, self.mini.disable_motors):
             try:
                 cleanup()
             except Exception:

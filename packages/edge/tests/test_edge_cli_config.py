@@ -22,6 +22,7 @@ def test_base_config_runs_as_is() -> None:
         "connection": "localhost_only",
         "expressions": "config/bodies/reachy.toml",
         "idle_sleep_s": 120,
+        "tracking": "voice+face",
     }
     assert options.device_id == "lite"
     assert options.url == "ws://127.0.0.1:8770/edge/v1"  # brain_url "mdns": this machine

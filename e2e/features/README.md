@@ -133,7 +133,7 @@ One sim at a time (it uses port 8000 and the sound card's names; a second fails)
 never skips, when it cannot run (no PipeWire, no MuJoCo). Starts and stops only what it started.
 
 On `[sim, hw]`: antenna_wiggle, head_nod, motor_watchdog, daemon_restart, barge_in_flush,
-daemon_connect (all but its first scenario); with the models: attention_on_robot, voice_loop,
+daemon_connect (all but its first scenario), person_tracking (all but its last two); with the models: attention_on_robot, voice_loop,
 hello_spoken_reply, barge_in_on_robot, conversation_on_robot, llm/servers_compared.
 
 hw only, and why:
@@ -145,6 +145,7 @@ hw only, and why:
 | edge_config | the XVF3800 (hardware AEC, its far-end reference) |
 | daemon_connect: its first scenario | the camera, WebRTC (8443), the XVF3800 and Reachy Edge.app |
 | edge_host_ready | the edge host's bootstrap, Reachy Edge.app and macOS permissions |
+| person_tracking: its last two scenarios | the XVF3800's direction of arrival through the air, the camera and Pollen's face tracker (the sim daemon has no media server: tracking reports `camera=false`, `/api/state/doa` is null) |
 | wake_word_on_robot, open_mic_on_robot, try_it_on_robot | sound through the air in a real room (acoustics, DOA): the real voice barge-in with the XVF3800's AEC, the robot's own voice not interrupting it, wake scores through the air (their fed-audio twin is conversation_on_robot) |
 
 What the sim cannot do: render the camera (headless; the PC also lacks GStreamer's
@@ -191,7 +192,7 @@ device id. Messages are checked by containment: the listed `fields` must be in t
 
 | Step | Arguments | Does |
 |---|---|---|
-| `start_link_server` | `accept_opus: bool = false`, `token: str` | "start the link server console" |
+| `start_link_server` | `accept_opus: bool = false`, `token: str`, `save_jpegs: bool = false` (camera frames to `artifacts/jpeg/<feature>/`) | "start the link server console" |
 | `start_link_client` | `id: str`, `token: str?`, `proto: str?`, `opus: bool = false`, `speak_text: bool = false`, `wait: bool = true`, `where: pc \| edge_host = pc` | "start a link client "<id>" [with token] [with proto]"; waits for its welcome unless `wait: false`. `where: edge_host` runs it on the robot's machine (see below) |
 | `server_connected` | `client: str`, `fields: map?`, `within_s = 5` | The server accepted the client's hello (containing `fields`) |
 | `client_sends` | `client`, `type`, `fields: map?` | "client "<id>" sends <type> <fields>" |
@@ -372,6 +373,18 @@ Teardown stops it with Ctrl-C too, so the robot is put to rest whatever the outc
 | `try_it_started` | `listen: wake_word \| open_mic \| push_to_talk?`, `mode = wake_word`, `within_s = 900` | Runs the launcher (with `--listen listen` if given) until it is ready, listening in `mode` |
 | `try_it_shows` | `wake = false`, `max_wer = 0.35`, `within_s = 60` | Since the mark the launcher showed the wake word (`wake`), what was heard (`you:`, the played WAV's text within `max_wer`) and a non-empty reply (`robot:`) |
 | `try_it_stopped` | `within_s = 180` | Ctrl-C (SIGINT to its process group): it exits 0 having reported the motors disabled and 0 leftover processes |
+
+### Person tracking (`steps/tracking.py`)
+
+Measured with the robot-side sampler (20 Hz); each step writes `artifacts/tracking-<feature>-<what>.json`.
+Every hold also checks Pollen's limits (head yaw at most 65 deg from the body, body at most 160 deg).
+
+| Step | Arguments | Does |
+|---|---|---|
+| `robot_turns_toward` | `client`, `doa`, `min_deg = 5`, `max_deg = 10`, `tolerance_deg = 2`, `max_dps = 20`, `within_s = 60` | The brain's `look_at` `doa`: the edge's `VOICE-TURN turned=true`; the head turned toward `doa`'s side by at least `min_deg`, never more than `max_deg` from neutral (plus `tolerance_deg`), at most `max_dps` |
+| `robot_head_holds` | `seconds = 3`, `max_deg = 2`, `max_mean_deg?`, `what = hold` | For `seconds` the head stays within `max_deg` of where it was (and, if given, its mean within `max_mean_deg`) |
+| `voice_turned_toward` | `client`, `name`, `side`, `min_deg = 5`, `max_deg = 10`, `tolerance_deg = 2`, ... | hw: plays the clip through the edge host's speaker; the edge's DOA and `VOICE-TURN` turn the head toward `side` (left \| right) within the same bounds as `robot_turns_toward` |
+| `robot_follows_face` | `client`, `min_deg = 10`, `max_dps = 180`, `within_s = 120` | hw: a face moves to the robot's left, then its right; Pollen's tracker reports it and the head follows at least `min_deg` each way, frames saved at the extremes, within Pollen's limits and `max_dps` |
 
 ### Speech (`steps/speech.py`)
 

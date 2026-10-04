@@ -48,7 +48,10 @@ LEGACY = (
     r"^[^ ]*[Pp]ython[0-9.]* [^ ]*reachy_mini_conversation_app",
     r"^[^ ]*[Pp]ython[0-9.]* [^ ]*local_backend/run_daemon\.py",
 )
-SHOWN = {"WAKE", "MIC-OPEN", "MIC-CLOSE", "FOLLOW-UP", "SAY", "CONSOLE-ERROR"}
+SHOWN = {
+    "WAKE", "MIC-OPEN", "MIC-CLOSE", "FOLLOW-UP", "SAY", "CONSOLE-ERROR",
+    "TRACKING-MODE", "TRACKING", "VOICE-TURN",
+}  # fmt: skip
 
 
 def _repo_root() -> Path:
@@ -112,6 +115,15 @@ def _show(source: str, text: str) -> str | None:
         return f"  [stopped listening ({fields.get('reason', '?')})]"
     if tag == "FOLLOW-UP":
         return "  [follow-up: just talk, no wake word needed]"
+    if tag == "TRACKING-MODE":
+        return f"  [person tracking: {fields.get('mode', '?')}]"
+    if tag == "TRACKING":
+        camera = " (no camera)" if fields.get("camera") == "false" else ""
+        return f"  [tracking {fields.get('state', '?')} ({fields.get('reason', '?')}){camera}]"
+    if tag == "VOICE-TURN":
+        if fields.get("turned") != "true":
+            return f"  [no turn toward the voice ({fields.get('why', '?')})]"
+        return f"  [turned {payload.get('yaw_deg', '?')} deg toward the voice]"
     return f"  [edge] {text}"
 
 

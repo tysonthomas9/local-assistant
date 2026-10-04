@@ -28,6 +28,11 @@ class ContractModel(BaseModel):
 
 class LookAtUser(ContractModel):
     kind: Literal["user"] = "user"
+    follow: bool = Field(
+        default=True,
+        description="Keep following the user (face tracking on), or stop following (off).",
+    )
+    """Added in v1 as an optional field with the old meaning as its default: no version bump."""
 
 
 class LookAtDoa(ContractModel):

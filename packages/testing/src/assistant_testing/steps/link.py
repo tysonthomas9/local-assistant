@@ -19,6 +19,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from assistant_contracts.frames import FrameKind
@@ -165,15 +166,24 @@ def _free_port() -> int:
 
 @step("start_link_server")
 async def start_link_server(
-    ctx: ScenarioContext, accept_opus: bool = False, token: str = DEV_TOKEN
+    ctx: ScenarioContext,
+    accept_opus: bool = False,
+    token: str = DEV_TOKEN,
+    save_jpegs: bool = False,
 ) -> None:
-    """Start the link server console (a real LinkServer) on a free 127.0.0.1 port."""
+    """Start the link server console (a real LinkServer) on a free 127.0.0.1 port.
+    `save_jpegs`: every whole JPEG received is also written to
+    `<artifacts>/jpeg/<feature>[-sim]/` (`--jpeg-dir`; its JPEG line says `path=`)."""
     port = _free_port()
     ctx.state["link"] = _Link(port=port, token=token)
     argv = [sys.executable, "-m", "assistant_link.server", "--console"]
     argv += ["--host", "127.0.0.1", "--port", str(port), "--token", token]
     if accept_opus:
         argv.append("--accept-opus")
+    if save_jpegs:
+        artifacts = Path(os.environ.get("ASSISTANT_ARTIFACTS_DIR") or ctx.repo_root / "artifacts")
+        name = ctx.feature_path.stem + ("-sim" if ctx.sim else "")
+        argv += ["--jpeg-dir", str(artifacts / "jpeg" / name)]
     await ctx.processes.start(SERVER, argv, stdin=True, ready_line=r"^LISTENING ", ready_timeout=30)
 
 
