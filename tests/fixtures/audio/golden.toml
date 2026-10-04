@@ -33,3 +33,15 @@ voice = "aiden"
 [whats_your_name]
 text = "What's your name?"
 voice = "aiden"
+
+[hey_jarvis]
+text = "Hey Jarvis."
+voice = "aiden"
+
+[story_start]
+text = "Please tell me a long story about a"
+voice = "aiden"
+
+[story_end]
+text = "little robot who learns to paint."
+voice = "aiden"

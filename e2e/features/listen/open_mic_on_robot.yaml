@@ -7,10 +7,11 @@ description: >
   volume set for the play and restored; the robot's speaker volume is never touched). A
   spoken question opens a window by itself (reason vad), ends with the speech and gets a
   spoken reply from the real brain (Parakeet, the real LLM, Qwen3-TTS). Claps and music start
-  no turn. The robot's own long reply, through its own speaker, never starts a turn (the
-  XVF3800's echo canceller and the edge's speaker gating: while it speaks only speech well
-  above the echo-cancelled level counts). Talking over the reply is a barge-in: the edge stops
-  its speaker within 200 ms and the next turn is what was said. The same works in room noise
+  no turn. The robot's own long reply, through its own speaker at the user's volume, never
+  starts a turn (the XVF3800's echo canceller alone, with Pollen's startup tuning: no extra
+  gate). Talking over the reply is a barge-in, detected within 300 ms of the voice starting;
+  the speech goes on 250-500 ms (350 ms, then a short fade) and the next turn is what was
+  said. The same works in room noise
   at about -28 dBFS played through the speaker. Room levels go in the artifacts. Before each
   sound the scenario waits for a moment without speech in the room (someone talking elsewhere
   would rightly open a window).
@@ -62,13 +63,15 @@ scenarios:
       - start_brain: {engine: basic, speech: true, follow_up_s: 0}
       - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: open_mic}
       - room_level_measured: {client: lite}
+      - edge_mic_tuned: {client: lite}
       - room_quiet: {client: lite}
       - edge_types: {client: lite, text: "Please tell me a long story about a little robot who learns to paint, in at least six sentences."}
       - robot_speaks_reply: {client: lite, wait_done: false}
       - playback_progress_at_least: {client: lite, ms: 3000}
       - speaker_plays: {client: lite, name: weather_in_paris, wait: false}
       - mic_opened: {client: lite, reason: vad, barge_in: true}
-      - barge_in_stops_playback_within: {client: lite, ms: 200}
+      - barge_in_stops_speech: {client: lite}
+      - barge_in_detected_within: {ms: 300}
       - turn_truncated_at_played_ms
       - speaker_finished
       - mic_closed: {client: lite, reason: vad_end, opened_by: vad}

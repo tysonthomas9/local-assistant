@@ -1,38 +1,37 @@
-"""MotionArbiter: the one owner of the robot's motion, shaped like Pollen's MovementManager.
+"""MotionArbiter: the one owner of the robot's motion, on Pollen's MovementManager.
 
-Phase 3 drops Pollen's MovementManager (continuous breathing, speech wobble, emotion queue,
-face tracking) in behind this facade; until then it calls the SDK directly. Expressions are
-Pollen's recorded emotion moves (`EMOTION_MOVES`, played with `ReachyMini.play_move`). The
-safety rules of every move:
+While the robot is awake, `moves.MovementManager` (Pollen's conversation-app motion loop,
+ported: no breathing) holds its pose and plays every move from one queue: our attention poses
+and Pollen's recorded emotion moves (`EMOTION_MOVES`: all 42 `express` intents, mapped as
+Pollen's app maps them). Speech-driven head wobble is the SDK's (`enable_wobbling`) while the
+manager runs. The robot wakes once (the first attention state or expression) and stays awake;
+`rest` (the body's idle timeout, stopping) puts it back to sleep. The safety rules:
 
 - the robot must be reachable (the daemon answers and its backend is ready), else nothing moves;
-- the motor torque state is read first; torque is enabled only for the move and restored
-  afterwards;
-- a robot at rest (torque off) follows the SDK's standard pattern: `wake_up()` to the neutral
-  pose, the move from neutral, back to neutral, `goto_sleep()`, torque off; an awake robot
-  moves from, and returns to, the pose it is in;
-- Pollen's own tested motions (`wake_up()`, `goto_sleep()`, the recorded emotion moves) are
-  the exception to the limits below; moves WE author are at most `MAX_HEAD_DEG` (head) and
-  `MAX_ANTENNA_DEG` (antennas), over at least `MIN_MOVE_S` per leg, and never turn the body;
-- on any exception the arbiter ends with `goto_sleep()` and torque off (best effort) and
-  re-raises, so the caller reports the failure.
-
-TODO(phase 3): replace the direct SDK calls with Pollen's MovementManager (breathing in
-`breathe()`, speech-driven head wobble via `enable_wobbling` in `set_speaking(True)`, face
-tracking in `set_listening(True)`, the full emotion library in `queue_emotion`).
+- the motor torque state is read first; a robot at rest wakes with the SDK's `wake_up()`;
+- Pollen's own tested motions (`wake_up()`, `goto_sleep()`, the recorded emotion moves, the
+  speech wobble) are the exception to the limits below; moves WE author are at most
+  `MAX_HEAD_DEG` (head) and `MAX_ANTENNA_DEG` (antennas), over at least `MIN_MOVE_S` per leg,
+  and never turn the body;
+- the manager stops commanding as soon as the body's link heartbeat is stale (the motor
+  watchdog then rests the robot unopposed);
+- on any exception (or a manager whose `set_target` keeps failing) the arbiter ends with
+  `goto_sleep()` and torque off (best effort) and re-raises, so the caller reports the failure.
 """
 
 import json
 import logging
 import os
+import random
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+
+from assistant_robot_reachy.moves import GotoMove, MovementManager, Played, Pose, RecordedMove
 
 log = logging.getLogger(__name__)
 
@@ -45,8 +44,8 @@ EMOTIONS_DATASET = "pollen-robotics/reachy-mini-emotions-library"
 """Pollen's recorded emotion moves (Hugging Face dataset; cached by edge_host_bootstrap.sh)."""
 
 EMOTION_MOVES: dict[str, str] = {
-    "happy": "cheerful1",
-    "excited": "enthusiastic1",
+    "happy": "laughing2",
+    "excited": "dance3",
     "loving": "loving1",
     "grateful": "grateful1",
     "success": "success1",
@@ -57,7 +56,7 @@ EMOTION_MOVES: dict[str, str] = {
     "sad": "sad1",
     "downcast": "downcast1",
     "lonely": "lonely1",
-    "angry": "furious1",
+    "angry": "rage1",
     "irritated": "irritated1",
     "displeased": "displeased1",
     "disgusted": "disgusted1",
@@ -65,31 +64,48 @@ EMOTION_MOVES: dict[str, str] = {
     "anxious": "anxiety1",
     "surprised": "surprised1",
     "amazed": "amazed1",
-    "calming": "serenity1",
+    "calming": "calming1",
     "relief": "relief1",
-    "impatient": "impatient1",
+    "impatient": "impatient2",
     "embarrassed": "shy1",
-    "bored": "boredom1",
-    "tired": "tired1",
+    "bored": "boredom2",
+    "tired": "exhausted1",
     "sleepy": "sleep1",
     "yes": "yes1",
-    "yes_understanding": "understanding1",
+    "yes_understanding": "understanding2",
     "no": "no1",
     "no_sad": "no_sad1",
     "no_excited": "no_excited1",
-    "welcoming": "welcoming1",
+    "no_firm": "no1",
+    "welcoming": "welcoming2",
     "greeting": "welcoming2",
+    "goodbye": "loving1",
     "go_away": "go_away1",
     "helpful": "helpful1",
-    "dance": "dance1",
+    "dance": "dance2",
     "electric": "electric1",
     "dying": "dying1",
 }
-"""`express` intent (assistant_contracts.ExpressName) -> Pollen recorded move. Not mapped yet
-(answered "no expression"): random, no_firm, goodbye. TODO(phase 3): config/bodies/reachy.toml."""
+"""`express` intent (assistant_contracts.ExpressName) -> Pollen recorded move: the first choice
+of Pollen's app (`_INTENT_TO_MOVES` in tools/play_emotion.py). `random` is one of
+`CURATED_MOVES`. `[body.reachy] expressions` adds or replaces entries."""
+
+CURATED_MOVES: tuple[str, ...] = (
+    "anxiety1", "boredom2", "dance2", "dance3", "downcast1", "dying1", "exhausted1",
+    "grateful1", "helpful1", "loving1", "rage1", "reprimand1", "resigned1", "sad1", "sad2",
+    "scared1", "sleep1", "surprised1", "thoughtful1", "welcoming2", "amazed1", "attentive1",
+    "attentive2", "boredom1", "confused1", "disgusted1", "displeased1", "displeased2", "fear1",
+    "impatient2", "irritated1", "irritated2", "laughing1", "laughing2", "lonely1", "no1",
+    "no_excited1", "no_sad1", "reprimand2", "shy1", "success1", "success2", "surprised2",
+    "thoughtful2", "uncertain1", "understanding2", "yes1",
+)  # fmt: skip
+"""Pollen's curated pool for `random` (`_CURATED_DEFAULT_MOVES`)."""
+
+MOVE_WAIT_SLACK_S = 5.0
+"""How much longer than its own duration (plus the moves queued before it) a move may take."""
 
 INITIAL_GOTO_S = 1.0
-"""How long the SDK takes to reach a recorded move's first frame from neutral."""
+"""How long a recorded move takes to reach its first frame (as the SDK's `play_move`)."""
 
 GOTO_CLOCK_RACE = "time value is out of range [0,1]"
 """The daemon's goto (reachy-mini 1.10.0, `Backend.play_move` on a `GotoMove`) loops
@@ -140,7 +156,10 @@ WOKEN_NEUTRAL = np.eye(4)
 SETTLE_S = 0.6
 SETTLE_PAUSE_S = 0.3
 """Each attention pose is reached over one second (slow, at least `MIN_MOVE_S`)."""
-REST_STATES = ("idle", "muted", "sleeping")
+REST_STATES = ("idle", "rest", "muted", "sleeping")
+"""`idle` keeps an attending robot awake at neutral (between turns of a conversation); `rest`
+(the body's idle timeout, or stopping) ends attending: neutral, then asleep with the motors
+off if the robot was at rest before; `muted` and `sleeping` always end asleep."""
 
 
 class RobotUnavailable(RuntimeError):
@@ -176,9 +195,14 @@ def robot_ready(base: str = DAEMON_URL) -> tuple[bool, str]:
 
 
 class MotionArbiter:
-    """Serialises every move of one robot (`mini` is a connected `reachy_mini.ReachyMini`)."""
+    """Serialises every move of one robot (`mini` is a connected `reachy_mini.ReachyMini`);
+    while the robot is awake its `MovementManager` holds the pose and plays the moves.
+    `alive()` says whether the body's link heartbeat is fresh (the manager stops commanding
+    when it is not, leaving the robot to the motor watchdog)."""
 
-    def __init__(self, mini: Any, *, daemon_url: str = DAEMON_URL) -> None:
+    def __init__(
+        self, mini: Any, *, daemon_url: str = DAEMON_URL, alive: Callable[[], bool] | None = None
+    ) -> None:
         self.mini = mini
         self.daemon_url = daemon_url
         self.listening = False
@@ -187,40 +211,52 @@ class MotionArbiter:
         self.emotions: dict[str, str] = dict(EMOTION_MOVES)
         self._library: Any = None
         self.last_move: dict[str, Any] | None = None
+        self.manager = MovementManager(mini, alive=alive or (lambda: True), on_failure=self._failed)
         self._neutral: np.ndarray | None = None
-        """The neutral head pose while the robot attends (a turn is running), else None."""
+        """The neutral head pose while the robot is awake for the conversation, else None."""
+        self._neutral_antennas: tuple[float, float] = (0.0, 0.0)
         self._neutral_t = 0.0
         """When the neutral pose was read (this machine's monotonic clock)."""
         self._sleep_after = False
-        """The robot was at rest when it began attending: back to sleep, torque off at idle."""
+        """The robot was at rest when it woke: back to sleep, torque off, at `rest`."""
+        self.failure: str | None = None
 
     # ------------------------------------------------------------ the facade
 
     def set_listening(self, on: bool) -> None:
-        """TODO(phase 3): face tracking / attentive posture while listening."""
+        """Listening freezes the antennas (Pollen's manager)."""
         self.listening = on
+        self.manager.set_listening(on)
 
     def set_speaking(self, on: bool) -> None:
-        """TODO(phase 3): speech-driven head wobble (`ReachyMini.enable_wobbling`)."""
+        """Speaking: the speech wobble follows the played audio by itself (SDK); with face
+        tracking on, tracking pauses meanwhile."""
         self.speaking = on
+        self.manager.set_speaking(on)
 
     def breathe(self) -> None:
-        """Idle. TODO(phase 3): Pollen's continuous breathing motion."""
+        """Neither listening nor speaking. No breathing motion (left out on purpose)."""
         self.listening = self.speaking = False
+        self.manager.set_listening(False)
+        self.manager.set_speaking(False)
 
     @property
     def attending(self) -> bool:
-        """An attention pose is held (the robot is awake for a turn)."""
-        return self._neutral is not None
+        """The robot is awake for the conversation (the manager holds its pose)."""
+        return self._neutral is not None and self.manager.running
 
     def attend(self, state: str) -> dict[str, Any] | None:
         """Show an attention state with a small, slow head pose (`ATTENTION_POSES`).
 
-        The first active state wakes a robot at rest (torque on, `wake_up()` to neutral) and
-        remembers the neutral pose; each pose is then reached from neutral's frame over
-        `ATTENTION_MOVE_S`. `idle` goes back to neutral and, if the robot was at rest before,
-        `goto_sleep()` with torque off; `muted` and `sleeping` always end asleep. Returns what
-        was done, with the time the pose was reached on this machine's monotonic clock (for a
+        The first active state wakes a robot at rest (torque on, `wake_up()` to neutral,
+        the movement manager started) and remembers the neutral pose; each pose is then
+        reached from neutral's frame over `ATTENTION_MOVE_S`, played by the manager after
+        whatever move it is playing. `idle` goes back to neutral and stays awake (the body puts
+        it to `rest` after its idle timeout); `rest` goes back to neutral, stops the manager
+        and, if the robot was at rest before, `goto_sleep()` with torque off; `muted` and
+        `sleeping` always end asleep. A robot found with its motors off, or its manager
+        stopped (the link dropped, the watchdog rested it), is woken afresh. Returns what was
+        done, with the time the pose was reached on this machine's monotonic clock (for a
         sampler next to the daemon), or None if nothing moved. Any error ends with
         `goto_sleep()` and torque off, and is re-raised.
         """
@@ -231,12 +267,7 @@ class MotionArbiter:
             try:
                 return self._attend(state)
             except Exception:
-                self._neutral, self._sleep_after = None, False
-                for cleanup in (self.mini.goto_sleep, self.mini.disable_motors):
-                    try:
-                        cleanup()
-                    except Exception:
-                        log.exception("%s after a failed attention move", cleanup.__name__)
+                self._rest_safely("a failed attention move")
                 raise
 
     def _attend(self, state: str) -> dict[str, Any] | None:
@@ -244,43 +275,46 @@ class MotionArbiter:
 
         started = time.monotonic()
         if state in ATTENTION_POSES:
-            if self._neutral is None:
-                at_rest = not self._torque_on()
-                if at_rest:
-                    self.mini.enable_motors()
-                    self.mini.wake_up()
-                    # wake_up() ends with a quick 20 deg roll and back (0.2 s each): settle
-                    # slowly at its neutral pose before attending from there.
-                    self.mini.goto_target(head=WOKEN_NEUTRAL, duration=SETTLE_S, body_yaw=None)
-                    time.sleep(SETTLE_PAUSE_S)
-                    self._neutral = WOKEN_NEUTRAL.copy()
-                else:
-                    self._neutral = np.array(self.mini.get_current_head_pose(), dtype=float)
-                self._sleep_after = at_rest
-                self._neutral_t = time.monotonic()
+            neutral = self._awake()
             roll, pitch = ATTENTION_POSES[state]
-            target = self._neutral.copy()
+            target = neutral.copy()
             delta = create_head_pose(roll=roll, pitch=pitch, degrees=True)
-            target[:3, :3] = self._neutral[:3, :3] @ delta[:3, :3]
-            self.mini.goto_target(head=target, duration=ATTENTION_MOVE_S, body_yaw=None)
+            target[:3, :3] = neutral[:3, :3] @ delta[:3, :3]
+            reached = self._goto(target, self._neutral_antennas, state)
             return {
                 "state": state,
                 "roll_deg": roll,
                 "pitch_deg": pitch,
                 "t_neutral": round(self._neutral_t, 3),
                 "t_start": round(started, 3),
-                "t_reached": round(time.monotonic(), 3),
+                "t_reached": round(reached, 3),
             }
         if state not in REST_STATES:
             return None
-        neutral, sleep = self._neutral, self._sleep_after or state != "idle"
-        neutral_t = self._neutral_t
+        if state == "idle":  # stay awake at neutral between turns
+            if self._neutral is None or not self._still_awake():
+                return None  # not awake: nothing to do
+            reached = self._goto(self._neutral, self._neutral_antennas, state)
+            return {
+                "state": state,
+                "roll_deg": 0.0,
+                "pitch_deg": 0.0,
+                "t_neutral": round(self._neutral_t, 3),
+                "t_start": round(started, 3),
+                "t_reached": round(reached, 3),
+                "asleep": False,
+            }
+        neutral, neutral_t = self._neutral, self._neutral_t
+        sleep = self._sleep_after or state in ("muted", "sleeping")
+        if neutral is not None and self.manager.running:
+            self.manager.clear()
+            reached = self._goto(neutral, self._neutral_antennas, state)
+        else:
+            reached = time.monotonic()
+        self.manager.stop()
         self._neutral, self._sleep_after = None, False
-        if neutral is None and state == "idle":
+        if neutral is None and state == "rest":
             return None
-        if neutral is not None:
-            self.mini.goto_target(head=neutral, duration=ATTENTION_MOVE_S, body_yaw=None)
-        reached = time.monotonic()
         if sleep:
             self.mini.goto_sleep()
             self.mini.disable_motors()
@@ -294,39 +328,97 @@ class MotionArbiter:
             "asleep": sleep,
         }
 
-    def goto_sleep(self) -> None:
-        """The SDK's sleep pose; torque off afterwards."""
-        with self._move(restore_pose=False, torque_after=False, from_neutral=False):
-            self.mini.goto_sleep()
+    def _still_awake(self) -> bool:
+        """The motors are on (else the robot was rested meanwhile: the watchdog); a manager
+        stopped by a stale heartbeat starts again from the present pose."""
+        if not self._torque_on():
+            self.manager.stop()
+            self._neutral, self._sleep_after = None, False
+            return False
+        if not self.manager.running:
+            self.manager.start(self._present())
+        return True
 
-    def wake_up(self) -> None:
-        """The SDK's wake-up pose; torque stays on."""
-        with self._move(restore_pose=False, torque_after=True, from_neutral=False):
+    def _present(self) -> Pose:
+        head = np.array(self.mini.get_current_head_pose(), dtype=float)
+        left, right = (float(a) for a in self.mini.get_present_antenna_joint_positions())
+        return head, (left, right), 0.0
+
+    def _awake(self) -> np.ndarray:
+        """Wake the robot if it is not awake (once per conversation); the neutral pose."""
+        if self._neutral is not None and self._still_awake():
+            return self._neutral
+        at_rest = not self._torque_on()
+        if at_rest:
+            self.mini.enable_motors()
             self.mini.wake_up()
+            # wake_up() ends with a quick 20 deg roll and back (0.2 s each): settle slowly at
+            # its neutral pose before attending from there.
+            self.mini.goto_target(head=WOKEN_NEUTRAL, duration=SETTLE_S, body_yaw=None)
+            time.sleep(SETTLE_PAUSE_S)
+        present = self._present()
+        self._neutral = WOKEN_NEUTRAL.copy() if at_rest else present[0]
+        self._neutral_antennas = present[1]
+        self._sleep_after = at_rest
+        self._neutral_t = time.monotonic()
+        self.failure = None
+        self.manager.start(present)
+        return self._neutral
+
+    def _goto(self, head: np.ndarray, antennas: tuple[float, float], label: str) -> float:
+        """Move to `head` over `ATTENTION_MOVE_S` after the queued moves; when it was reached."""
+        played = self.manager.queue(
+            GotoMove(self.manager.last_pose(), (head, antennas, 0.0), ATTENTION_MOVE_S, label)
+        )
+        self._wait(played, ATTENTION_MOVE_S)
+        return played.ended or time.monotonic()
+
+    def _wait(self, played: Played, seconds: float) -> None:
+        """Wait for a queued move to end (the moves before it included)."""
+        if not played.done.wait(seconds + MOVE_WAIT_SLACK_S + self.manager.queued_s()):
+            raise MoveIncomplete(f"{played.label}: did not end in time")
+        if played.cancelled:
+            raise MoveIncomplete(f"{played.label}: cancelled ({self.manager.stopped_reason})")
 
     def queue_emotion(self, name: str, intensity: float = 1.0) -> bool:
-        """Play Pollen's recorded move for the emotion `name` now (to its end); False if this
-        body has no move for it. `intensity` is not used by recorded moves."""
+        """Play Pollen's recorded move for the emotion `name` through the movement manager
+        (waking the robot if it is at rest; it then stays awake), after the moves before it,
+        and wait for its end; False if this body has no move for it. `random` picks one of
+        Pollen's curated moves. `intensity` is not used by recorded moves."""
         del intensity
-        move_name = self.emotions.get(name)
+        move_name = random.choice(CURATED_MOVES) if name == "random" else self.emotions.get(name)
         if move_name is None:
             return False
-        move = self._moves().get(move_name)
-        with self._move():
-            started = time.monotonic()
-            self.mini.play_move(move, initial_goto_duration=INITIAL_GOTO_S)
-            took = time.monotonic() - started
-            cancelled = bool(getattr(self.mini, "_move_cancelled", False))
-            if cancelled or took < move.duration:
-                raise MoveIncomplete(
-                    f"{move_name}: cancelled={cancelled}, took {took:.2f} s of {move.duration:.2f}"
+        move = RecordedMove(move_name, self._moves().get(move_name))
+        with self._lock:
+            ok, detail = robot_ready(self.daemon_url)
+            if not ok:
+                raise RobotUnavailable(detail)
+            try:
+                self._awake()
+                start = self.manager.queue(
+                    GotoMove(
+                        self.manager.last_pose(), move.evaluate(0.0), INITIAL_GOTO_S, move_name
+                    )
                 )
+                played = self.manager.queue(move)
+            except Exception:
+                self._rest_safely("a failed expression")
+                raise
+        try:
+            self._wait(played, INITIAL_GOTO_S + move.duration)
+        except Exception:
+            with self._lock:
+                self._rest_safely("a failed expression")
+            raise
         # t_start/t_end: this machine's monotonic clock, so a sampler next to the daemon can
         # pick out exactly the samples taken while the move played.
+        t_start = start.started or time.monotonic()
+        t_end = played.ended or time.monotonic()
         self.last_move = {"move": move_name, "duration_s": round(move.duration, 2)}
-        self.last_move["played_s"] = round(took - INITIAL_GOTO_S, 2)
-        self.last_move["t_start"] = round(started, 3)
-        self.last_move["t_end"] = round(started + took, 3)
+        self.last_move["played_s"] = round(t_end - (played.started or t_start), 2)
+        self.last_move["t_start"] = round(t_start, 3)
+        self.last_move["t_end"] = round(t_end, 3)
         return True
 
     def _moves(self) -> Any:
@@ -344,61 +436,28 @@ class MotionArbiter:
                 ) from exc
         return self._library
 
-    # ------------------------------------------------------------ moves
+    # ------------------------------------------------------------ safety
+
+    def _failed(self, reason: str) -> None:
+        """The manager's loop gave up (`set_target` kept failing): rest, motors off."""
+        self.failure = reason
+        log.error("movement manager stopped: %s", reason)
+        self._neutral, self._sleep_after = None, False
+        self.manager.stop()  # from the loop's own thread: wobble off, no join
+        self._cleanup("a failing movement loop")
+
+    def _rest_safely(self, after: str) -> None:
+        self.manager.stop()
+        self._neutral, self._sleep_after = None, False
+        self._cleanup(after)
+
+    def _cleanup(self, after: str) -> None:
+        for cleanup in (self.mini.goto_sleep, self.mini.disable_motors):
+            try:
+                cleanup()
+            except Exception:
+                log.exception("%s after %s", cleanup.__name__, after)
 
     def _torque_on(self) -> bool:
         state = daemon_json("/api/state/full", base=self.daemon_url)
         return state.get("control_mode") != "disabled"
-
-    @contextmanager
-    def _move(
-        self,
-        *,
-        restore_pose: bool = True,
-        torque_after: bool | None = None,
-        from_neutral: bool = True,
-    ) -> Iterator[tuple[np.ndarray, list[float]]]:
-        """Run one move: robot checked, torque on for it, start pose restored, torque restored.
-
-        A robot at rest (torque off) follows the SDK's own pattern when `from_neutral`:
-        `wake_up()` to the neutral pose, our small move from there, back to neutral, then
-        `goto_sleep()` and torque off. A robot already awake moves from where it is and is put
-        back there. `torque_after` overrides the restored torque state (sleep: off, wake-up:
-        on). On any exception the robot ends asleep with torque off, and it is re-raised.
-        """
-        with self._lock:
-            ok, detail = robot_ready(self.daemon_url)
-            if not ok:
-                raise RobotUnavailable(detail)
-            was_on = self._torque_on()
-            woke = False
-            failed = True
-            try:
-                if not was_on:
-                    self.mini.enable_motors()
-                    if from_neutral:
-                        self.mini.wake_up()
-                        woke = True
-                head = np.array(self.mini.get_current_head_pose(), dtype=float)
-                antennas = [float(a) for a in self.mini.get_present_antenna_joint_positions()]
-                yield head, antennas
-                if restore_pose:
-                    self.mini.goto_target(
-                        head=head, antennas=antennas, duration=MIN_MOVE_S, body_yaw=None
-                    )
-                    time.sleep(0.2)
-                if woke:
-                    self.mini.goto_sleep()
-                failed = False
-            finally:
-                keep_on = was_on if torque_after is None else torque_after
-                if failed:
-                    # Any failure once motion setup began (wake_up() included): best-effort
-                    # goto_sleep(), then torque off; cleanup errors never hide the original.
-                    for cleanup in (self.mini.goto_sleep, self.mini.disable_motors):
-                        try:
-                            cleanup()
-                        except Exception:
-                            log.exception("%s after a failed move", cleanup.__name__)
-                elif not keep_on:
-                    self.mini.disable_motors()

@@ -74,6 +74,12 @@ class EngineConfig(Section):
     impl: Literal["basic", "realtime"] = "basic"
     vad_stop_s: float = Field(default=0.2, gt=0)
     smart_turn: bool = True
+    """Smart Turn v3.2 (pipecat-ai/smart-turn-v3) decides on the edge whether a pause ends the
+    turn: when the speech detector hears `[edge.vad] end_ms` of quiet, the model looks at the
+    turn's audio; a turn that sounds unfinished stays open until `smart_turn_max_wait_ms` of
+    quiet (speech resuming meanwhile goes on in the same turn)."""
+    smart_turn_threshold: float = Field(default=0.5, gt=0, lt=1)
+    smart_turn_max_wait_ms: int = Field(default=2000, ge=100, le=5000)
     realtime_url: str | None = None
     """HF speech-to-speech (OpenAI Realtime) endpoint for the `realtime` engine (phase 2)."""
     speech: bool = True
@@ -157,8 +163,9 @@ class EdgeVadConfig(Section):
     end_ms: int = Field(default=700, ge=100)
     """A window ends after this much no speech once speech was heard."""
     pre_roll_ms: int = Field(default=600, ge=0, le=3000)
-    barge_in_margin_db: float = Field(default=8, ge=0)
-    """While the robot speaks, speech must be this much above the echo-cancelled level."""
+    barge_in_stop_delay_ms: int = Field(default=350, ge=0, le=1000)
+    """A barge-in lets the robot finish its word: it goes on speaking this long (0.25-0.5 s
+    sounds natural), then stops with a short fade (0: it stops at once)."""
 
 
 class EdgeWakeConfig(Section):
@@ -168,9 +175,12 @@ class EdgeWakeConfig(Section):
     `welcome` sets each word's threshold."""
     threshold: float = Field(default=0.4, gt=0, le=1)
     """Until the brain's `welcome` arrives."""
-    pre_roll_s: float = Field(default=1.5, ge=0, le=3)
-    no_speech_s: float = Field(default=5, gt=0, le=15)
-    """A wake window ends if no speech follows the wake word this long."""
+    pre_roll_s: float = Field(default=0.1, ge=0, le=3)
+    """Audio from before the wake detection that the window starts with. The detection comes
+    about 0.1 s after the wake word ends: more would send the wake word to the brain."""
+    no_speech_s: float = Field(default=8, gt=0, le=15)
+    """A wake window ends if no speech follows the wake word this long (a bare wake: the
+    brain answers "Yes?")."""
     phrase_model_dir: str | None = None
     max_window_s: float = Field(default=120, gt=0, le=120)
     """Hard cap of every mic window, whoever opens it (the edge clamps longer requests): at

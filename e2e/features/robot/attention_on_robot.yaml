@@ -5,23 +5,30 @@ description: >
   robot's machine. A typed question makes the turn run idle -> listening -> thinking ->
   speaking -> idle, and the body shows each state with a small, slow head pose from neutral
   (listening: pitch -5 degrees; thinking: roll 7, pitch -3; speaking: neutral; each reached
-  over one second, never more than 10 degrees). A robot at rest wakes up with the SDK's
-  wake_up() for the turn (then settles slowly at neutral) and goes back with goto_sleep() and
-  motors off at idle. Measured by a sampler next to the daemon (not over the tunnel): every
+  over one second, never more than 10 degrees, through the movement manager). A robot at rest
+  wakes up with the SDK's wake_up() for the first turn and stays awake, head up at neutral,
+  for the next: a second turn needs no wake-up. `[body.reachy] idle_sleep_s` (8 s here) after
+  the last turn it goes back with goto_sleep() and the motors off (IDLE-SLEEP). Measured by a
+  sampler next to the daemon (not over the tunnel): every
   pose within 6 degrees of its target (the Lite holds small poses with up to about 5 degrees
   of steady error from its woken neutral) and closer to it than neutral is.
 scenarios:
-  - name: attention poses follow a real turn and the robot goes back to rest
+  - name: attention poses follow two turns, the head stays up between them, then the robot rests
     steps:
       - robot_host_found
       - code_synced_to_edge_host
       - start_reachy_daemon
       - start_brain: {engine: basic}
-      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 8}}
       - robot_state_read: {control_mode: disabled}
       - robot_pose_follows: {client: lite, text: "What colour is the sky on a clear day? Answer in one word.", states: [listening, thinking, speaking, idle]}
       - edge_shows_reply: {client: lite, containing: blue, within_s: 60}
-      - robot_back_at_rest
+      - robot_stays_awake: {seconds: 3}
+      - robot_pose_follows: {client: lite, text: "What colour is grass? Answer in one word.", states: [listening, thinking, speaking, idle], remember: false}
+      - edge_shows_reply: {client: lite, containing: green, within_s: 60}
+      - robot_stays_awake: {seconds: 3}
+      - edge_printed: {client: lite, tag: IDLE-SLEEP, within_s: 15}
+      - robot_back_at_rest: {within_s: 10}
       - robot_state_read: {control_mode: disabled}
       - brain_output_clean
       - edge_output_clean: lite

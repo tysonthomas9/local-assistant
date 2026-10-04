@@ -748,6 +748,7 @@ async def robot_pose_follows(
     states: list[str],
     tolerance_deg: float = 6.0,
     max_head_deg: float = 10.0,
+    remember: bool = True,
     within_s: float = 120.0,
 ) -> None:
     """Type `text` to the agent; its head follows the turn's attention `states` (each a MOTION
@@ -757,8 +758,11 @@ async def robot_pose_follows(
     never turns more than `max_head_deg` from neutral. The Lite holds a small pose with a
     steady error of up to about 5 degrees measured from the woken neutral (servo backlash plus
     the neutral reading's own bias; 1.5-4.8 seen), hence the 6 degree default.
-    Remembers the pose before (for `robot_back_at_rest`)."""
-    _remember_start(ctx, await _robot_state(ctx))
+    Remembers the pose before (for `robot_back_at_rest`; not with `remember: false`, for a
+    later turn of the same conversation) and the neutral pose (for `robot_stays_awake`)."""
+    before = await _robot_state(ctx)
+    if remember:
+        _remember_start(ctx, before)
     name = _client_name(client)
     agent = ctx.processes.get(name)
     consumed = ctx.state["link"].consumed.setdefault(name, set())
@@ -793,6 +797,7 @@ async def robot_pose_follows(
     neutral_samples = [s for s in samples if s["t"] >= start]
     assert neutral_samples, "no sample at the neutral pose"
     neutral = _matrix(neutral_samples[0]["head_pose"])
+    ctx.state.setdefault("robot_neutral", neutral_samples[0]["head_pose"])
     print(f"  neutral head pose: {_degrees(neutral_samples[0]['head_pose'])}")
     for move in posed:
         roll, pitch = ATTENTION_POSES[move["state"]]
@@ -827,3 +832,29 @@ async def robot_pose_follows(
     peak = max(_angle(neutral, _matrix(s["head_pose"])) for s in during)
     print(f"largest head turn from neutral while attending: {peak:.1f} deg")
     assert peak <= max_head_deg + 0.5, f"the head turned {peak:.1f} deg (limit {max_head_deg})"
+
+
+@step("robot_stays_awake")
+async def robot_stays_awake(
+    ctx: ScenarioContext, seconds: float = 3.0, tolerance_deg: float = 6.0
+) -> None:
+    """Between turns the robot stays awake with its head up: for `seconds` its motors are on
+    and the head stays within `tolerance_deg` of the neutral pose the first turn measured
+    (`robot_pose_follows`); the sleep pose is about 25 degrees from it."""
+    reference = ctx.state.get("robot_neutral")
+    assert reference is not None, "no neutral pose measured; use robot_pose_follows first"
+    neutral = _matrix(reference)
+    worst, reads = 0.0, 0
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        state = await _robot_state(ctx)
+        reads += 1
+        mode = state.get("control_mode")
+        assert mode == "enabled", f"motors {mode!r} between turns: the robot went to rest"
+        off = _angle(neutral, _matrix(state["head_pose"]))
+        worst = max(worst, off)
+        assert off <= tolerance_deg, (
+            f"the head is {off:.1f} deg from neutral between turns: {_degrees(state['head_pose'])}"
+        )
+        await asyncio.sleep(0.25)
+    print(f"awake, head up: {reads} reads over {seconds:g} s, at most {worst:.1f} deg from neutral")

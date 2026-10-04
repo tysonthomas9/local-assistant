@@ -9,6 +9,7 @@ discovery exists, `brain_url = "mdns"` means the brain on this machine).
 import argparse
 import asyncio
 import os
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,11 @@ def make_parser() -> argparse.ArgumentParser:
         help="open a mic window when the level stays above this many dBFS (default: off)",
     )
     parser.add_argument(
+        "--no-smart-turn",
+        action="store_true",
+        help="end turns on the speech detector's silence alone ([engine] smart_turn off)",
+    )
+    parser.add_argument(
         "--vad-end-ms",
         type=int,
         default=None,
@@ -78,7 +84,25 @@ def make_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--wake-word", action="append", default=None, help="a wake-word model")
     parser.add_argument("--wake-threshold", type=float, default=None)
+    parser.add_argument(
+        "--body-option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="set one [body.<body>] option over the config (a TOML value, e.g. idle_sleep_s=8)",
+    )
     return parser
+
+
+def _body_option(text: str) -> tuple[str, Any]:
+    key, sep, value = text.partition("=")
+    if not sep or not key.strip():
+        raise SystemExit(f"--body-option {text!r}: want KEY=VALUE")
+    try:
+        parsed = tomllib.loads(f"v = {value}")["v"]
+    except tomllib.TOMLDecodeError:
+        parsed = value  # a bare string
+    return key.strip(), parsed
 
 
 def brain_url(configured: str) -> str:
@@ -126,6 +150,11 @@ def build(
         vad_end_ms=args.vad_end_ms,
         speech_end_ms=args.vad_end_ms or edge.vad.end_ms,
         vad_pre_roll_ms=edge.vad.pre_roll_ms,
-        barge_in_margin_db=edge.vad.barge_in_margin_db,
+        barge_in_stop_delay_ms=edge.vad.barge_in_stop_delay_ms,
+        smart_turn=config.engine.smart_turn and not args.no_smart_turn,
+        smart_turn_threshold=config.engine.smart_turn_threshold,
+        smart_turn_max_wait_ms=config.engine.smart_turn_max_wait_ms,
     )
-    return kind, body_options(kind, config), options
+    body = body_options(kind, config)
+    body.update(_body_option(text) for text in args.body_option)
+    return kind, body, options

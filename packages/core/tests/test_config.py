@@ -155,7 +155,9 @@ def test_edge_listening_defaults_and_repo_config() -> None:
     edge = AssistantConfig().edge
     assert edge.listen.mode == "wake_word"
     assert edge.wake.models == ["hey_jarvis"]
-    assert edge.wake.pre_roll_s == 1.5
+    assert edge.wake.pre_roll_s == 0.1
+    assert edge.wake.no_speech_s == 8
+    assert edge.vad.barge_in_stop_delay_ms == 350
     repo = load_config(Path(__file__).parents[3] / "config", environ={}).edge
     assert repo.listen.mode == "wake_word"
     with pytest.raises(ValidationError):

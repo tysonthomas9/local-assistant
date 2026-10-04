@@ -258,10 +258,12 @@ device) or `reachy` (the real robot through the reachy-mini SDK; runs where the 
 
 Robot safety: nothing moves unless the robot is detected. Expressions are Pollen's recorded
 emotion moves (dataset `pollen-robotics/reachy-mini-emotions-library`, cached on the edge host
-by `scripts/edge_host_bootstrap.sh`, played with `ReachyMini.play_move`). A robot at rest
-(motors off) follows the SDK's standard pattern: `wake_up()` -> the move from neutral -> back
-to neutral -> `goto_sleep()` -> motors off. Pollen's own tested motions (`wake_up()`,
-`goto_sleep()`, the recorded moves) are the one exception to our limits; every move WE author
+by `scripts/edge_host_bootstrap.sh`, played by the body's movement manager, a port of
+Pollen's). A robot at rest (motors off) wakes with `wake_up()` for the first turn or
+expression and stays awake; `[body.reachy] idle_sleep_s` without activity later it goes back
+with `goto_sleep()` and the motors off (scenarios shorten it with `start_edge_agent`'s
+`body_options`). Pollen's own tested motions (`wake_up()`, `goto_sleep()`, the recorded moves,
+the speech wobble) are the one exception to our limits; every move WE author
 stays small and slow (head at most 10 degrees, antennas at most 20). On any error the arbiter
 ends with `goto_sleep()` and the motors off. `robot_plays_emotion` measures with a sampler
 running next to the daemon (20 Hz, on the robot's machine, so no SSH tunnel or PC load is in
@@ -271,7 +273,7 @@ over 0.4 s fails as "the measurement is starved".
 
 | Step | Arguments | Does |
 |---|---|---|
-| `start_edge_agent` | `id`, `body: console \| reachy = console`, `where: pc \| edge_host = pc`, `wait = true`, `energy_trigger_dbfs: float?`, `energy_trigger_feed_only = false`, `vad_end_ms: int?`, `record = false`, `listen: wake_word \| open_mic \| push_to_talk = push_to_talk`, `config_only = false`, `within_s = 60` | Starts the edge agent; waits for its BODY line and welcome unless `wait: false`. `listen` is its listening mode (`--listen`, recorded in the timings; the product's default is `wake_word`, scenarios ask for it). `energy_trigger_dbfs` opens a mic window on a loud voice (`energy_trigger_feed_only`: only on fed golden audio, so ordinary room sound on the real microphone cannot open a window before the feed; recorded in the timings), `vad_end_ms` closes it after that much quiet once speech was heard; `record` writes each played speech stream to a WAV where the agent runs (`.recordings/`, read and removed by `recorded_reply_transcript_not_empty`). `config_only` starts it as a user does, with only `--url` and `--token`: device id, body, listening mode, wake word and mic cap come from config/assistant.toml (`id` then only names the process) |
+| `start_edge_agent` | `id`, `body: console \| reachy = console`, `where: pc \| edge_host = pc`, `wait = true`, `energy_trigger_dbfs: float?`, `energy_trigger_feed_only = false`, `vad_end_ms: int?`, `record = false`, `listen: wake_word \| open_mic \| push_to_talk = push_to_talk`, `config_only = false`, `smart_turn = true`, `body_options: dict?`, `within_s = 60` | Starts the edge agent; waits for its BODY line and welcome unless `wait: false`. `listen` is its listening mode (`--listen`, recorded in the timings; the product's default is `wake_word`, scenarios ask for it). `energy_trigger_dbfs` opens a mic window on a loud voice (`energy_trigger_feed_only`: only on fed golden audio, so ordinary room sound on the real microphone cannot open a window before the feed; recorded in the timings), `vad_end_ms` closes it after that much quiet once speech was heard; `record` writes each played speech stream to a WAV where the agent runs (`.recordings/`, read and removed by `recorded_reply_transcript_not_empty`). `config_only` starts it as a user does, with only `--url` and `--token`: device id, body, listening mode, wake word and mic cap come from config/assistant.toml (`id` then only names the process). `smart_turn: false` turns Smart Turn off (`--no-smart-turn`); `body_options` set `[body.<body>]` options (`--body-option`, e.g. `{idle_sleep_s: 8}`) |
 | `edge_body_is` | `client`, `aec: none \| sw \| hw?`, `camera: bool?`, `expressions: list[str]?` | The body's announced capabilities (and the hello the server got); `aec: hw` also checks the XVF3800 report (board found, one far-end reference) |
 | `edge_types` | `client`, `text` | Types a line into the agent (`/ptt down`, `/mute`, ... or text, sent as text.input) |
 | `press_push_to_talk` / `release_push_to_talk` | `client` | `/ptt down` opens a mic window (MIC-OPEN); `/ptt up` closes it (MIC-CLOSE) |
@@ -289,7 +291,7 @@ over 0.4 s fails as "the measurement is starved".
 | `uplink_audio_live` | `client`, `min_frames: int`, `above_dbfs = -100`, `within_s = 10` | At least `min_frames` mic frames reached the server; the loudest is above `above_dbfs` and the level varies (not digital silence) |
 | `uplink_carries_no_audio` | `client`, `seconds: float` | No mic frame from the edge reaches the server for `seconds`, nor after the server's last `vad {state: end}` from it |
 | `robot_plays_emotion` | `client`, `emotion`, `move`, `min_head_deg = 0`, `min_antenna_deg = 0` | express{emotion}; the result is ok, the body's MOTION line names Pollen's `move` played to its end, and while it played the head turned at least `min_head_deg` from its pose at the start (the rotation angle, any axis) and an antenna at least `min_antenna_deg` |
-| `robot_back_at_rest` | `head_deg = 4` (the passive sleep pose varies about 3 degrees), `antenna_deg = 5` | After the move (and `goto_sleep()` for a robot that was at rest) the head (yaw relative to the body) and antennas are back at their start and the motor mode is what it was |
+| `robot_back_at_rest` | `head_deg = 4` (the passive sleep pose varies about 3 degrees), `antenna_deg = 5`, `within_s = 0` | The head (yaw relative to the body) and antennas are back at their start and the motor mode is what it was; `within_s` waits that long for the idle robot to go to rest |
 | `robot_camera_frame` | `client`, `slot = 1`, `max_side = 640`, `min_bytes = 2000` | snapshot; the server reassembles a whole JPEG on `slot` that fits `max_side` and matches the result |
 | `edge_body_lost` | `client`, `within_s = 10` | The daemon went away: BODY-ERROR from the agent, error{body_unavailable} at the server |
 | `edge_body_recovers` | `client`, `within_s = 30` | The agent reconnected its body on its own (BODY-OK) |
@@ -330,12 +332,13 @@ reachy bodies do; the link client console does not, so use `brain_state_is` with
 | `llm_server_queue` | `running`, `min_waiting`, `within_s = 60` | The stack's vLLM runs exactly `running` requests and has at least `min_waiting` waiting in its own queue (its `/metrics`) |
 | `voice_overtook_background` | `at_least: int?`, `at_most: int?`, `first = false`, `margin_s = 0.25` | From the brain's LLM request log: how many background requests sent before the voice request got their first token after it (more than `margin_s` later); `first`: no background request still waiting got its first token before it |
 | `llm_parallel_throughput` | `count = 4`, `max_tokens = 300`, `min_tokens: int?` | The scenario's LLM server: one request alone, then `count` at once (unique prompts); each produces at least `min_tokens` (default 80% of `max_tokens`) and together they beat the single stream; the tokens/s and TTFTs go to the timings |
-| `robot_pose_follows` | `client`, `text`, `states: list[str]`, `tolerance_deg = 6`, `max_head_deg = 10` | Types `text`; the body's MOTION lines follow the attention `states`; a sampler on the robot's machine checks each pose within `tolerance_deg` of neutral turned by the state's roll/pitch, and no more than `max_head_deg` from neutral (remembers the start pose for `robot_back_at_rest`) |
+| `robot_pose_follows` | `client`, `text`, `states: list[str]`, `tolerance_deg = 6`, `max_head_deg = 10`, `remember = true` | Types `text`; the body's MOTION lines follow the attention `states`; a sampler on the robot's machine checks each pose within `tolerance_deg` of neutral turned by the state's roll/pitch, and no more than `max_head_deg` from neutral (remembers the start pose for `robot_back_at_rest` unless `remember: false`, and the neutral pose for `robot_stays_awake`) |
+| `robot_stays_awake` | `seconds = 3`, `tolerance_deg = 6` | Between turns the motors stay on and the head stays within `tolerance_deg` of the neutral pose `robot_pose_follows` measured (head up, not the sleep pose) |
 
 ### Listening (`steps/listen.py`)
 
 The edge's hands-free listening (`--listen`): wake word, open mic and the brain's follow-up.
-The checks read the agent's WAKE, MIC-OPEN/MIC-CLOSE, FOLLOW-UP, VAD-ECHO and ECHO-END lines
+The checks read the agent's WAKE, MIC-OPEN/MIC-CLOSE, FOLLOW-UP, SMART-TURN, BARGE-IN and ECHO-END lines
 after a mark (set by `listen_mark`, `follow_up_armed` and `speaker_plays`). On the robot, sound
 reaches the microphone through the air from the edge host's built-in speaker (`speaker_plays`);
 the robot's own speaker volume is never touched.
@@ -346,12 +349,15 @@ the robot's own speaker volume is never touched.
 | `edge_listens` | `client`, `mode` | The agent's LISTEN line names this mode (recorded in the timings) |
 | `wake_detected` | `client`, `model = hey_jarvis`, `word = hey jarvis`, `min_score = 0.4`, `within_s = 15` | The agent detected the wake word (WAKE, `model`) and sent `wake{word, score}` with at least `min_score` |
 | `mic_opened` | `client`, `reason`, `barge_in: bool?`, `limit_s: float?`, `within_s = 15` | A mic window opened for `reason` (wake, vad, follow_up, ptt, energy) after the mark, cutting the robot's speech or not (`barge_in`), with the time limit `limit_s` (at most the 120 s cap); on failure it says what the speaker played |
-| `mic_closed` | `client`, `reason = vad_end`, `opened_by: str?`, `min_s = 0`, `open_for_s: float?`, `within_s = 30` | The mic window closed for `reason` (vad_end, no_speech, timeout, ...), opened by `opened_by`, after at least `min_s` of audio; `open_for_s`: it was open that long (+-2 s) |
-| `no_turn_for` | `client`, `seconds` | For `seconds` after the mark no window opened and no wake was sent; prints near misses (WAKE-NEAR) and refused echo (VAD-ECHO) |
+| `mic_closed` | `client`, `reason = vad_end`, `opened_by: str?`, `min_s = 0`, `max_s: float?`, `open_for_s: float?`, `within_s = 30` | The mic window closed for `reason` (vad_end, no_speech, timeout, ...), opened by `opened_by`, after at least `min_s` (and at most `max_s`) of audio; `open_for_s`: it was open that long (+-2 s) |
+| `turn_end_judged` | `client`, `complete`, `within_s = 30` | The edge's next SMART-TURN line judged the turn `complete` (or not): Smart Turn at the speech detector's end silence |
+| `no_turn_for` | `client`, `seconds` | For `seconds` after the mark no window opened and no wake was sent; prints near misses (WAKE-NEAR) |
 | `follow_up_armed` | `client`, `within_s = 30` | The brain's follow-up reached the agent (FOLLOW-UP); sets the mark |
 | `room_quiet` | `client`, `seconds = 2`, `within_s = 90` | Waits for `seconds` in which the speech detector heard no speech (`/level`): a precondition, so someone talking elsewhere cannot start or spoil the next turn; a turn room speech started meanwhile is waited out (window closed, brain idle) and set aside, so later checks do not take it for the next turn |
 | `speaker_plays` | `client`, `name`, `volume = 50`, `wait = true` | Plays `tests/fixtures/audio/<name>.wav` through the macOS edge host's built-in speaker (refused if it is not the default output) at `volume` (at most 60), restoring the volume and mute after; sets the mark; `wait: false` returns as it starts |
 | `speaker_finished` | `within_s = 60` | The play `speaker_plays` started has finished |
+| `edge_mic_tuned` | `client`, `within_s = 10` | The robot's XVF3800 got Pollen's startup tuning: the body's AEC line says every parameter read back as written; the readback goes in the timings |
+| `barge_in_detected_within` | `ms = 300` | The edge's BARGE-IN came at most `ms` after the voice in the clip `speaker_plays` started began (speaker start on the edge host's clock plus the clip's speech onset); recorded in the timings |
 
 ### The try-it launcher (`steps/try_it.py`)
 
@@ -390,6 +396,6 @@ without punctuation.
 | `robot_speaks_reply` | `client`, `min_ms = 300`, `within_s = 120`, `wait_done = true` | The next stream that starts playing on the edge: its speak.begin, playback started and progress, and (with `wait_done`) done with at least `min_ms` played; records the time from the user's input (end of the fed speech, or the typed text) to the speaker's first audio |
 | `playback_progress_at_least` | `client`, `ms`, `within_s = 60` | The reply being spoken has played at least `ms` (the edge's playback progress) |
 | `recorded_reply_transcript_not_empty` | `client`, `within_s = 120` | What the edge's speaker was given for the reply (`record: true`) transcribes to non-empty text; prints its WER against the brain's reply text |
-| `barge_in_stops_playback_within` | `client`, `ms` | The edge's local flush on the barge-in (FLUSHED took_ms) took at most `ms`, and it sent vad{start, barge_in, stream_id, played_ms} for the playing stream |
+| `barge_in_stops_speech` | `client`, `min_ms = 250`, `max_ms = 500` | The edge sent vad{start, barge_in, stream_id, played_ms} for the playing stream at once (BARGE-IN), and its speech stopped with a fade `min_ms`-`max_ms` later (FLUSHED local=true stop_ms) at that played_ms |
 | `turn_truncated_at_played_ms` | `within_s = 15` | The interrupted turn's log entry has `truncated` at the edge's `played_ms`, less played than sent, and the heard text a strict beginning of the spoken text; the brain printed TURN-TRUNCATED |
 | `timings_recorded` | `name` | Writes the scenario's timings and the turn log's speech and LLM timings to `artifacts/timings-<name>.json` and prints them |

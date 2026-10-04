@@ -2,8 +2,8 @@
 
 The edge agent prints what its listening does: WAKE (a wake word, its score), WAKE-NEAR (a
 score under the threshold), MIC-OPEN reason=wake|vad|follow_up, MIC-CLOSE reason=vad_end|
-no_speech|timeout, FOLLOW-UP (the brain's follow-up armed) and VAD-ECHO (speech refused while
-the robot's own voice may sound). These steps read those lines after a mark: the start of the
+no_speech|timeout, FOLLOW-UP (the brain's follow-up armed) and SMART-TURN (Smart Turn's verdict
+on a pause: is the turn over?). These steps read those lines after a mark: the start of the
 last utterance (`feed_golden_wav` or `speaker_plays`) or of a `listen_mark`.
 
 `speaker_plays` is the real-speaker voice input of the robot tests: a golden WAV played by
@@ -17,8 +17,11 @@ import asyncio
 import contextlib
 import shlex
 import time
+import wave
+from pathlib import Path
 from typing import Any
 
+from assistant_core.levels import dbfs
 from assistant_testing import edge_host
 from assistant_testing.features.context import ScenarioContext
 from assistant_testing.features.registry import step
@@ -89,6 +92,7 @@ async def wake_detected(
     assert score >= min_score, f"wake score {score} < {min_score}"
     await _expect(ctx, agent, {"MIC-OPEN"}, 5, fields={"reason": "wake"}, what="MIC-OPEN wake")
     near = [x.text for x in _lines_since(ctx, client, "WAKE-NEAR")]
+    ctx.state["wake_word"] = word  # the next transcript must not carry it
     _timings(ctx).setdefault("wake", []).append(
         {"word": word, "score": score, "engine": line.fields.get("engine"), "near_misses": near}
     )
@@ -138,12 +142,13 @@ async def mic_closed(
     reason: str = "vad_end",
     opened_by: str | None = None,
     min_s: float = 0.0,
+    max_s: float | None = None,
     open_for_s: float | None = None,
     within_s: float = 30.0,
 ) -> None:
     """The edge's mic window closed for `reason` (vad_end, no_speech, timeout, ...), having
-    carried at least `min_s` of audio; `open_for_s`: it was open that long (+-2 s, from when
-    the agent printed MIC-OPEN and MIC-CLOSE)."""
+    carried at least `min_s` (and at most `max_s`) of audio; `open_for_s`: it was open that
+    long (+-2 s, from when the agent printed MIC-OPEN and MIC-CLOSE)."""
     agent = _client_name(client)
     line = await _expect(ctx, agent, {"MIC-CLOSE"}, within_s, what="MIC-CLOSE")
     print(line.text)
@@ -152,6 +157,8 @@ async def mic_closed(
         assert line.fields.get("opened_by") == opened_by, line.text
     seconds = int(line.fields.get("frames", "0")) * 0.02
     assert seconds >= min_s, f"the window carried {seconds:.2f} s of audio (want >= {min_s})"
+    if max_s is not None:
+        assert seconds <= max_s, f"the window carried {seconds:.2f} s of audio (want <= {max_s})"
     if open_for_s is not None:
         proc = ctx.processes.get(agent)
         opened = [x for x in _get_lines(proc, "MIC-OPEN") if x.index < line.index][-1]
@@ -160,15 +167,29 @@ async def mic_closed(
         assert abs(lasted - open_for_s) <= 2, f"open {lasted:.1f} s, want {open_for_s} s"
 
 
+@step("turn_end_judged")
+async def turn_end_judged(
+    ctx: ScenarioContext, client: str, complete: bool, within_s: float = 30.0
+) -> None:
+    """Smart Turn judged a pause after the mark (SMART-TURN): the turn sounded `complete` or
+    not. Each verdict is consumed once; the verdicts go in the timings."""
+    agent = _client_name(client)
+    line = await _expect(ctx, agent, {"SMART-TURN"}, within_s, what="SMART-TURN")
+    print(line.text)
+    assert line.index >= _mark(ctx, client), f"judged before the mark: {line.text}"
+    got = line.fields.get("complete") == "true"
+    assert got == complete, f"Smart Turn found the turn complete={got}, want {complete}"
+    _timings(ctx).setdefault("smart_turn", []).append(dict(line.fields))
+
+
 @step("no_turn_for")
 async def no_turn_for(ctx: ScenarioContext, client: str, seconds: float) -> None:
     """For `seconds` from now nothing the edge heard since the mark started a turn: no mic
-    window opened, no wake was sent. Prints what the listening did instead (near misses,
-    refused echo)."""
+    window opened, no wake was sent. Prints the near misses of the wake word meanwhile."""
     await asyncio.sleep(seconds)
     opened = _lines_since(ctx, client, "MIC-OPEN")
     woke = _lines_since(ctx, client, "WAKE")
-    for line in _lines_since(ctx, client, "WAKE-NEAR") + _lines_since(ctx, client, "VAD-ECHO"):
+    for line in _lines_since(ctx, client, "WAKE-NEAR"):
         print(f"  edge: {line.text}")
     started = "; ".join(x.text for x in woke + opened)
     assert not started, f"a turn started: {started}"
@@ -264,7 +285,7 @@ restore() {{
 trap restore EXIT
 trap 'exit 1' INT TERM HUP
 osascript -e 'set volume output volume {level} without output muted'
-echo "SPEAKER-START $(date +%s)"
+echo "SPEAKER-START $(perl -MTime::HiRes=time -e 'printf q(%.3f), time')"
 afplay {wav}
 echo "SPEAKER-DONE"
 """
@@ -310,7 +331,56 @@ async def speaker_finished(ctx: ScenarioContext, within_s: float = 60.0) -> None
     """The edge host's speaker finished the WAV `speaker_plays` started (volume restored)."""
     playing: dict[str, Any] | None = ctx.state.get("speaker")
     assert playing is not None, "nothing is playing; use speaker_plays first"
-    output = await asyncio.wait_for(playing["task"], within_s)
+    playing["output"] = await asyncio.wait_for(playing["task"], within_s)
     took = time.monotonic() - playing["started"]
     print(f"{playing['name']}.wav played in {took:.1f} s; speaker volume restored")
-    del output
+
+
+def speech_onset_s(name: str, dbfs_floor: float = -40.0) -> float:
+    """Where speech starts in the golden WAV `name`: its first 20 ms above `dbfs_floor`."""
+    with wave.open(str(Path(GOLDEN_DIR) / f"{name}.wav")) as wav:
+        rate, pcm = wav.getframerate(), wav.readframes(wav.getnframes())
+    step = rate // 50 * 2
+    for at in range(0, len(pcm) - step, step):
+        if dbfs(pcm[at : at + step]) > dbfs_floor:
+            return at / 2 / rate
+    raise AssertionError(f"{name}.wav: no sound above {dbfs_floor} dBFS")
+
+
+@step("barge_in_detected_within")
+async def barge_in_detected_within(ctx: ScenarioContext, ms: float = 300.0) -> None:
+    """The barge-in (`barge_in_stops_speech`) came at most `ms` after the voice the speaker
+    played started: from the speech onset in the WAV, on the edge host's wall clock (the
+    speaker's start, SPEAKER-START, and the edge's BARGE-IN wall=, the same machine). The
+    speaker's own start-up delay counts against it. Goes in the timings."""
+    barge = ctx.state.get("barge_in")
+    playing: dict[str, Any] | None = ctx.state.get("speaker")
+    assert barge is not None, "no barge-in yet; use barge_in_stops_speech first"
+    assert playing is not None, "nothing was played; use speaker_plays first"
+    if "output" not in playing:
+        await speaker_finished(ctx)
+    start = next(
+        (float(x.split()[1]) for x in playing["output"].splitlines()
+         if x.startswith("SPEAKER-START ")), None,
+    )  # fmt: skip
+    assert start is not None, f"the speaker printed no start time: {playing['output']}"
+    onset = speech_onset_s(playing["name"])
+    detect_ms = (barge["wall"] - (start + onset)) * 1000
+    _timings(ctx)["barge_in_detect_ms"] = round(detect_ms)
+    print(f"barge-in detected {detect_ms:.0f} ms after the voice started "
+          f"({playing['name']}.wav speech at {onset:.2f} s)")  # fmt: skip
+    assert 0 < detect_ms <= ms, (
+        f"barge-in detected {detect_ms:.0f} ms after the voice (want <= {ms})"
+    )
+
+
+@step("edge_mic_tuned")
+async def edge_mic_tuned(ctx: ScenarioContext, client: str, within_s: float = 10.0) -> None:
+    """The robot's XVF3800 got Pollen's startup tuning: the body's AEC line says it was written
+    and every parameter read back as written (`tuning.applied`); the readback goes in the
+    timings."""
+    line = await _expect(ctx, _client_name(client), {"AEC"}, within_s, what="AEC")
+    tuning = (line.payload or {}).get("tuning") or {}
+    print(f"XVF3800 tuning: {tuning}")
+    _timings(ctx)["xvf3800_tuning"] = tuning
+    assert tuning.get("applied") is True, f"the XVF3800 tuning did not read back: {tuning}"

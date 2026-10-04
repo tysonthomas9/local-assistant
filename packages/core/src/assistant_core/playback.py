@@ -15,12 +15,19 @@ chunk marks the end of a stream (`speak.end`); `done` is reported once its last 
 had time to play. Events: `started` (first chunk written), `progress` (every
 `progress_ms` of played audio, 200 ms by default), `done`, `flushed`.
 
+`stop_after` is the gentle barge-in (as a person stops talking when interrupted): the stream
+now playing goes on for a moment and ends with a short fade-out (its audio is cut to that
+length, the last part faded to silence), the others are dropped at once; it is reported
+`flushed` once its shortened audio has played.
+
 Pure asyncio, no audio library: the sink converts the s16le mono PCM to what its device takes.
 """
 
 import asyncio
 import contextlib
+import sys
 import time
+from array import array
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -61,6 +68,24 @@ class _Stream:
     written_ms: float = 0.0
     started: bool = False
     next_progress_ms: int = PROGRESS_MS
+    cut: bool = False
+    """Shortened by `stop_after`: it takes no more audio and ends `flushed`."""
+    cut_ms: int = 0
+
+
+def fade_out(pcm: bytes, samples: int) -> bytes:
+    """s16le `pcm` with its last `samples` faded linearly to silence."""
+    audio = array("h")
+    audio.frombytes(pcm[: len(pcm) // 2 * 2])
+    if sys.byteorder == "big":
+        audio.byteswap()
+    n = len(audio)
+    samples = min(samples, n)
+    for i in range(samples):
+        audio[n - samples + i] = int(audio[n - samples + i] * (samples - 1 - i) / samples)
+    if sys.byteorder == "big":
+        audio.byteswap()
+    return audio.tobytes()
 
 
 class PacedPlayer:
@@ -90,6 +115,8 @@ class PacedPlayer:
     async def play(self, stream_id: int, pcm: bytes, rate: int) -> None:
         """Queue PCM of `stream_id`; an empty chunk ends the stream."""
         stream = self._by_id.get(stream_id)
+        if stream is not None and stream.cut:
+            return  # stopping (`stop_after`): the rest of it is not played
         if stream is None:
             if not pcm:
                 return
@@ -122,6 +149,34 @@ class PacedPlayer:
             self._events.put_nowait(ClockEvent(stream.stream_id, ms, "flushed"))
         self._wake.set()
         return played if current is not None and current in targets else 0
+
+    async def stop_after(self, ms: int, fade_ms: int) -> tuple[int | None, int]:
+        """Barge-in, gently: the stream now playing goes on for `ms` more (what the device
+        already has included) and ends with a `fade_ms` fade-out; every other stream is
+        dropped (`flushed`). A stream not started yet is dropped at once. Returns (the stream
+        that goes on, its played ms when it ends), or (None, 0); it is reported `flushed`
+        with that played ms once it has played."""
+        now = self.clock()
+        current = self._streams[0] if self._streams else None
+        if current is not None and not current.started:
+            await self.flush(None)
+            return None, 0
+        for stream in [s for s in self._streams if s is not current]:
+            self._streams.remove(stream)
+            self._by_id.pop(stream.stream_id, None)
+            self._events.put_nowait(ClockEvent(stream.stream_id, 0, "flushed"))
+        if current is None:
+            return None, 0
+        if not current.cut:
+            queued_ms = max(0.0, self._play_until - now) * 1000
+            frame = 2 * current.rate // 1000  # bytes per ms
+            keep = min(len(current.pending), int(max(0.0, ms - queued_ms)) * frame)
+            fade = min(keep, fade_ms * frame) // 2
+            current.pending = bytearray(fade_out(bytes(current.pending[:keep]), fade))
+            current.ended = current.cut = True
+            current.cut_ms = int(current.written_ms + keep / frame)
+            self._wake.set()
+        return current.stream_id, current.cut_ms
 
     async def events(self) -> AsyncIterator[ClockEvent]:
         while True:
@@ -181,9 +236,8 @@ class PacedPlayer:
             if stream.ended and not stream.pending and now >= self._play_until:
                 self._streams.popleft()
                 self._by_id.pop(stream.stream_id, None)
-                self._events.put_nowait(
-                    ClockEvent(stream.stream_id, int(stream.written_ms), "done")
-                )
+                state: PlaybackState = "flushed" if stream.cut else "done"
+                self._events.put_nowait(ClockEvent(stream.stream_id, int(stream.written_ms), state))
                 continue
             self._wake.clear()
             with contextlib.suppress(TimeoutError):

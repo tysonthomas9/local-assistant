@@ -1,5 +1,5 @@
 id = "marvin"
-wake_words = [{ model = "hey_marvin", threshold = 0.4, word = "hey marvin" }]
+wake_words = [{ model = "hey_marvin", threshold = 0.5, word = "hey marvin" }]
 voice = { speaker = "Eric" }
 persona = "marvin"                                   # config/personas/marvin.md
 personas = []

@@ -23,6 +23,17 @@ class Router:
             )
         self.default = self.assistants[default_assistant]
 
+    def spoken(self, word: str | None) -> str | None:
+        """The spoken form of a wake word an assistant claims (by spoken form or model
+        name), or None (e.g. the energy trigger's `energy`)."""
+        if word:
+            wanted = word.strip().lower()
+            for assistant in self.assistants.values():
+                for wake in assistant.wake_words:
+                    if wanted in (wake.spoken.lower(), wake.model.lower()):
+                        return wake.spoken
+        return None
+
     def route(self, word: str | None) -> AssistantDef:
         """The assistant a wake word belongs to (its spoken form or model name)."""
         if word:

@@ -538,7 +538,10 @@ async def playback_progress_at_least(
             fields={"stream": stream}, what=f"playback of stream {stream} reaching {ms} ms",
         )  # fmt: skip
         state = line.fields.get("state")
-        assert state in ("progress", "started"), f"stream {stream} ended early: {line.text}"
+        if state not in ("progress", "started"):
+            proc = ctx.processes.get(agent)
+            why = [x.text for tag in ("MIC-OPEN", "BARGE-IN") for x in _get_lines(proc, tag)]
+            raise AssertionError(f"stream {stream} ended early: {line.text}; " + "; ".join(why))
         if int(line.fields.get("played_ms", "0")) >= ms:
             print(line.text)
             return
@@ -649,6 +652,21 @@ async def recorded_reply_transcript_not_empty(
     assert answer["text"].strip(), "the recorded reply transcribes to nothing"
 
 
+def _without_wake(text: str, wake: str) -> str:
+    """`text` without a leading wake word (all its words, or its last ones) and the punctuation
+    after it, compared as lower-case letters and digits."""
+
+    def norm(word: str) -> str:
+        return "".join(ch for ch in word.lower() if ch.isalnum())
+
+    words, wanted = text.split(), [norm(w) for w in wake.split()]
+    for start in range(len(wanted)):
+        tail = wanted[start:]
+        if [norm(w) for w in words[: len(tail)]] == tail:
+            return " ".join(words[len(tail) :]).lstrip(" ,.;:!?-")
+    return text.strip()
+
+
 @step("voice_turn_transcribed")
 async def voice_turn_transcribed(
     ctx: ScenarioContext,
@@ -658,7 +676,9 @@ async def voice_turn_transcribed(
     within_s: float = 60.0,
 ) -> None:
     """The brain transcribed the fed utterance (its TRANSCRIPT line): the golden WAV's text
-    (or `text`) with a word error rate of at most `max_wer`. Prints the edge's mic windows."""
+    (or `text`) with a word error rate of at most `max_wer`. Prints the edge's mic windows.
+    After a wake (`wake_detected`) the transcript, what the LLM gets, must not start with the
+    wake word (or its last word), and the reference is the golden text without it."""
     line = await _expect(ctx, SERVER, {"TRANSCRIPT"}, within_s, what="TRANSCRIPT")
     agent = ctx.processes.get(_client_name(client))
     for window in _get_lines(agent, "MIC-OPEN") + _get_lines(agent, "MIC-CLOSE"):
@@ -666,6 +686,12 @@ async def voice_turn_transcribed(
     heard = str((line.payload or {}).get("text") or "")
     fed = ctx.state.get("fed")
     reference = text if text is not None else (_golden(ctx, fed["name"])[1] if fed else "")
+    wake = ctx.state.pop("wake_word", None)
+    if wake is not None:
+        reference = _without_wake(reference, wake)
+        assert _without_wake(heard, wake) == heard.strip(), (
+            f"the wake word {wake!r} reached the brain's transcript: {heard!r}"
+        )
     wer = word_error_rate(reference, heard)
     print(f"the brain heard {heard!r} (WER {wer:.3f} against {reference!r})")
     # The real microphone is live until the feed starts: a room sound above the energy trigger
@@ -676,28 +702,45 @@ async def voice_turn_transcribed(
     )
 
 
-@step("barge_in_stops_playback_within")
-async def barge_in_stops_playback_within(ctx: ScenarioContext, client: str, ms: float) -> None:
-    """A barge-in stopped the edge's speaker within `ms`: its local flush (FLUSHED took_ms)
-    and the edge sent `vad{start, barge_in, stream_id, played_ms}` for the playing stream."""
+@step("barge_in_stops_speech")
+async def barge_in_stops_speech(
+    ctx: ScenarioContext, client: str, min_ms: float = 250, max_ms: float = 500
+) -> None:
+    """A barge-in stopped the edge's speech the way a person stops talking: the edge sent
+    `vad{start, barge_in, stream_id, played_ms}` for the playing stream at once (BARGE-IN), the
+    speech went on and then stopped with a fade between `min_ms` and `max_ms` after the
+    barge-in (FLUSHED local=true stop_ms, on the edge's playback clock), at the `played_ms` it
+    told the brain."""
     agent = _client_name(client)
-    flushed = await _expect(
-        ctx, agent, {"FLUSHED"}, 10, fields={"local": "true"}, what="FLUSHED local=true"
-    )
-    took = float(flushed.fields["took_ms"])
+    barge = await _expect(ctx, agent, {"BARGE-IN"}, 15, what="BARGE-IN")
+    print(barge.text)
     vad = await _expect(
         ctx, agent, {"SENT"}, 10, fields={"type": "vad"}, payload={"barge_in": True},
         what="vad barge_in",
     )  # fmt: skip
     payload = vad.payload or {}
+    flushed = await _expect(
+        ctx, agent, {"FLUSHED"}, 10, fields={"local": "true"}, what="FLUSHED local=true"
+    )
+    print(flushed.text)
+    stop_ms = float(flushed.fields.get("stop_ms", flushed.fields.get("took_ms", "0")))
     speaking = ctx.state.get("speaking") or {}
-    ctx.state["barge_in"] = {"played_ms": payload.get("played_ms"), "flush_ms": took}
-    _timings(ctx)["barge_in_flush_ms"] = took
-    _timings(ctx)["barge_in_played_ms"] = payload.get("played_ms")
-    print(f"barge-in: speaker flushed in {took:.1f} ms after {payload.get('played_ms')} ms played")
+    ctx.state["barge_in"] = {"played_ms": payload.get("played_ms"), "stop_ms": stop_ms,
+                             "wall": float(barge.fields.get("wall", "0"))}  # fmt: skip
+    timings = _timings(ctx)
+    timings["barge_in_stop_ms"] = stop_ms
+    timings["barge_in_played_ms"] = payload.get("played_ms")
+    timings["barge_in_fade_ms"] = int(barge.fields.get("fade_ms", "0"))
+    print(f"barge-in: the speech stopped {stop_ms:.0f} ms after it, at {payload.get('played_ms')}"
+          f" ms played (fade {barge.fields.get('fade_ms')} ms)")  # fmt: skip
     if speaking:
         assert payload.get("stream_id") == speaking["stream"], f"barge-in on {payload}"
-    assert took <= ms, f"the speaker took {took:.1f} ms to stop (want <= {ms})"
+    assert int(flushed.fields["played_ms"]) == payload.get("played_ms"), (
+        f"stopped at {flushed.fields['played_ms']} ms, told the brain {payload.get('played_ms')}"
+    )
+    assert min_ms <= stop_ms <= max_ms, (
+        f"the speech stopped {stop_ms:.0f} ms after the barge-in (want {min_ms}-{max_ms} ms)"
+    )
 
 
 @step("turn_truncated_at_played_ms")
@@ -707,7 +750,7 @@ async def turn_truncated_at_played_ms(ctx: ScenarioContext, within_s: float = 15
     sentences, then the words of the cut one in proportion to how much of it played), and
     less audio heard than was sent."""
     barge = ctx.state.get("barge_in")
-    assert barge is not None, "no barge-in yet; use barge_in_stops_playback_within first"
+    assert barge is not None, "no barge-in yet; use barge_in_stops_speech first"
     deadline = time.monotonic() + within_s
     turn: dict[str, Any] | None = None
     while time.monotonic() < deadline:

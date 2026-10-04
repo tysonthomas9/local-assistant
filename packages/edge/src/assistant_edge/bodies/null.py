@@ -43,6 +43,9 @@ class NullAudio:
     async def flush(self, stream_id: int | None = None) -> int:
         return await self.player.flush(stream_id)
 
+    async def stop_after(self, ms: int, fade_ms: int) -> tuple[int | None, int]:
+        return await self.player.stop_after(ms, fade_ms)
+
     async def playback_events(self) -> AsyncIterator[PlaybackEvent]:
         async for event in self.player.events():
             yield PlaybackEvent(event.stream_id, event.played_ms, event.state)

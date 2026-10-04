@@ -4,12 +4,21 @@ The daemon (`python -m assistant_robot_reachy.daemon`) must run on this machine 
 media on: the SDK's LOCAL media backend reads the camera from the daemon's IPC socket and opens
 the robot's USB audio card directly (macOS: CoreAudio `osxaudiosrc`/`osxaudiosink`; Linux:
 PulseAudio), 16 kHz stereo float. The microphone is the XVF3800's processed channel 0, with
-its hardware echo canceller (`aec: hw`, see `xvf3800`). Nothing here moves the robot unless
-the daemon answers with its backend ready; every move goes through `MotionArbiter`.
+its hardware echo canceller (`aec: hw`, see `xvf3800`); at start the board gets Pollen's
+conversation-app tuning (`xvf3800.STARTUP_TUNING`, read back into the AEC line as `tuning`).
+Nothing here moves the robot unless the daemon answers with its backend ready; every move
+goes through `MotionArbiter` (Pollen's MovementManager, `moves`).
 
-Its `[body.reachy]` table: `connection` (the SDK's connection mode, `localhost_only`) and
+Its `[body.reachy]` table: `connection` (the SDK's connection mode, `localhost_only`),
 `expressions` (a TOML file whose `[moves]` table adds or replaces expression -> Pollen move
-names over the built-in `EMOTION_MOVES`).
+names over the built-in `EMOTION_MOVES`) and `idle_sleep_s` (120: how long the robot stays
+awake at neutral after a turn before it goes to sleep with its motors off).
+
+The robot wakes for the first turn (or expression) and stays awake during a conversation:
+the movement manager holds its pose, plays the attention poses and expressions in order, and
+the SDK's speech wobble moves the head while it speaks; `idle` is neutral, head up. After
+`idle_sleep_s` without activity (attention or an expression) it goes to rest (IDLE-SLEEP).
+Muting, stopping the agent, an error in a move and the watchdog still put it to rest at once.
 
 While the edge's link to the brain is up (`link_changed`), the body touches the motor
 watchdog's heartbeat file (`assistant_robot_reachy.watchdog`): the watchdog next to the daemon
@@ -21,12 +30,8 @@ If the daemon goes away, the body reports `BodyHealth(ok=False)` (the edge tells
 back.
 
 TODO(phase 3):
-- XVF3800 startup tuning in `start()` (`AudioBase.apply_audio_config` with tuned AEC/AGC
-  values, as Pollen's conversation app does).
 - A precise playback clock from the sink's real position instead of the paced estimate.
-- `enable_wobbling` (speech-driven head motion) while speaking.
-- Face tracking (`start_head_tracking`) while listening.
-- `clear_player` also resets the wobbler; check it against Pollen's barge-in handling.
+- Face tracking (`MovementManager.set_head_tracking`; off by default, as in Pollen's app).
 """
 
 import asyncio
@@ -60,11 +65,14 @@ from assistant_robot_reachy.arbiter import (
     connect_mini,
     robot_ready,
 )
-from assistant_robot_reachy.xvf3800 import aec_status
+from assistant_robot_reachy.xvf3800 import aec_status, apply_startup_tuning
 
 DEVICE_RATE = 16000
 FRAME_SAMPLES = 320
 HEALTH_EVERY_S = 1.0
+FRESH_BEAT_S = 1.5
+"""The movement manager commands the robot only while the link heartbeat is this fresh (the
+watchdog rests the robot at `watchdog.STALE_S`)."""
 
 
 def emit(tag: str, payload: Any = None, **fields: object) -> None:
@@ -150,6 +158,9 @@ class ReachyAudio:
     async def flush(self, stream_id: int | None = None) -> int:
         return await self.player.flush(stream_id)
 
+    async def stop_after(self, ms: int, fade_ms: int) -> tuple[int | None, int]:
+        return await self.player.stop_after(ms, fade_ms)
+
     async def playback_events(self) -> AsyncIterator[PlaybackEvent]:
         async for event in self.player.events():
             yield PlaybackEvent(event.stream_id, event.played_ms, event.state)
@@ -162,12 +173,16 @@ class ReachyAudio:
 class ReachyMotion:
     """Attention states become small, slow head poses (`MotionArbiter.attend`), played in
     order by a worker so the link is never blocked by a move; each prints a MOTION line with
-    the pose and when it was reached (the robot machine's monotonic clock)."""
+    the pose and when it was reached (the robot machine's monotonic clock). After `idle` the
+    robot stays awake; `idle_sleep_s` later, with no new attention or expression meanwhile,
+    it goes to rest (`rest`: asleep, motors off, if it was at rest before the turn)."""
 
-    def __init__(self, body: "ReachyBody") -> None:
+    def __init__(self, body: "ReachyBody", idle_sleep_s: float = 120.0) -> None:
         self.body = body
-        self._states: asyncio.Queue[AttentionState] = asyncio.Queue()
+        self.idle_sleep_s = idle_sleep_s
+        self._states: asyncio.Queue[str] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
+        self._idle_timer: asyncio.Task[None] | None = None
 
     def _arbiter(self) -> MotionArbiter:
         arbiter = self.body.arbiter
@@ -180,9 +195,31 @@ class ReachyMotion:
         if self.body.arbiter is None or not self.body.healthy:
             emit("MOTION-ERROR", {"detail": "the robot is not connected"}, attention=state)
             return
+        self._cancel_idle_timer()
+        self._queue(state)
+
+    def _queue(self, state: str) -> None:
         self._states.put_nowait(state)
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._attend_loop(), name="reachy-attention")
+
+    def _cancel_idle_timer(self) -> bool:
+        """Stop the idle timeout; whether one was running."""
+        timer, self._idle_timer = self._idle_timer, None
+        if timer is None or timer.done():
+            return False
+        timer.cancel()
+        return True
+
+    def _start_idle_timer(self) -> None:
+        self._cancel_idle_timer()
+        self._idle_timer = asyncio.create_task(self._idle_sleep(), name="reachy-idle-sleep")
+
+    async def _idle_sleep(self) -> None:
+        await asyncio.sleep(self.idle_sleep_s)
+        self._idle_timer = None
+        emit("IDLE-SLEEP", after_s=f"{self.idle_sleep_s:g}")
+        self._queue("rest")
 
     async def _attend_loop(self) -> None:
         while True:
@@ -201,9 +238,12 @@ class ReachyMotion:
                 emit("MOTION-ERROR", {"detail": f"{type(exc).__name__}: {exc}"}, attention=state)
                 continue
             emit("MOTION", done or {}, attention=state, moved=str(done is not None).lower())
+            if state == "idle" and done is not None and self._states.empty():
+                self._start_idle_timer()  # awake at neutral until the idle timeout
 
     async def rest(self) -> None:
         """Stop attending: drop pending states and put an attending robot back to rest."""
+        self._cancel_idle_timer()
         if self._worker is not None:
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -216,7 +256,7 @@ class ReachyMotion:
             # Unconditionally: `attend` waits (its lock) for a move still running in its thread
             # after the worker was cancelled, then rests the robot if that move woke it.
             try:
-                done = await asyncio.to_thread(arbiter.attend, "idle")
+                done = await asyncio.to_thread(arbiter.attend, "rest")
             except Exception as exc:
                 emit("MOTION-ERROR", {"detail": f"{type(exc).__name__}: {exc}"}, rest="true")
             else:
@@ -226,7 +266,12 @@ class ReachyMotion:
         arbiter = self._arbiter()
         started = time.monotonic()
         arbiter.last_move = None
-        ok = await asyncio.to_thread(arbiter.queue_emotion, name, intensity)
+        self._cancel_idle_timer()  # activity: the idle timeout starts again after it
+        try:
+            ok = await asyncio.to_thread(arbiter.queue_emotion, name, intensity)
+        finally:
+            if arbiter.attending and self._states.empty():
+                self._start_idle_timer()
         emit("MOTION", arbiter.last_move or {}, express=name, intensity=intensity,
              ok=str(ok).lower(), took_s=f"{time.monotonic() - started:.2f}")  # fmt: skip
         return ok
@@ -319,7 +364,10 @@ class ReachyBody:
         daemon_url: str = DAEMON_URL,
         connection: str = "localhost_only",
         expressions: str | None = None,
+        idle_sleep_s: float = 120.0,
     ) -> None:
+        if not 0 < idle_sleep_s <= 3600:
+            raise ValueError(f"[body.reachy] idle_sleep_s {idle_sleep_s}: 0 < seconds <= 3600")
         self.daemon_url = daemon_url
         self.connection = connection
         self.moves = expression_moves(expressions)
@@ -327,12 +375,13 @@ class ReachyBody:
         self.arbiter: MotionArbiter | None = None
         self.healthy = False
         self.audio = ReachyAudio(self)
-        self.motion = ReachyMotion(self)
+        self.motion = ReachyMotion(self, float(idle_sleep_s))
         self.camera = ReachyCamera(self)
         self._health: asyncio.Queue[BodyHealth] = asyncio.Queue()
         self._watch: asyncio.Task[None] | None = None
         self._beat: asyncio.Task[None] | None = None
         self.link_up = False
+        self._last_beat = 0.0
 
     # ------------------------------------------------------------ lifecycle
 
@@ -345,10 +394,25 @@ class ReachyBody:
         )
         mini.media.start_recording()
         mini.media.start_playing()
-        self.mini, self.arbiter = mini, MotionArbiter(mini, daemon_url=self.daemon_url)
+        self.mini = mini
+        self.arbiter = MotionArbiter(mini, daemon_url=self.daemon_url, alive=self._alive)
         self.arbiter.emotions.update(self.moves)
 
+    def _alive(self) -> bool:
+        """The link is up and its heartbeat fresh (read by the movement manager's thread)."""
+        return self.link_up and time.monotonic() - self._last_beat <= FRESH_BEAT_S
+
+    def _beat_once(self) -> None:
+        try:
+            watchdog.touch()
+        except OSError as exc:
+            emit("HEARTBEAT-ERROR", {"detail": f"{type(exc).__name__}: {exc}"})
+        else:
+            self._last_beat = time.monotonic()
+
     def _disconnect(self) -> None:
+        if self.arbiter is not None:
+            self.arbiter.manager.stop()
         mini, self.mini, self.arbiter = self.mini, None, None
         if mini is None:
             return
@@ -364,15 +428,17 @@ class ReachyBody:
             raise RobotUnavailable(f"no robot: {detail}")
         await asyncio.to_thread(self._connect)
         self.healthy = True
+        tuning = await asyncio.to_thread(apply_startup_tuning)
         aec = await asyncio.to_thread(aec_status)
-        emit("AEC", aec)
+        emit("AEC", {**aec, "tuning": tuning})
         size = self.camera.size()
         self._watch = asyncio.create_task(self._watch_daemon(), name="reachy-health")
         self._beat = asyncio.create_task(self._heartbeat(), name="reachy-heartbeat")
         return Capabilities(
             audio_in=AudioInCaps(rate=16000, aec="hw"),
             motion=MotionCaps(
-                expressions=sorted(self.arbiter.emotions) if self.arbiter else [], attention=True
+                expressions=sorted({*self.arbiter.emotions, "random"}) if self.arbiter else [],
+                attention=True,
             ),
             camera=CameraCaps(w=size[0], h=size[1]) if size else None,
             doa=False,
@@ -383,18 +449,12 @@ class ReachyBody:
         (a link back within the watchdog's `STALE_S` leaves the robot as it is)."""
         self.link_up = up
         if up:  # at once: a link that drops right away still arms the watchdog
-            try:
-                watchdog.touch()
-            except OSError as exc:
-                emit("HEARTBEAT-ERROR", {"detail": f"{type(exc).__name__}: {exc}"})
+            self._beat_once()
 
     async def _heartbeat(self) -> None:
         while True:
             if self.link_up:
-                try:
-                    watchdog.touch()
-                except OSError as exc:
-                    emit("HEARTBEAT-ERROR", {"detail": f"{type(exc).__name__}: {exc}"})
+                self._beat_once()
             await asyncio.sleep(watchdog.HEARTBEAT_EVERY_S)
 
     async def stop(self) -> None:

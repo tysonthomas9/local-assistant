@@ -15,20 +15,31 @@ capabilities and then:
   it, a longer request (`mic.follow_up`, push-to-talk, ...) is clamped.
 - **Listening modes** (`--listen`, `[edge.listen] mode`; see `assistant_edge.listen`):
   `wake_word` (the default) runs the wake-word engine on every frame: a detection sends
-  `wake{word, score}` and opens a window with the last `[edge.wake] pre_roll_s` of audio first.
+  `wake{word, score}` and opens a window starting `[edge.wake] pre_roll_s` (0.1 s) before the
+  detection, which comes about 0.1 s after the wake word ends: the words right after it are
+  kept, the wake word itself is not sent. The window's audio is held back until speech
+  follows the wake word: a bare wake (no speech within `[edge.wake] no_speech_s`, 8 s) sends
+  no audio, only `vad{start}` and `vad{end}` (the brain answers it with a short "Yes?").
   `open_mic` opens a window when the speech detector (Silero VAD) hears speech, with its
   pre-roll. In both the speech detector ends the window (`vad_end`, after `[edge.vad] end_ms` of
-  no speech; a wake window in which no speech followed the wake word ends `no_speech`), and
+  no speech, if Smart Turn (`[engine] smart_turn`, `smart_turn`) finds the turn complete, else
+  after `[engine] smart_turn_max_wait_ms` of it: SMART-TURN says which; a wake window in
+  which no speech followed the wake word ends `no_speech`), and
   `mic.follow_up` lets speech open a window without the wake word until it runs out (the
   window opens only when speech starts, so silence or the speaker's tail sends nothing).
-  While speech plays and for `ECHO_TAIL_MS` after, speech opens a window (a barge-in) only if
-  it is `[edge.vad] barge_in_margin_db` above the echo-cancelled level heard meanwhile (or loud,
-  `LOUD_MARGIN_DB` above it: the board distorts a voice over its own), and not in the first
-  `BARGE_IN_GRACE_MS` of the speech: the robot never answers its own voice (VAD-ECHO says why
-  speech was not taken, ECHO-END what was heard while the speech played). `push_to_talk`
-  keeps only push-to-talk (and the test aids), and a follow-up opens its window at once.
-- **Barge-in.** Opening a window while speech is playing flushes playback locally first and
-  sends `vad{start, barge_in: true, stream_id, played_ms}`.
+  While speech plays, speech opens a window in every listening mode, without the wake word (a
+  barge-in, reason `barge_in` when only the barge-in allows it). Speech the detector hears
+  while the robot speaks is a barge-in, with no extra guard: the XVF3800's echo canceller
+  keeps the robot's own voice out of the microphone (as in Pollen's app; ECHO-END says what
+  the microphone heard while the speech played). `push_to_talk` keeps only push-to-talk (and
+  the test aids), and a follow-up opens its window at once.
+- **Barge-in.** Opening a window while speech is playing is a barge-in (BARGE-IN): the edge
+  sends `vad{start, barge_in: true, stream_id, played_ms}` at once and the speech goes on for
+  `[edge.vad] barge_in_stop_delay_ms` (350 ms) more, then stops with a `BARGE_IN_FADE_MS`
+  fade-out, as a person stops talking when interrupted (`played_ms` is where it stops; other
+  queued streams are dropped at once). A body without `StopsGently`, or a delay of 0, flushes
+  at once. FLUSHED local=true says when it stopped (`stop_ms` after the barge-in); the brain's
+  `flush` of that stream meanwhile is left to the stop, and its late frames are dropped.
 - **Speech.** `speak.begin` + 0x02 frames + `speak.end` play through the body; its playback
   clock is reported as `playback{started|progress|done|flushed, played_ms}`. The reply text
   of `speak.begin` is shown (`SAY`, by the body if it can) and a stream without audio is
@@ -59,10 +70,10 @@ capabilities and then:
 - **Typed input.** Any other stdin line is sent as `text.input`.
 
 Every line it prints is `TAG key=value ... [json]` (the format of `assistant_link.console`).
-Tags: BODY, AEC-MISMATCH, LISTEN, WELCOME, RECV, SENT, WAKE, WAKE-NEAR, FOLLOW-UP, VAD-ECHO,
-ECHO-END, MIC-OPEN, MIC-CLOSE, MIC-REFUSED, PRIVACY, UNMUTE-REFUSED, FLUSHED, PLAYBACK, RESULT,
-SAY, SHOW, FEED, FED, LEVEL, RECORDED, BODY-ERROR, BODY-OK, CLOSED, RETRY, REFUSED,
-CONSOLE-ERROR, STOPPED.
+Tags: BODY, AEC-MISMATCH, LISTEN, WELCOME, RECV, SENT, WAKE, WAKE-NEAR, FOLLOW-UP, ECHO-END,
+SMART-TURN, SMART-TURN-ERROR, BARGE-IN, MIC-OPEN, MIC-CLOSE, MIC-REFUSED, PRIVACY, UNMUTE-
+REFUSED, FLUSHED, FLUSH-LEFT, PLAYBACK, RESULT, SAY, SHOW, FEED, FED, LEVEL, RECORDED, BODY-
+ERROR, BODY-OK, CLOSED, RETRY, REFUSED, CONSOLE-ERROR, STOPPED.
 """
 
 import asyncio
@@ -72,14 +83,14 @@ import time
 import wave
 from collections import deque
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import JsonValue
 
-from assistant_contracts.body import AudioFrame, Body, LinkAware, ReportsHealth
+from assistant_contracts.body import AudioFrame, Body, LinkAware, ReportsHealth, StopsGently
 from assistant_contracts.capabilities import Capabilities
 from assistant_contracts.common import Aec
 from assistant_contracts.frames import Frame, FrameKind
@@ -114,6 +125,8 @@ from assistant_contracts.messages import (
 from assistant_core.jpeg import jpeg_size
 from assistant_core.levels import dbfs
 from assistant_edge.listen import SpeechDetector, WakeEngine, make_wake_engine
+from assistant_edge.smart_turn import SECONDS as TURN_SECONDS
+from assistant_edge.smart_turn import SmartTurn, TurnEnd
 from assistant_link.client import LinkClient
 from assistant_link.connection import Connection, LinkClosed, SendQueueFull
 from assistant_link.console import emit, read_commands
@@ -133,22 +146,14 @@ FRAME_MS = 20
 FRAME_BYTES = MIC_RATE * 2 * FRAME_MS // 1000
 PRE_ROLL_MS = 300
 """Audio before the energy trigger fired that is sent when its window opens."""
+TURN_AUDIO_BYTES = TURN_SECONDS * 16000 * 2
 MIC_CAP_S = 120.0
 """Hard cap of any mic window (user decision 2026-10-03): `max_window_s` is clamped to it."""
 WAKE_SPEECH_MS = 240
 """In a wake window, speech counts as the request once this much of it (in all) follows the
 wake (the tail of the wake word itself is shorter)."""
-ECHO_ALPHA = 0.1
-"""Smoothing of the echo-cancelled level heard while speech plays (per 20 ms frame)."""
-BARGE_IN_GRACE_MS = 1500
-"""No barge-in for this long after speech starts playing: the XVF3800's echo canceller may
-still be converging and let the robot's own first words through (seen on a fresh daemon)."""
-LOUD_MARGIN_DB = 20.0
-LOUD_SPEECH_MS = 60
-"""While speech plays the XVF3800 suppresses (and distorts) the user's voice after its first
-moment, so the speech detector may not take all of it for speech: sound this far above the
-echo for the start run, with at least this much speech in it, is a barge-in too (the robot's
-own voice leaking through as the head moves is loud too, but not speech)."""
+BARGE_IN_FADE_MS = 80
+"""The fade-out that ends speech a barge-in stopped (after `barge_in_stop_delay_ms`)."""
 
 ListenMode = Literal["wake_word", "open_mic", "push_to_talk"]
 LISTEN_MODES: tuple[ListenMode, ...] = ("wake_word", "open_mic", "push_to_talk")
@@ -171,6 +176,17 @@ class _Window:
     speech_ms: int = 0
     """All speech frames since the window opened (speech detector)."""
     vad_max: float = 0.0
+    held: list[AudioFrame] | None = None
+    """A wake window's audio, held back until speech follows the wake word (then sent)."""
+    audio: bytearray = field(default_factory=bytearray)
+    """The audio sent in this window, its last `smart_turn.SECONDS` (for Smart Turn)."""
+    turn_end: TurnEnd | None = None
+    """Smart Turn's verdict on the present silence (None: not asked yet, or speech resumed)."""
+    judged: tuple[float, int] | None = None
+    """When the verdict came (monotonic) and the quiet ms it judged: the wait for an
+    incomplete turn runs on the clock too, so a microphone that stops sending (a fed WAV that
+    ended, no real microphone) still ends the window."""
+    asking: bool = False
 
 
 @dataclass
@@ -200,8 +216,10 @@ class AgentOptions:
     wake_words: tuple[str, ...] = ("hey_jarvis",)
     wake_threshold: float = 0.4
     """Until the brain's `welcome` gives each word's threshold."""
-    wake_pre_roll_ms: int = 1500
-    wake_no_speech_s: float = 5.0
+    wake_pre_roll_ms: int = 100
+    """Audio from before the wake detection sent first (the wake word ends about 100 ms
+    before it is detected: more would send the wake word itself)."""
+    wake_no_speech_s: float = 8.0
     phrase_model_dir: Path | None = None
     vad_threshold: float = 0.5
     vad_start_ms: int = 160
@@ -209,7 +227,13 @@ class AgentOptions:
     vad_pre_roll_ms: int = 600
     speech_end_ms: int = 700
     """The speech detector ends a window after this much no speech (`vad_end`)."""
-    barge_in_margin_db: float = 8.0
+    barge_in_stop_delay_ms: int = 350
+    """A barge-in lets the speech go on this long, then fades it out (0: stop at once)."""
+    smart_turn: bool = False
+    """Smart Turn decides whether the speech detector's end silence ends the turn."""
+    smart_turn_threshold: float = 0.5
+    smart_turn_max_wait_ms: int = 2000
+    """A turn Smart Turn finds unfinished ends after this much quiet."""
 
 
 class EdgeAgent:
@@ -231,6 +255,8 @@ class EdgeAgent:
         self.voiced: set[int] = set()
         """Streams of `speaking` that got audio (a text-only stream has none to play)."""
         self.flushed: set[int] = set()
+        self._stopping: dict[int, tuple[float, float]] = {}
+        """Streams a barge-in is stopping gently -> (when, how long the stop call took)."""
         self.timers = 0
         self._loud = 0
         self._echo_until_us = 0
@@ -248,6 +274,12 @@ class EdgeAgent:
         self.vad: SpeechDetector | None = (
             SpeechDetector(options.vad_threshold) if listening else None
         )
+        self.turn: SmartTurn | None = (
+            SmartTurn(threshold=options.smart_turn_threshold)
+            if listening and options.smart_turn
+            else None
+        )
+        self._asks: set[asyncio.Task[None]] = set()
         self.wake: WakeEngine | None = (
             make_wake_engine(
                 options.wake_engine,
@@ -265,14 +297,7 @@ class EdgeAgent:
         """The last frames heard, for a listening window's pre-roll."""
         self._follow_until = 0.0
         """Until then (monotonic) speech opens a window without the wake word (follow-up)."""
-        self._echo_level: float | None = None
-        """Smoothed echo-cancelled level while speech plays (None outside the echo period)."""
-        self._echo_refused = False
         self._echo: dict[str, Any] | None = None
-        self._echo_floor = -120.0
-        self._echo_since_us = 0
-        self._loud_ms = 0
-        self._loud_speech_ms = 0
 
     # ------------------------------------------------------------ lifecycle
 
@@ -388,8 +413,8 @@ class EdgeAgent:
         del conn
         if frame.kind is FrameKind.OUT_PCM:
             rate = self.speaking.get(frame.stream)
-            if rate is None:
-                return  # flushed, or no speak.begin: drop
+            if rate is None or frame.stream in self._stopping:
+                return  # flushed or stopping, or no speak.begin: drop
             self.voiced.add(frame.stream)
             if self.options.record_dir is not None:
                 self._recordings.setdefault(frame.stream, (rate, bytearray()))[1].extend(
@@ -516,7 +541,15 @@ class EdgeAgent:
         await self.send(Playback(stream_id=stream_id, played_ms=0, state="done"))
 
     async def _flush(self, stream_id: int | None, *, local: bool) -> tuple[int | None, int]:
-        """Flush one stream or all; returns (the stream that was playing, its played ms)."""
+        """Flush one stream or all; returns (the stream that was playing, its played ms). A
+        stream a barge-in is stopping gently is left to that stop."""
+        if stream_id is not None and stream_id in self._stopping:
+            emit("FLUSH-LEFT", stream=stream_id, reason="stopping")
+            return stream_id, 0
+        if stream_id is None and self._stopping:
+            for sid in [s for s in self.speaking if s not in self._stopping]:
+                await self._flush(sid, local=local)
+            return None, 0
         playing = next(iter(self.speaking), None)
         started = time.monotonic()
         played = await self.body.audio.flush(stream_id)
@@ -531,8 +564,41 @@ class EdgeAgent:
              played_ms=played, local=str(local).lower(), took_ms=f"{took_ms:.1f}")  # fmt: skip
         return playing, played
 
+    async def _barge_in(self) -> tuple[int | None, int]:
+        """Stop the speech for a barge-in: gently (`barge_in_stop_delay_ms`, then a fade) if
+        the body can, else at once. Returns (the stream that was playing, its played ms
+        where it stops)."""
+        audio, delay = self.body.audio, self.options.barge_in_stop_delay_ms
+        started = time.monotonic()
+        prob = self.vad.prob if self.vad is not None else None
+        cause = {"vad_run_ms": self.vad.run_ms, "prob": f"{prob:.2f}"} if self.vad else {}
+        if delay <= 0 or not isinstance(audio, StopsGently):
+            stream, played = await self._flush(None, local=True)
+            delay = 0
+        else:
+            stream, played = await audio.stop_after(delay, BARGE_IN_FADE_MS)
+            for sid in [s for s in self.speaking if s != stream]:
+                self.speaking.pop(sid, None)
+                self.voiced.discard(sid)
+                self.flushed.add(sid)
+                self._save_recording(sid)
+            if stream is not None:
+                self._stopping[stream] = (started, (time.monotonic() - started) * 1000)
+        emit("BARGE-IN", stream=stream if stream is not None else "-", played_ms=played,
+             stop_in_ms=delay, fade_ms=BARGE_IN_FADE_MS if delay else 0,
+             wall=f"{time.time():.3f}", **cause)  # fmt: skip
+        return stream, played
+
     async def _playback_loop(self) -> None:
         async for event in self.body.audio.playback_events():
+            stopping = self._stopping.pop(event.stream_id, None)
+            if stopping is not None and event.state in ("done", "flushed"):
+                stop_ms = (time.monotonic() - stopping[0]) * 1000
+                self.flushed.add(event.stream_id)
+                emit("FLUSHED", stream=event.stream_id, played_ms=event.played_ms, local="true",
+                     took_ms=f"{stopping[1]:.1f}", stop_ms=f"{stop_ms:.0f}")  # fmt: skip
+            elif stopping is not None:
+                self._stopping[event.stream_id] = stopping
             if event.state in ("done", "flushed"):
                 self.speaking.pop(event.stream_id, None)
                 self._echo_until_us = time.monotonic_ns() // 1000 + ECHO_TAIL_MS * 1000
@@ -570,13 +636,16 @@ class EdgeAgent:
                 max(self.window.limit_s, time.monotonic() - self.window.opened_at + limit_s),
             )
             return
-        barge_in = bool(self.speaking)
+        barge_in = bool(self.speaking) and not set(self.speaking) <= set(self._stopping)
         vad = Vad(state="start")
         if barge_in:
-            stream, played = await self._flush(None, local=True)
+            stream, played = await self._barge_in()
             vad = Vad(state="start", barge_in=True, stream_id=stream, played_ms=played)
         self.window = _Window(reason, time.monotonic(), limit_s, heard=heard)
-        self.window.vad = self.vad is not None and reason in ("wake", "vad", "follow_up")
+        listening = ("wake", "vad", "follow_up", "barge_in")
+        self.window.vad = self.vad is not None and reason in listening
+        if self.window.vad and reason == "wake" and not heard:
+            self.window.held = []  # sent once speech follows the wake word
         if self.window.vad:
             self._follow_until = 0.0  # a follow-up opens one window
         emit("MIC-OPEN", reason=reason, barge_in=str(barge_in).lower(), limit_s=f"{limit_s:g}")
@@ -592,6 +661,8 @@ class EdgeAgent:
             if window.vad
             else {}
         )
+        if window.held is not None:
+            speech["held"] = len(window.held)  # a bare wake: its audio was never sent
         emit("MIC-CLOSE", reason=reason, opened_by=window.reason, frames=window.frames,
              mean_dbfs=f"{mean:.1f}", max_dbfs=f"{window.level_max:.1f}", **speech)  # fmt: skip
         await self.send(Vad(state="end"))
@@ -607,6 +678,11 @@ class EdgeAgent:
                 await self._close_window("timeout")
             elif window.vad and not window.heard and open_s > self.options.wake_no_speech_s:
                 await self._close_window("no_speech")
+            elif window.judged is not None:
+                at, quiet_ms = window.judged
+                waited_ms = quiet_ms + (time.monotonic() - at) * 1000
+                if waited_ms >= self.options.smart_turn_max_wait_ms:
+                    await self._close_window("vad_end")
 
     async def _capture_loop(self) -> None:
         async for frame in self.body.audio.capture():
@@ -700,13 +776,12 @@ class EdgeAgent:
         window = self.window
         if window is None or self.muted:
             return  # no uplink outside a mic window
-        self.mic_seq = (self.mic_seq + 1) % 2**32
-        if self.send_frame(
-            Frame(FrameKind.MIC_PCM, MIC_STREAM, self.mic_seq, frame.capture_ts_us, frame.pcm)
-        ):
-            window.frames += 1
-            window.level_sum += level
-            window.level_max = max(window.level_max, level)
+        if window.held is not None:
+            window.held.append(frame)  # until speech follows the wake word
+            if live and self.vad is not None:
+                await self._vad_window(window)
+            return
+        self._send_mic(window, frame, level)
         if window.vad and self.vad is not None:
             if live:  # the speech detector has already heard the pre-roll
                 await self._vad_window(window)
@@ -720,6 +795,18 @@ class EdgeAgent:
             window.quiet_ms += FRAME_MS
             if window.quiet_ms >= end_ms:
                 await self._close_window("vad_end")
+
+    def _send_mic(self, window: _Window, frame: AudioFrame, level: float) -> None:
+        if self.turn is not None and window.vad:
+            window.audio += frame.pcm
+            del window.audio[: max(0, len(window.audio) - TURN_AUDIO_BYTES)]
+        self.mic_seq = (self.mic_seq + 1) % 2**32
+        if self.send_frame(
+            Frame(FrameKind.MIC_PCM, MIC_STREAM, self.mic_seq, frame.capture_ts_us, frame.pcm)
+        ):
+            window.frames += 1
+            window.level_sum += level
+            window.level_max = max(window.level_max, level)
 
     # ------------------------------------------------------------ listening
 
@@ -736,25 +823,7 @@ class EdgeAgent:
         self._history.append(frame)
         if self._level_probe is not None:
             self._level_speech.append(prob)
-        echo = self._in_echo(frame)
-        self._echo_stats(echo, prob, level, frame.capture_ts_us)
-        if not echo:
-            self._echo_level = None
-        elif self._echo_level is None:
-            self._echo_level = level
-        if self._echo_level is not None:
-            self._echo_floor = self._echo_level
-        baseline = self._echo_level
-        near = baseline is not None and level >= baseline + self.options.barge_in_margin_db
-        if baseline is not None and prob < self.vad.threshold and not near:
-            # Not speech: what the echo canceller lets through of the robot's own voice.
-            self._echo_level = (1 - ECHO_ALPHA) * baseline + ECHO_ALPHA * level
-        if baseline is not None and level >= baseline + LOUD_MARGIN_DB:
-            self._loud_ms += FRAME_MS
-            self._loud_speech_ms += FRAME_MS if prob >= self.vad.threshold else 0
-        else:
-            self._loud_ms, self._loud_speech_ms = 0, 0
-        loud = self._loud_ms >= self.options.vad_start_ms and self._loud_speech_ms >= LOUD_SPEECH_MS
+        self._echo_stats(self._in_echo(frame), prob, level)
         if self.wake is not None:
             hit = self.wake.feed(frame.pcm)
             for word, score, threshold in self.wake.near_misses():
@@ -767,42 +836,25 @@ class EdgeAgent:
                 await self._open_window("wake", self.options.max_window_s)
                 await self._send_pre_roll(self.options.wake_pre_roll_ms)
                 return True
-        if self.window is not None or not (self.vad.run_ms >= self.options.vad_start_ms or loud):
-            self._echo_refused = False
+        if self.window is not None or self.vad.run_ms < self.options.vad_start_ms:
             return False
         follow_up = time.monotonic() < self._follow_until
-        if self.options.listen != "open_mic" and not follow_up:
+        barge = bool(self.speaking) and not set(self.speaking) <= set(self._stopping)
+        if self.options.listen != "open_mic" and not follow_up and not barge:
             return False
-        if echo:
-            frames = self.options.vad_start_ms // FRAME_MS
-            recent = list(self._history)[-frames:]
-            speech = sum(dbfs(f.pcm) for f in recent) / len(recent)
-            echo_dbfs = baseline if baseline is not None else -120.0
-            floor = echo_dbfs + self.options.barge_in_margin_db
-            refused = None
-            if frame.capture_ts_us - self._echo_since_us < BARGE_IN_GRACE_MS * 1000:
-                refused = "grace"
-            elif not loud and speech < floor:
-                refused = "echo"
-            if refused is not None:
-                if not self._echo_refused:
-                    self._echo_refused = True
-                    emit("VAD-ECHO", reason=refused, speech_dbfs=f"{speech:.1f}",
-                         echo_dbfs=f"{echo_dbfs:.1f}", need_dbfs=f"{floor:.1f}",
-                         prob=f"{prob:.2f}", loud=str(loud).lower())  # fmt: skip
-                return False
-        reason = "vad" if self.options.listen == "open_mic" and not follow_up else "follow_up"
+        if self.options.listen == "open_mic" and not follow_up:
+            reason = "vad"
+        else:
+            reason = "follow_up" if follow_up else "barge_in"
         await self._open_window(reason, self.options.max_window_s, heard=True)
         await self._send_pre_roll(self.options.vad_pre_roll_ms)
         return True
 
-    def _echo_stats(self, echo: bool, prob: float, level: float, ts_us: int) -> None:
+    def _echo_stats(self, echo: bool, prob: float, level: float) -> None:
         """While speech plays (and its tail): what the microphone heard, printed when it ends
-        (ECHO-END: the echo-cancelled level, and how much the speech detector took for
-        speech; a barge-in shows here as speech above the echo)."""
+        (ECHO-END: the loudest echo-cancelled level, and how much the speech detector took for
+        speech; a barge-in shows here as speech)."""
         if echo:
-            if self._echo is None:
-                self._echo_since_us = ts_us
             stats = self._echo or {"frames": 0, "speech_ms": 0, "vad_max": 0.0, "max_dbfs": -120.0}
             stats["frames"] += 1
             stats["speech_ms"] += FRAME_MS if prob >= self.options.vad_threshold else 0
@@ -812,8 +864,8 @@ class EdgeAgent:
         elif self._echo is not None:
             stats, self._echo = self._echo, None
             emit("ECHO-END", frames=stats["frames"], speech_ms=stats["speech_ms"],
-                 vad_max=f"{stats['vad_max']:.2f}", max_dbfs=f"{stats['max_dbfs']:.1f}",
-                 echo_dbfs=f"{self._echo_floor:.1f}")  # fmt: skip
+                 vad_max=f"{stats['vad_max']:.2f}",
+                 max_dbfs=f"{stats['max_dbfs']:.1f}")  # fmt: skip
 
     async def _send_pre_roll(self, ms: int) -> None:
         frames = list(self._history)[-max(1, ms // FRAME_MS) :]
@@ -828,9 +880,45 @@ class EdgeAgent:
             window.speech_ms += FRAME_MS
         if not window.heard and window.speech_ms >= WAKE_SPEECH_MS:
             window.heard = True
-        end_ms = self.options.speech_end_ms
-        if window.heard and self.vad.quiet_ms >= end_ms:
+            held, window.held = window.held, None
+            for frame in held or []:  # speech followed the wake word: its audio goes up now
+                self._send_mic(window, frame, dbfs(frame.pcm))
+        quiet = self.vad.quiet_ms
+        if not window.heard:
+            return
+        if quiet < self.options.speech_end_ms:
+            window.turn_end = window.judged = None  # speech resumed: judged afresh later
+            return
+        if self.turn is None:
             await self._close_window("vad_end")
+            return
+        if window.turn_end is None:
+            if not window.asking:
+                window.asking = True
+                task = asyncio.create_task(self._ask_turn_end(window, quiet), name="smart-turn")
+                self._asks.add(task)
+                task.add_done_callback(self._asks.discard)
+            return
+        if window.turn_end.complete or quiet >= self.options.smart_turn_max_wait_ms:
+            await self._close_window("vad_end")
+
+    async def _ask_turn_end(self, window: _Window, quiet_ms: int) -> None:
+        """Smart Turn on the window's audio so far: is the turn over (SMART-TURN)?"""
+        assert self.turn is not None
+        try:
+            verdict = await asyncio.to_thread(self.turn.predict, bytes(window.audio))
+        except Exception as exc:  # the model failing must not keep the mic open
+            emit("SMART-TURN-ERROR", {"detail": f"{type(exc).__name__}: {exc}"})
+            verdict = TurnEnd(complete=True, probability=1.0, inference_ms=0.0)
+        window.asking = False
+        if self.window is not window or self.vad is None:
+            return
+        if self.vad.quiet_ms < self.options.speech_end_ms:
+            return  # speech resumed while the model ran: judged again at the next silence
+        window.turn_end, window.judged = verdict, (time.monotonic(), quiet_ms)
+        emit("SMART-TURN", complete=str(verdict.complete).lower(),
+             prob=f"{verdict.probability:.3f}", ms=f"{verdict.inference_ms:.0f}",
+             quiet_ms=quiet_ms, audio_ms=len(window.audio) // (MIC_RATE * 2 // 1000))  # fmt: skip
 
     async def _set_muted(self, muted: bool, *, hard: bool = False) -> None:
         """`hard`: muted by a human at the edge (`/mute`)."""

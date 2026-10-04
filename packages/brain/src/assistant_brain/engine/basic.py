@@ -9,7 +9,10 @@ Two modes in the skeleton:
   `voice` for the user's turns and `proactive` for the assistant's own), with the turn's
   assistant's persona and the session's recent history. With speech (`[engine].speech`, an
   `SttClient` and a `TtsClient` on the speech server):
-  - speech input is transcribed first (`InputTranscript`; nothing heard: no reply);
+  - speech input is transcribed first (`InputTranscript`; nothing heard: no reply). In a
+    window a wake word opened, a transcript starting with the wake word loses it (the LLM
+    never gets it; `strip_wake_word`), and a bare wake (nothing else said) is answered with
+    `WAKE_ACK` in the assistant's voice, without the LLM and outside the history;
   - the LLM's streamed text is cut into sentences as it arrives, and each sentence is spoken
     by the TTS in the assistant's voice (`voice.speaker`: Jarvis -> Ryan, Marvin -> Eric)
     while the LLM goes on: `ReplyText(sentence)` then its `ReplyAudio` chunks;
@@ -21,6 +24,7 @@ Two modes in the skeleton:
 
 import asyncio
 import contextlib
+import difflib
 import re
 import time
 import unicodedata
@@ -47,6 +51,11 @@ from assistant_core.config import AssistantDef
 LLM_DOWN_REPLY = "Sorry, I can't reach my language model right now. Please try again in a moment."
 SPEECH_DOWN_REPLY = "Sorry, I can't reach my speech server right now. Please try again in a moment."
 NO_STT_REPLY = "Sorry, I can't understand speech yet; please type to me."
+WAKE_ACK = "Yes?"
+"""The reply to a bare wake word (nothing said after it)."""
+WAKE_WORD_MATCH = 0.75
+"""How alike (difflib ratio) a transcript word must be to a wake-word word to be taken for
+it: "Jarvis" / "Jarvis," / "Jervis" are, "Java" is not."""
 REPLY_MAX_TOKENS = 400
 MIN_SENTENCE_CHARS = 12
 """A sentence shorter than this is joined to the next one ("Hi. ..."), so a TTS request is
@@ -99,6 +108,29 @@ def speakable(text: str) -> str:
     )
     text = " ".join(text.split())
     return text if any(ch.isalnum() for ch in text) else ""
+
+
+def _word(text: str) -> str:
+    return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+def strip_wake_word(text: str, wake: str) -> str:
+    """`text` without a leading wake word: the whole spoken wake word (`hey jarvis`) or its
+    last words (`jarvis`), each word as heard by the STT (`WAKE_WORD_MATCH`), then the
+    punctuation after it. Anything else is left as it is."""
+    words, wanted = text.split(), [_word(w) for w in wake.split()]
+    for start in range(len(wanted)):
+        tail = wanted[start:]
+        if len(words) < len(tail):
+            continue
+        heard = [_word(w) for w in words[: len(tail)]]
+        if all(
+            difflib.SequenceMatcher(None, h, w).ratio() >= WAKE_WORD_MATCH
+            for h, w in zip(heard, tail, strict=True)
+        ):
+            rest = " ".join(words[len(tail) :]).lstrip(" ,.;:!?-—")
+            return rest[:1].upper() + rest[1:]
+    return text
 
 
 def heard_text(segments: list["_Segment"], played_ms: int) -> str:
@@ -192,8 +224,15 @@ class LlmSession:
             metrics.stt_ms = transcript.ms
             metrics.extra["stt_request_id"] = transcript.request_id
             text = transcript.text
+            if turn.wake and text:
+                text = strip_wake_word(text, turn.wake)
+                if text != transcript.text:
+                    metrics.extra["stt_text"] = transcript.text
             yield InputTranscript(text)
         if not text or not any(ch.isalnum() for ch in text):
+            if turn.wake and not turn.text:  # a bare wake word
+                async for event in self._acknowledge(assistant, metrics, started):
+                    yield event
             return  # nothing was said
         user = {"role": "user", "content": text}
         messages = [
@@ -222,6 +261,27 @@ class LlmSession:
             metrics.llm_queued_ms = result.queued_ms
         reply.answer = {"role": "assistant", "content": result.text}
         self.history += [user, reply.answer]
+
+    async def _acknowledge(
+        self, assistant: AssistantDef, metrics: TurnMetrics, started: float
+    ) -> AsyncIterator[EngineEvent]:
+        """`WAKE_ACK`, spoken in the assistant's voice (text only without TTS)."""
+        metrics.extra["wake_ack"] = True
+        yield ReplyText(WAKE_ACK)
+        if self.tts is None:
+            return
+        voice = assistant.voice.speaker.lower()
+        metrics.voice = voice
+        synthesis = Synthesis(voice)
+        metrics.tts_requests += 1
+        try:
+            async for pcm in self.tts.stream(WAKE_ACK, voice, synthesis):
+                if metrics.first_audio_ms is None:
+                    metrics.first_audio_ms = (time.monotonic() - started) * 1000
+                    metrics.tts_first_audio_ms = synthesis.first_audio_ms
+                yield ReplyAudio(pcm, self.tts.rate)
+        except SpeechUnavailable as exc:
+            raise EngineUnavailable(str(exc), SPEECH_DOWN_REPLY) from exc
 
     async def _llm_text(
         self,

@@ -178,7 +178,7 @@ class SessionManager:
                         session_id=session.session_id,
                     )
                 )
-                await dialog.on_wake()
+                await dialog.on_wake(self.router.spoken(message.word))
             case Vad():
                 await dialog.on_vad(message)
             case TextInput():

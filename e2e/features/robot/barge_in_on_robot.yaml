@@ -2,9 +2,9 @@ feature: Barge-in cuts a spoken reply on the robot, and the brain forgets what w
 tier: [sim, hw, models]
 description: >
   The real brain speaks a long reply (real LLM, real TTS on GPU1) on the robot's speaker.
-  Push-to-talk during it is a barge-in: the edge stops its speaker within 200 ms (its own
-  local flush, without waiting for the brain) and reports vad{start, barge_in, played_ms}. The
-  brain cancels the reply (LLM and TTS) and the turn log shows the reply truncated at that
+  Push-to-talk during it is a barge-in: the edge reports vad{start, barge_in, played_ms} at
+  once and, without waiting for the brain, lets the speech go on 250-500 ms (350 ms, then a
+  short fade), as a person stops when interrupted. The brain cancels the reply (LLM and TTS) and the turn log shows the reply truncated at that
   played_ms: the heard text is the beginning of what was spoken. The golden "what time is it"
   WAV, fed as mic frames into the open window, is then the next turn, and it is answered.
 scenarios:
@@ -21,7 +21,7 @@ scenarios:
       - robot_speaks_reply: {client: lite, wait_done: false}
       - playback_progress_at_least: {client: lite, ms: 2500}
       - press_push_to_talk: lite
-      - barge_in_stops_playback_within: {client: lite, ms: 200}
+      - barge_in_stops_speech: {client: lite}
       - turn_truncated_at_played_ms
       - feed_golden_wav: {client: lite, name: what_time_is_it}
       - golden_wav_fed: {client: lite}

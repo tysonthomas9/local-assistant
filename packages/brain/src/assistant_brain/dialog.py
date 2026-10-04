@@ -10,6 +10,10 @@ Turn states and the attention the edge is told (through `body.intent` -> BodyCon
 - **Input.** A wake or `vad{start}` opens listening and the brain collects the uplink audio
   (0x01) until `vad{end}`; audio with speech in it becomes a voice turn (silence ends the
   window). `text.input` is a text turn. New input during a turn interrupts it.
+- **Wake word.** A window a wake word opened (one an assistant claims, not the energy
+  trigger) is a voice turn that knows its wake word: a transcript starting with it loses it,
+  and a bare wake (silence after it, or nothing but the wake word) is answered with a short
+  acknowledgement ("Yes?", no LLM) and the follow-up window.
 - **Reply.** A voice turn's transcript (`InputTranscript`) becomes the turn's input text. The
   engine's reply text goes out as `speak.begin{text}` + `speak.end` when there is no audio
   (no speech server); reply audio as `speak.begin{first sentence}` + 0x02 frames +
@@ -126,6 +130,8 @@ class DialogManager:
         self.record: TurnRecord | None = None
         self._task: asyncio.Task[None] | None = None
         self._mic: bytearray | None = None
+        self._wake: str | None = None
+        """The spoken wake word that opened the mic window being collected, if one did."""
         self._follow_up: asyncio.Task[None] | None = None
         self._playback: dict[int, asyncio.Future[str]] = {}
         self._stream = 0
@@ -170,11 +176,13 @@ class DialogManager:
 
     # ------------------------------------------------------------ edge input
 
-    async def on_wake(self) -> None:
+    async def on_wake(self, word: str | None = None) -> None:
+        """`word`: the spoken wake word an assistant claims (None: e.g. the energy trigger)."""
         self._cancel_follow_up()
         if self._turn_running():
             await self.interrupt(None)
         self._mic = bytearray()
+        self._wake = word
         await self.set_state("listening")
 
     async def on_vad(self, vad: Vad) -> None:
@@ -184,17 +192,21 @@ class DialogManager:
             self._cancel_follow_up()
             if vad.barge_in or self._turn_running():
                 await self.interrupt(vad.played_ms)
-            if self._mic is None:
+            if self._mic is None:  # a window without a wake (speech, follow-up, barge-in)
                 self._mic = bytearray()
+                self._wake = None
             if self.state != "listening":
                 await self.set_state("listening")
             return
         audio, self._mic = self._mic, None
+        wake, self._wake = self._wake, None
         if audio is None:
             return
         self._cancel_follow_up()
         if audio and loudest_dbfs(bytes(audio)) >= SPEECH_DBFS:
-            await self._start_turn("voice", audio=bytes(audio))
+            await self._start_turn("voice", audio=bytes(audio), wake=wake)
+        elif wake is not None and not self._turn_running():
+            await self._start_turn("voice", wake=wake)  # a bare wake: acknowledged
         elif not self._turn_running():
             await self._become_idle()
 
@@ -205,7 +217,7 @@ class DialogManager:
 
     async def on_text(self, message: TextInput) -> None:
         self._cancel_follow_up()
-        self._mic = None
+        self._mic, self._wake = None, None
         if self._turn_running():
             await self.interrupt(None)
         await self._start_turn("text", text=message.text)
@@ -261,6 +273,7 @@ class DialogManager:
         text: str | None = None,
         audio: bytes | None = None,
         request: SpeechRequest | None = None,
+        wake: str | None = None,
     ) -> None:
         turn_id = f"t-{uuid.uuid4().hex[:10]}"
         record = TurnRecord(
@@ -274,7 +287,9 @@ class DialogManager:
             input_audio_ms=audio_ms(audio, MIC_RATE) if audio else 0,
         )
         self.record = self.turns.start(record)
-        self._task = asyncio.create_task(self._run(record, text, audio, request), name=turn_id)
+        self._task = asyncio.create_task(
+            self._run(record, text, audio, request, wake), name=turn_id
+        )
 
     async def _run(
         self,
@@ -282,6 +297,7 @@ class DialogManager:
         text: str | None,
         audio: bytes | None,
         request: SpeechRequest | None,
+        wake: str | None = None,
     ) -> None:
         sid, tid = self.session.session_id, record.turn_id
         await self.bus.publish(
@@ -310,6 +326,7 @@ class DialogManager:
                     audio=audio,
                     request_class="proactive" if request is not None else "voice",
                     assistant=self.session.assistant,
+                    wake=wake,
                 )
                 try:
                     await self._reply(record, turn, metrics)

@@ -14,6 +14,11 @@ must not take either for speech.
 `what_time_is_it_in_noise.wav`: the golden utterances (made by assistant_speech.golden, run
 that first) over the same noise, 1.5 s of it before and after: the wake word and the open mic
 must work in it.
+
+`hey_jarvis_then_what_time_is_it.wav`: the bare wake word, 3 s of quiet, then the question (a
+wake followed by a pause); `tell_me_a_story_with_pause.wav`: "Please tell me a long story
+about a" ... 1.3 s of quiet ... "little robot who learns to paint." (a pause mid-sentence,
+which must not end the turn). Both joined from the golden utterances, no noise.
 """
 
 import wave
@@ -128,6 +133,12 @@ def in_noise(rng: np.random.Generator, speech: np.ndarray) -> np.ndarray:
     return noise
 
 
+def joined(first: str, gap_s: float, second: str) -> np.ndarray:
+    """`first` and `second` (golden WAVs, each with its own lead and tail of silence) with
+    silence added between them, so the quiet from speech to speech is `gap_s` more."""
+    return np.concatenate([_read(first), np.zeros(int(RATE * gap_s)), _read(second)])
+
+
 def main() -> None:
     rng = np.random.default_rng(8)
     _write("clap.wav", claps(rng))
@@ -136,6 +147,10 @@ def main() -> None:
     for name in ("hey_jarvis_whats_your_name", "what_time_is_it"):
         stem = name.removesuffix("_whats_your_name")
         _write_raw(f"{stem}_in_noise.wav", in_noise(rng, _read(f"{name}.wav")))
+    # hey_jarvis ends with 1.0 s of silence and what_time_is_it starts with 0.3 s: 3 s in all.
+    _write_raw("hey_jarvis_then_what_time_is_it.wav",
+               joined("hey_jarvis.wav", 1.7, "what_time_is_it.wav"))  # fmt: skip
+    _write_raw("tell_me_a_story_with_pause.wav", joined("story_start.wav", 0.0, "story_end.wav"))
 
 
 if __name__ == "__main__":

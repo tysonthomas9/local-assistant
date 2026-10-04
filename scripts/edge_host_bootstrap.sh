@@ -118,6 +118,17 @@ if ! emotions="$(emotions_count)" || [ -z "$emotions" ] || [ "$emotions" = 0 ]; 
 fi
 say "emotions: $EMOTIONS_DATASET, ${emotions:-0} moves cached"
 
+# ---------------------------------------------------------------- Smart Turn
+# The edge's end-of-turn model ([engine] smart_turn, assistant_edge/smart_turn.py), from the
+# Hugging Face cache like the moves: downloaded here, once (about 8 MB).
+SMART_TURN_REPO="pipecat-ai/smart-turn-v3"
+SMART_TURN_FILE="smart-turn-v3.2-cpu.onnx"
+if ! ls "$HF_HOME"/hub/models--pipecat-ai--smart-turn-v3/snapshots/*/"$SMART_TURN_FILE" >/dev/null 2>&1; then
+    say "downloading $SMART_TURN_REPO/$SMART_TURN_FILE into $HF_HOME (once)"
+    HF_HUB_OFFLINE=0 HF_HUB_DISABLE_PROGRESS_BARS=1 "$DPY" -c 'import sys; from huggingface_hub import hf_hub_download; hf_hub_download(sys.argv[1], sys.argv[2])' "$SMART_TURN_REPO" "$SMART_TURN_FILE"
+fi
+say "smart turn: $SMART_TURN_REPO/$SMART_TURN_FILE cached"
+
 # ---------------------------------------------------------------- Reachy Edge.app (macOS)
 # macOS grants microphone and camera access to the RESPONSIBLE process of whatever opens them.
 # The daemon and the reachy edge agent run inside this app (scripts/edge_app_run.sh starts

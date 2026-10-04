@@ -1,34 +1,25 @@
 feature: The robot nods when the brain says yes
 tier: [sim, hw]
 description: >
-  The brain sends express{yes}; the body plays Pollen's recorded nod yes1 to its end, following
-  the SDK's standard pattern wake_up -> move -> goto_sleep -> motors off (Pollen's tested moves
-  are the exception to our 10 degree head limit). The daemon's own state, sampled during the
-  move, is the measurement: the head pitches well beyond 10 degrees from neutral, and the robot
-  ends in the sleep pose it started in with the motors disabled. An expression this body has no
-  move for is answered with result ok:false and nothing moves.
+  The brain sends express{yes}; the body wakes the robot (the SDK's wake_up) and its movement
+  manager plays Pollen's recorded nod yes1 to its end (Pollen's tested moves are the exception
+  to our 10 degree head limit). The robot then stays awake; after `[body.reachy]
+  idle_sleep_s` (5 s here) it goes back to sleep with the motors off. The daemon's own state,
+  sampled during the move, is the measurement: the head pitches well beyond 10 degrees from
+  neutral, and the robot ends in the sleep pose it started in with the motors disabled. Every
+  express intent has a move (the unit tests check the map).
 scenarios:
-  - name: express yes plays the nod yes1 and the robot goes back to sleep
+  - name: express yes plays the nod yes1 and the idle robot goes back to sleep
     steps:
       - robot_host_found
       - code_synced_to_edge_host
       - start_reachy_daemon
       - start_link_server
-      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 5}}
       - robot_state_read: {control_mode: disabled}
       - robot_plays_emotion: {client: lite, emotion: "yes", move: yes1, min_head_deg: 10}
-      - robot_back_at_rest
+      - robot_back_at_rest: {within_s: 15}
       - robot_state_read: {control_mode: disabled}
       - edge_output_clean: lite
       - edge_host_clean
 
-  - name: an expression without a move is refused
-    steps:
-      - robot_host_found
-      - code_synced_to_edge_host
-      - start_reachy_daemon
-      - start_link_server
-      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
-      - edge_answers: {client: lite, type: express, fields: {name: no_firm}, ok: false, error_contains: "no expression"}
-      - robot_state_read: {control_mode: disabled}
-      - edge_host_clean

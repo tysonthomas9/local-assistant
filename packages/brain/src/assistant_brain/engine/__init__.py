@@ -47,6 +47,10 @@ class UserTurn:
     assistant: AssistantDef | None = None
     """Who answers this turn (persona, voice): the session's assistant when the turn started,
     which follows the last wake word. None: the one the engine session was opened with."""
+    wake: str | None = None
+    """The spoken wake word that opened this voice turn's mic window, if one did: a
+    transcript starting with it loses it (the LLM never gets the wake word), and a turn with
+    nothing else said is a bare wake, answered with a short acknowledgement (no LLM)."""
 
 
 @dataclass(frozen=True)

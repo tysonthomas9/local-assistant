@@ -93,6 +93,8 @@ async def start_edge_agent(
     record: bool = False,
     listen: Literal["wake_word", "open_mic", "push_to_talk"] = "push_to_talk",
     config_only: bool = False,
+    smart_turn: bool = True,
+    body_options: dict[str, Any] | None = None,
     within_s: float = 60.0,
 ) -> None:
     """Start the real edge agent with a real body; it dials the link server console.
@@ -114,6 +116,9 @@ async def start_edge_agent(
     `config_only` starts it the way a user does: only the link's address and token are given,
     everything else (device id, body, listening mode, wake word, mic cap) comes from
     config/assistant.toml; `id` then only names the process and `body` is what to expect.
+    `smart_turn: false` ends turns on the speech detector's silence alone (`--no-smart-turn`).
+    `body_options` set `[body.<body>]` options over the config (`--body-option`), e.g.
+    `{idle_sleep_s: 8}` for a robot that goes to rest soon after its turn.
     """
     link = _link(ctx)
     if body == "reachy" and where != "edge_host":
@@ -135,8 +140,18 @@ async def start_edge_agent(
         args += ["--device-id", id, "--body", body, "--listen", listen]
         ctx.state.setdefault("timings", {})["listen_mode"] = listen
     args += ["--url", f"ws://127.0.0.1:{port}/edge/v1", "--token", link.token]
-    if config_only and (energy_trigger_dbfs is not None or vad_end_ms is not None or record):
+    if config_only and (
+        energy_trigger_dbfs is not None
+        or vad_end_ms is not None
+        or record
+        or not smart_turn
+        or body_options
+    ):
         raise AssertionError("config_only takes no other agent options")
+    if not smart_turn:
+        args += ["--no-smart-turn"]
+    for key, value in (body_options or {}).items():
+        args += ["--body-option", f"{key}={json.dumps(value)}"]
     if energy_trigger_dbfs is not None:
         args += ["--energy-trigger-dbfs", str(energy_trigger_dbfs)]
         timings = ctx.state.setdefault("timings", {})
@@ -622,7 +637,8 @@ async def robot_plays_emotion(
     min_antenna_deg: float = 0.0,
 ) -> None:
     """The brain sends `express <emotion>`; the body plays Pollen's recorded `move` to its end
-    (wake_up -> move -> goto_sleep for a robot at rest) and answers ok. Measured by a sampler
+    through its movement manager (waking a robot at rest first; it then stays awake) and
+    answers ok. Measured by a sampler
     next to the daemon, over exactly the samples taken while the move played (its MOTION line
     gives the start and end on the robot machine's monotonic clock), from the pose when it
     started: the head turned by at least `min_head_deg` (the angle of the rotation, whatever
@@ -679,18 +695,33 @@ def _rest_pose(state: dict[str, Any]) -> dict[str, float]:
 
 @step("robot_back_at_rest")
 async def robot_back_at_rest(
-    ctx: ScenarioContext, head_deg: float = 4.0, antenna_deg: float = 5.0
+    ctx: ScenarioContext, head_deg: float = 4.0, antenna_deg: float = 5.0, within_s: float = 0.0
 ) -> None:
-    """After the move the robot is in the pose it started in (for a robot at rest: the sleep
-    pose, after `goto_sleep()`) within `head_deg` / `antenna_deg`, and the motors are in the
-    mode they had before (disabled at rest). The head's yaw is compared relative to the body,
-    since `goto_sleep()` may also turn the body back straight. With the motors off the head
+    """The robot is back in the pose it started in (for a robot at rest: the sleep pose, after
+    `goto_sleep()`) within `head_deg` / `antenna_deg`, and the motors are in the mode they had
+    before (disabled at rest). The robot stays awake after a turn or an expression and goes
+    to rest `[body.reachy] idle_sleep_s` later (IDLE-SLEEP): `within_s` waits that long for
+    the motors to get back to their mode (then 1 s more for the pose to settle). The head's
+    yaw is compared relative to the body, since `goto_sleep()` may also turn the body back
+    straight. With the motors off the head
     settles passively into the sleep pose: measured on the real robot its pitch there varies
     between about 25 and 28 degrees from one rest to the next (the antennas within 0.2), hence
     4 degrees for the head; the sleep pose is about 25 degrees from neutral."""
     before = ctx.state.get("robot_start")
     assert before is not None, "no move measured; use robot_plays_emotion first"
+    started = time.monotonic()
     after = await _robot_state(ctx)
+    while after.get("control_mode") != before.get("control_mode"):
+        if time.monotonic() - started > within_s:
+            break
+        await asyncio.sleep(0.25)
+        after = await _robot_state(ctx)
+    else:
+        if time.monotonic() - started > 0.5:
+            await asyncio.sleep(1.0)
+            after = await _robot_state(ctx)
+            print(f"back to motors {after.get('control_mode')} after "
+                  f"{time.monotonic() - started:.1f} s")  # fmt: skip
     start, end = _rest_pose(before), _rest_pose(after)
     print(
         "pose before -> after (deg): "

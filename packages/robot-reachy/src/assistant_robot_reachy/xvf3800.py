@@ -51,3 +51,54 @@ def aec_status() -> dict[str, Any]:
         return status
     finally:
         board.close()
+
+
+STARTUP_TUNING: tuple[tuple[str, tuple[float, ...]], ...] = (
+    ("PP_AGCMAXGAIN", (10.0,)),
+    ("PP_MIN_NS", (0.8,)),
+    ("PP_MIN_NN", (0.8,)),
+    ("PP_GAMMA_E", (0.5,)),
+    ("PP_GAMMA_ETAIL", (0.5,)),
+    ("PP_NLATTENONOFF", (0,)),
+    ("PP_MGSCALE", (4.0, 1.0, 1.0)),
+)
+"""Pollen's conversation-app tuning of the board's post-processing (audio/startup_config.py):
+the AGC's maximum gain down to 10, gentler stationary and non-stationary noise suppression,
+softer echo suppression (gamma), the non-linear attenuation off. Written at body start; not
+persistent across a power cycle of the board."""
+WRITE_SETTLE_S = 0.1
+
+
+def _same(read: Any, expected: tuple[float, ...]) -> bool:
+    if not isinstance(read, list) or len(read) != len(expected):
+        return False
+    return all(abs(float(a) - float(b)) < 1e-3 for a, b in zip(read, expected, strict=True))
+
+
+def apply_startup_tuning() -> dict[str, Any]:
+    """Write `STARTUP_TUNING` (the SDK's `apply_audio_config`, verified), then read every
+    parameter back: `{"applied": bool, "readback": {name: values}}`."""
+    from reachy_mini.media.audio_control_utils import init_respeaker_usb
+
+    board = init_respeaker_usb()
+    if board is None:
+        return {"applied": False, "readback": {}, "board": "not found"}
+    try:
+        try:
+            applied = bool(
+                board.apply_audio_config(
+                    STARTUP_TUNING, verify=True, write_settle_seconds=WRITE_SETTLE_S
+                )
+            )
+        except Exception as exc:
+            return {"applied": False, "readback": {}, "error": f"{type(exc).__name__}: {exc}"}
+        readback: dict[str, Any] = {}
+        for name, _ in STARTUP_TUNING:
+            try:
+                readback[name] = _plain(board.read_values(name))
+            except Exception as exc:
+                readback[name] = f"unreadable: {type(exc).__name__}"
+        matches = all(_same(readback[name], values) for name, values in STARTUP_TUNING)
+        return {"applied": applied and matches, "readback": readback}
+    finally:
+        board.close()

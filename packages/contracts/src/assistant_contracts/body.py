@@ -109,6 +109,16 @@ class LinkAware(Protocol):
 
 
 @runtime_checkable
+class StopsGently(Protocol):
+    """Optional on an `AudioIO`: stop the speech now playing after `ms` more, with a `fade_ms`
+    fade-out, as a person stops talking when interrupted (the edge's barge-in); the other
+    streams are dropped at once. Returns (that stream, its played ms when it ends), or
+    (None, 0) when nothing plays; the stream is reported `flushed` once it ended."""
+
+    async def stop_after(self, ms: int, fade_ms: int) -> tuple[int | None, int]: ...
+
+
+@runtime_checkable
 class ReportsHealth(Protocol):
     """Optional: a body whose hardware can go away and come back while the edge runs.
 
