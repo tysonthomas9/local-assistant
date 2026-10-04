@@ -49,6 +49,14 @@ model = "parakeet-tdt-0.6b-v3"
 base_url = "http://127.0.0.1:8772"
 backend = "qwen3-ggml"
 
+[gpu]
+# Where the LLM server and the speech server run (scripts/llm_server.sh, the gate).
+layout = "two"                     # "two": LLM on GPU0, speech on GPU1; "one": both on gpu_index
+gpu_index = 0                      # layout "one": the shared card
+margin_mib = 768                   # layout "one": memory left free at the peak of a busy turn
+max_model_len = 65536              # layout "one": vLLM context (bf16 KV cache; needs the 0.6B Q8_0 TTS)
+max_num_seqs = 8                   # layout "one": vLLM concurrent sequences (sharing the KV cache)
+
 [edge]
 device_id = "lite"
 room = "living"

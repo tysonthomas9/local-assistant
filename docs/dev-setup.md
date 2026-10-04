@@ -103,6 +103,24 @@ takes the next free slot ahead of waiting background requests. FlashInfer's samp
 `OLLAMA_NUM_PARALLEL=2` (about 20 GB of GPU0), `OLLAMA_VULKAN=0` (its Vulkan backend ignores
 `CUDA_VISIBLE_DEVICES`) and keeps the model loaded 30 minutes after the last request.
 
+### One GPU (`[gpu] layout = "one"`)
+
+The default layout is two cards (LLM on GPU0, speech on GPU1). `[gpu] layout = "one"` (or
+`ASSISTANT__GPU__LAYOUT=one`; for the gate `GATE_GPU=one`) puts both on `[gpu] gpu_index`. The
+speech server must start first; `scripts/llm_server.sh` then sizes vLLM to what is left:
+a bf16 KV cache of (free − `margin_mib` − 16.9 GB), `--max-model-len` `[gpu] max_model_len`
+(65536) and `--max-num-seqs` `[gpu] max_num_seqs` (8). It refuses to start if that leaves under
+1 GB of KV cache. On a 24 GB RTX 3090 this needs the small speech server,
+`--tts 0.6b --tts-quant Q8_0` (about 4.1 GB; the gate passes `ASSISTANT_SPEECH_ARGS` to it):
+vLLM then takes about 19.2 GB with 64k of context, and a 60k-token prefill while TTS and STT
+work still leaves 0.7 GB free. The 1.7B BF16 TTS (6.8 GB) leaves too little for a useful
+context. fp8 KV is not possible on an RTX 3090: Gemma 4's 512-wide heads need SM89+ (Triton)
+or SM100+ (FlashInfer) for it.
+
+The cost is speed (measured with the sim robot on a single-RTX 3090 machine): TTS and LLM share the card, so the TTS first audio takes about 95 ms
+instead of 20 ms. Typed input to first audio is about 215 ms (83 ms on two cards); voice is
+about 245 ms (252 ms on two cards).
+
 If vLLM cannot start (e.g. GPU0 is busy), the gate's status names the processes on GPU0 and
 points to `[llm] server = "ollama"`.
 

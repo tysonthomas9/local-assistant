@@ -142,6 +142,34 @@ class TtsConfig(Section):
     backend: str = "qwen3-ggml"
 
 
+class GpuConfig(Section):
+    """`[gpu]`: where the stack's model servers run (scripts/llm_server.sh, the speech server
+    launchers, the gate). Read by the launchers, never by the brain."""
+
+    layout: Literal["two", "one"] = "two"
+    """`two`: the LLM server on GPU0 and the speech server on GPU1 (the brain PC). `one`: both
+    on `gpu_index`; the speech server starts first and vLLM is sized to what is left."""
+    gpu_index: int = Field(default=0, ge=0)
+    """Layout `one`: the card both servers share (nvidia-smi numbering)."""
+    margin_mib: int = Field(default=768, ge=0)
+    """Layout `one`: GPU memory that stays free at the peak of a busy turn (both servers at
+    work); the LLM server sizes its KV cache to leave it and refuses to start if the rest
+    would not hold the model."""
+    max_model_len: int = Field(default=65536, ge=4096)
+    """Layout `one`: vLLM's context length (bf16 KV cache; 64k needs about 2.3 GB of it, which
+    leaves room for a small speech server only: 0.6B Q8_0 TTS on a 24 GB card)."""
+    max_num_seqs: int = Field(default=8, ge=1)
+    """Layout `one`: vLLM's concurrent sequences (they share the one KV cache)."""
+
+    @property
+    def llm_gpu(self) -> int:
+        return self.gpu_index if self.layout == "one" else 0
+
+    @property
+    def speech_gpu(self) -> int:
+        return self.gpu_index if self.layout == "one" else 1
+
+
 class EdgeAudioConfig(Section):
     input: str = "default"
     output: str = "default"
@@ -237,6 +265,7 @@ class AssistantConfig(BaseSettings):
     llm: LlmConfig = Field(default_factory=LlmConfig)
     stt: SttConfig = Field(default_factory=SttConfig)
     tts: TtsConfig = Field(default_factory=TtsConfig)
+    gpu: GpuConfig = Field(default_factory=GpuConfig)
     edge: EdgeConfig = Field(default_factory=EdgeConfig)
     body: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Per-body driver settings, e.g. `[body.reachy]`."""

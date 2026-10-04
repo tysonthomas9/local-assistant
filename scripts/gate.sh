@@ -31,19 +31,24 @@
 #              there. Leftovers after the features FAIL the stage (docs/robot-on-another-machine.md)
 #              Features with `tier: [hw, models]` run here (they need the models too; with
 #              GATE_NO_MODELS=1 they are left out)
-#   h  models  e2e features, tier models without sim or hw: FAILS unless both GPUs, our LLM server
-#              with reachy-gemma4 and the speech server are available
+#   h  models  e2e features, tier models without sim or hw: FAILS unless the GPUs of the layout
+#              (two, or one with GATE_GPU=one), our LLM server with reachy-gemma4 and the speech
+#              server are available
 #
 # The models (before stage s): the speech server (servers/speech: Parakeet STT + Qwen3-TTS) on
 # 127.0.0.1:8772. If none is serving there, the gate syncs its venv in the checkout under test
-# and starts it on GPU1 (CUDA_VISIBLE_DEVICES=1; it needs 8 GB free there), and stops it after
-# stage h. A server it did not start is used and left alone. Failing to start it fails s, g, h.
-# The LLM likewise: our own server (scripts/llm_server.sh on 127.0.0.1:8773, GPU0 only) of the
+# and starts it on the speech GPU (CUDA_VISIBLE_DEVICES=<it>; it needs 8 GB free there; extra
+# server options from ASSISTANT_SPEECH_ARGS, e.g. "--tts 0.6b --tts-quant Q8_0"), and stops it
+# after stage h. The GPUs follow `[gpu] layout` (GATE_GPU overrides it): two = the LLM on GPU0
+# and speech on GPU1; one = both on `[gpu] gpu_index`, the speech server started FIRST and vLLM
+# sized by its launcher to what is left (it fails clearly if under `[gpu] margin_mib` would stay
+# free). A server it did not start is used and left alone. Failing to start it fails s, g, h.
+# The LLM likewise: our own server (scripts/llm_server.sh on 127.0.0.1:8773, its GPU only) of the
 # configured kind (`[llm] server` of the ci profile, ASSISTANT__LLM__SERVER overrides it): vLLM
-# by default (servers/vllm/.venv, synced by the launcher; it needs about 21.7 GB free on GPU0),
+# by default (servers/vllm/.venv, synced by the launcher; layout two: it needs about 21.7 GB free on GPU0),
 # Ollama as the fallback (the system model store read-only). It is started unless one serves
-# there (it must then be that kind), loaded once and checked to sit entirely on GPU0
-# (assistant_testing.llm_server check), and stopped after stage h. A busy GPU0 fails s, g, h
+# there (it must then be that kind), loaded once and checked to sit entirely on its GPU
+# (assistant_testing.llm_server check), and stopped after stage h. A busy LLM GPU fails s, g, h
 # with the processes on it named. The system Ollama service is not used or changed (the
 # launcher only unloads reachy-gemma4 from it). The old assistant (legacy
 # stack: run_app.py, speech-to-speech, run_daemon.py) is stopped first if it runs: it holds
@@ -62,6 +67,8 @@
 #   GATE_ROBOT=hw     the physical robot only: skip stage s                    } loud WARNING
 #   GATE_NO_HW=1      the same as GATE_ROBOT=sim                               } and exits 3
 #   GATE_NO_MODELS=1  skip stage h and the model features of s and g           } (incomplete)
+#   GATE_GPU=one|two  the GPU layout of the model servers (sets ASSISTANT__GPU__LAYOUT; default:
+#                     `[gpu] layout` of the config). one = the whole stack on one card
 #   LEGACY_PYTHON     python for the legacy suite (default: third_party/speech-to-speech/.venv)
 #   LEGACY_APP_DIR    reachy_mini_conversation_app to link (default: from the main checkout)
 #
@@ -83,6 +90,8 @@ LLM_PID=""
 LLM_STATUS=""
 SPEECH_PORT=8772
 SPEECH_URL="http://127.0.0.1:$SPEECH_PORT"
+GPU_LAYOUT=""
+LLM_GPU=0
 SPEECH_GPU=1
 SPEECH_MIN_FREE_MIB=8000
 SPEECH_PID=""
@@ -99,6 +108,13 @@ case "$GATE_ROBOT" in
     sim | hw | both) ;;
     *) printf 'GATE_ROBOT must be sim, hw or both (got %q)\n' "$GATE_ROBOT" >&2; exit 2 ;;
 esac
+
+if [[ -n "${GATE_GPU:-}" ]]; then
+    case "$GATE_GPU" in
+        one | two) export ASSISTANT__GPU__LAYOUT="$GATE_GPU" ;;
+        *) printf 'GATE_GPU must be one or two (got %q)\n' "$GATE_GPU" >&2; exit 2 ;;
+    esac
+fi
 
 STATE_DIR="$(mktemp -d -t assistant-gate-state.XXXXXX)"
 CLONE_PARENT=""
@@ -375,10 +391,12 @@ robot_present() {
 }
 
 models_present() {
-    local gpus ok=0
+    local gpus ok=0 need=2
+    if [[ "$GPU_LAYOUT" == one ]]; then need=1; fi
     gpus="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)"
-    printf 'GPUs: %s (need 2)\n' "${gpus:-0}"
-    if [[ "${gpus:-0}" -lt 2 ]]; then ok=1; fi
+    printf 'GPUs: %s (need %s, layout %s: LLM on GPU%s, speech on GPU%s)\n' "${gpus:-0}" "$need" \
+        "${GPU_LAYOUT:-?}" "$LLM_GPU" "$SPEECH_GPU"
+    if [[ "${gpus:-0}" -lt "$need" ]]; then ok=1; fi
     if curl -sf -m 3 "$LLM_URL/v1/models" | grep -q "\"$LLM_MODEL"; then
         printf 'LLM server: %s serves %s (%s)\n' "$LLM_URL" "$LLM_MODEL" "$LLM_STATUS"
     else
@@ -413,9 +431,21 @@ stop_legacy_assistant() {
     done
 }
 
-# start_llm_server: use our LLM server on $LLM_PORT, or start scripts/llm_server.sh (GPU0) of
+# gpu_layout: the [gpu] layout (GATE_GPU / ASSISTANT__GPU__LAYOUT override it) and its GPUs.
+gpu_layout() {
+    local line
+    if ! line="$(cd "$WORK" && uv run --locked -q python -m assistant_testing.llm_server gpu)"; then
+        printf '%sGPU layout: the [gpu] config could not be read%s\n' "$RED" "$RESET"
+        return 1
+    fi
+    read -r GPU_LAYOUT LLM_GPU SPEECH_GPU <<<"$line"
+    printf 'GPU layout: %s (LLM on GPU%s, speech on GPU%s)\n' "$GPU_LAYOUT" "$LLM_GPU" "$SPEECH_GPU"
+}
+
+# start_llm_server: use our LLM server on $LLM_PORT, or start scripts/llm_server.sh (its GPU) of
 # the configured kind from the checkout under test; either way reachy-gemma4 is loaded once and
-# must sit entirely on GPU0. Runs in the main shell (sets LLM_SERVER/PID/STATUS).
+# must sit entirely on its GPU. Runs in the main shell (sets LLM_SERVER/PID/STATUS). In layout
+# one the speech server must already run (it is sized first) and the launcher checks the room.
 start_llm_server() {
     local log="$STATE_DIR/llm.log" waited=0 free check="$STATE_DIR/llm-check"
     if ! LLM_SERVER="$(cd "$WORK" && uv run --locked -q python -m assistant_testing.llm_server server)"; then
@@ -426,7 +456,7 @@ start_llm_server() {
     if curl -sf -o /dev/null -m 3 "$LLM_URL/v1/models"; then
         LLM_STATUS="already running, not started by the gate"
     else
-        # The legacy stage may have left reachy-gemma4 loaded in the system Ollama on GPU0:
+        # The legacy stage may have left reachy-gemma4 loaded in the system Ollama on the GPU:
         # unload it through its API first (as scripts/llm_server.sh does) and give the memory
         # a moment to come back before measuring.
         if curl -sf -m 3 http://127.0.0.1:11434/api/ps 2>/dev/null | grep -q "\"name\":\"$LLM_MODEL"; then
@@ -441,10 +471,14 @@ start_llm_server() {
             done
             sleep 2
         fi
-        free="$(nvidia-smi --id=0 --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null || true)"
-        printf 'GPU0: %s MiB free (%s needs %s)\n' "${free:-unknown}" "$LLM_SERVER" "${LLM_NEEDS_MIB[$LLM_SERVER]}"
-        if [[ -z "$free" || "$free" -lt "${LLM_NEEDS_MIB[$LLM_SERVER]}" ]]; then
-            LLM_STATUS="GPU0 missing or busy (${free:-no} MiB free, $LLM_SERVER needs ${LLM_NEEDS_MIB[$LLM_SERVER]}): $(nvidia-smi --id=0 --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null | paste -sd';' -)"
+        free="$(nvidia-smi --id="$LLM_GPU" --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null || true)"
+        local needs="${LLM_NEEDS_MIB[$LLM_SERVER]}"
+        # One card: the speech server already holds its part; the launcher sizes vLLM to the rest.
+        if [[ "$GPU_LAYOUT" == one ]]; then needs=1; fi
+        printf 'GPU%s: %s MiB free (%s needs %s)\n' "$LLM_GPU" "${free:-unknown}" "$LLM_SERVER" \
+            "$( [[ "$GPU_LAYOUT" == one ]] && echo "what is left, sized by the launcher" || echo "$needs")"
+        if [[ -z "$free" || "$free" -lt "$needs" ]]; then
+            LLM_STATUS="GPU$LLM_GPU missing or busy (${free:-no} MiB free, $LLM_SERVER needs $needs): $(nvidia-smi --id="$LLM_GPU" --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null | paste -sd';' -)"
             if [[ "$LLM_SERVER" == vllm ]]; then
                 LLM_STATUS="$LLM_STATUS (the fallback is [llm] server = \"ollama\")"
             fi
@@ -506,8 +540,9 @@ start_speech_server() {
         SPEECH_STATUS="uv sync of servers/speech failed"
         return 1
     fi
+    # shellcheck disable=SC2086  # ASSISTANT_SPEECH_ARGS: options, split on spaces
     (cd "$WORK" && CUDA_VISIBLE_DEVICES="$SPEECH_GPU" CUDA_DEVICE_ORDER=PCI_BUS_ID exec "$venv/bin/python" -m assistant_speech \
-        --port "$SPEECH_PORT") >"$log" 2>&1 &
+        --port "$SPEECH_PORT" ${ASSISTANT_SPEECH_ARGS:-}) >"$log" 2>&1 &
     SPEECH_PID=$!
     while ! grep -q '^READY ' "$log" 2>/dev/null; do
         if ! kill -0 "$SPEECH_PID" 2>/dev/null || [[ $waited -ge 300 ]]; then
@@ -603,7 +638,7 @@ stage_sim() {
 
 stage_models() {
     if ! models_present; then
-        note "needs both GPUs, $LLM_MODEL at $LLM_URL ($LLM_STATUS) and the speech server ($SPEECH_STATUS) (GATE_NO_MODELS=1 to skip)"
+        note "needs the GPUs of layout ${GPU_LAYOUT:-?}, $LLM_MODEL at $LLM_URL ($LLM_STATUS) and the speech server ($SPEECH_STATUS) (GATE_NO_MODELS=1 to skip)"
         return 1
     fi
     pytest_features "models and not hw and not sim"
@@ -633,8 +668,17 @@ else
     banner "the old assistant, the LLM server and the speech server"
     stop_legacy_assistant
     if [[ "${GATE_NO_MODELS:-}" != "1" ]]; then
-        start_llm_server || printf '%sLLM server: %s%s\n' "$RED" "$LLM_STATUS" "$RESET"
-        start_speech_server || printf '%sspeech server: %s%s\n' "$RED" "$SPEECH_STATUS" "$RESET"
+        if ! gpu_layout; then
+            LLM_STATUS="the [gpu] layout could not be read"
+            SPEECH_STATUS="$LLM_STATUS"
+        elif [[ "$GPU_LAYOUT" == one ]]; then
+            # One card: the speech server takes its fixed part first, vLLM the rest.
+            start_speech_server || printf '%sspeech server: %s%s\n' "$RED" "$SPEECH_STATUS" "$RESET"
+            start_llm_server || printf '%sLLM server: %s%s\n' "$RED" "$LLM_STATUS" "$RESET"
+        else
+            start_llm_server || printf '%sLLM server: %s%s\n' "$RED" "$LLM_STATUS" "$RESET"
+            start_speech_server || printf '%sspeech server: %s%s\n' "$RED" "$SPEECH_STATUS" "$RESET"
+        fi
     fi
     if [[ "$GATE_ROBOT" == hw ]]; then
         warn_loud "GATE_ROBOT=hw: the simulated robot (sim) features were NOT run."

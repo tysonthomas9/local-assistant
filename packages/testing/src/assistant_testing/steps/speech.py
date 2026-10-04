@@ -1,11 +1,13 @@
-"""Speech steps: the real speech server (Parakeet STT + Qwen3-TTS on GPU1) and spoken turns.
+"""Speech steps: the real speech server (Parakeet STT + Qwen3-TTS on its GPU) and spoken turns.
 
 The speech server is `servers/speech` (`python -m assistant_speech`, its own venv
 `servers/speech/.venv`), on loopback. `speech_server_running` uses the one already serving on
 127.0.0.1:8772 (the gate starts it there) and otherwise starts one of the scenario's own on a
-free port with `CUDA_VISIBLE_DEVICES=1`; `start_speech_server` always starts the scenario's own
-(so a fault can kill it for real). Either way the server must run on a GPU: no GPU, no free
-memory on GPU1 or no model weights is a failure, never a skip.
+free port on the speech GPU (`[gpu]`: GPU1 in layout `two`, `gpu_index` in layout `one`);
+`start_speech_server` always starts the scenario's own (so a fault can kill it for real).
+Either way the server must run on a GPU: no GPU, no free memory on the speech GPU or no model
+weights is a failure, never a skip. On one card (layout `one`) a second speech server next to
+the stack's vLLM does not fit: such features fail with the GPU's processes named.
 
 Voice input is the golden WAVs of `tests/fixtures/audio` (synthetic speech, see `golden.toml`)
 fed as real 20 ms mic frames at the edge's mic input point (`/feed`); spoken replies are what
@@ -43,9 +45,8 @@ from assistant_testing.steps.link import SERVER, _client_name, _expect, _free_po
 
 SPEECH = "speech"
 SHARED_SPEECH_URL = "http://127.0.0.1:8772"
-SPEECH_GPU = "1"
 MIN_FREE_GPU_MIB = 8000
-"""What the speech server needs on GPU1 (it uses about 6.8 GB)."""
+"""What the speech server needs on its GPU (it uses about 6.8 GB)."""
 READY_TIMEOUT_S = 300.0
 GOLDEN_DIR = "tests/fixtures/audio"
 SILENCE_DBFS = -45.0
@@ -221,14 +222,20 @@ def _line_time(ctx: ScenarioContext, process: str, index: int) -> float:
 # ---------------------------------------------------------------- the speech server
 
 
+def speech_gpu() -> str:
+    """The speech server's GPU (nvidia-smi numbering) in the configured `[gpu]` layout."""
+    return str(llm_server.gpu_config().speech_gpu)
+
+
 async def _start_own(ctx: ScenarioContext) -> dict[str, Any]:
-    free = _gpu_free_mib(SPEECH_GPU)
-    assert free is not None, f"nvidia-smi cannot read GPU{SPEECH_GPU}: the speech server needs it"
-    print(f"GPU{SPEECH_GPU}: {free} MiB free")
+    gpu = speech_gpu()
+    free = _gpu_free_mib(gpu)
+    assert free is not None, f"nvidia-smi cannot read GPU{gpu}: the speech server needs it"
+    print(f"GPU{gpu}: {free} MiB free")
     if free < MIN_FREE_GPU_MIB:
         raise AssertionError(
-            f"GPU{SPEECH_GPU} has only {free} MiB free (the speech server needs "
-            f"{MIN_FREE_GPU_MIB}); on it: {_gpu_apps(SPEECH_GPU) or 'unknown'}"
+            f"GPU{gpu} has only {free} MiB free (the speech server needs "
+            f"{MIN_FREE_GPU_MIB}); on it: {_gpu_apps(gpu) or 'unknown'}"
         )
     root = ctx.repo_root
     venv = root / "servers/speech/.venv"
@@ -243,12 +250,14 @@ async def _start_own(ctx: ScenarioContext) -> dict[str, Any]:
         )
         assert done.returncode == 0, f"uv sync of servers/speech failed:\n{done.output[-2000:]}"
     port = _free_port()
-    argv = [str(venv / "bin/python"), "-m", "assistant_speech", "--port", str(port)]
+    # ASSISTANT_SPEECH_ARGS: extra server options (the gate's too), e.g. a smaller TTS on one card.
+    extra = os.environ.get("ASSISTANT_SPEECH_ARGS", "").split()
+    argv = [str(venv / "bin/python"), "-m", "assistant_speech", "--port", str(port), *extra]
     proc = await ctx.processes.start(
         SPEECH,
         argv,
         env={
-            "CUDA_VISIBLE_DEVICES": SPEECH_GPU,
+            "CUDA_VISIBLE_DEVICES": gpu,
             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
             "PYTHONUNBUFFERED": "1",
         },
@@ -267,8 +276,8 @@ async def _start_own(ctx: ScenarioContext) -> dict[str, Any]:
 @step("speech_server_running")
 async def speech_server_running(ctx: ScenarioContext) -> None:
     """A real speech server is serving on a GPU: the shared one on 127.0.0.1:8772 if it
-    answers (the gate starts it), else one of the scenario's own on GPU1 (stopped at the end).
-    No GPU, a busy GPU1 or missing weights fail the step."""
+    answers (the gate starts it), else one of the scenario's own on the speech GPU (stopped at
+    the end). No GPU, a busy speech GPU or missing weights fail the step."""
     health = await asyncio.to_thread(_health, SHARED_SPEECH_URL)
     if health is not None:
         print(f"using the speech server at {SHARED_SPEECH_URL}")
@@ -280,8 +289,8 @@ async def speech_server_running(ctx: ScenarioContext) -> None:
 
 @step("start_speech_server")
 async def start_speech_server(ctx: ScenarioContext) -> None:
-    """Start a speech server of the scenario's own on GPU1 and a free loopback port (it can be
-    killed for real, `kill_speech_server`, without touching a shared one)."""
+    """Start a speech server of the scenario's own on the speech GPU and a free loopback port
+    (it can be killed for real, `kill_speech_server`, without touching a shared one)."""
     ctx.state["speech"] = await _start_own(ctx)
 
 
@@ -326,8 +335,8 @@ async def llm_serves(
 ) -> None:
     """The stack's LLM server (`brain.ensure_llm_server`: the one on 127.0.0.1:8773, else the
     scenario's own) answers, is the configured kind (`server` if given must match it: vllm or
-    ollama), serves `model` (default reachy-gemma4) and holds it entirely on GPU0 (so GPU1
-    stays the speech server's)."""
+    ollama), serves `model` (default reachy-gemma4) and holds it entirely on the LLM's GPU
+    (layout `two`: GPU0, so GPU1 stays the speech server's)."""
     url = await ensure_llm_server(ctx)
     kind = ctx.state["llm"]["server"]
     if server is not None:

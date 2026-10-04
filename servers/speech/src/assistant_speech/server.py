@@ -5,9 +5,12 @@
 One process holds both models on one GPU (GPU1 on the brain PC, chosen by the caller with
 `CUDA_VISIBLE_DEVICES`):
 
-- STT: NVIDIA Parakeet TDT 0.6B v3 (`nano-parakeet`, PyTorch), 16 kHz mono.
-- TTS: Qwen3-TTS 12 Hz 1.7B CustomVoice (`faster-qwen3-tts`, GGML backend), 24 kHz mono, with
-  its preset voices (`ryan`, `eric`, `aiden`, ...).
+- STT: NVIDIA Parakeet TDT 0.6B v3 (`nano-parakeet`, PyTorch), 16 kHz mono; or (`--stt`)
+  Moonshine v2 streaming small/medium (transformers, English only). `--stt-device cpu` keeps
+  the STT off the GPU.
+- TTS: Qwen3-TTS 12 Hz CustomVoice, 1.7B (default) or 0.6B (`--tts`), at `--tts-quant`
+  (`faster-qwen3-tts`, GGML backend), 24 kHz mono, with its preset voices (`ryan`, `eric`,
+  `aiden`, ...).
 
 Weights come from the local Hugging Face cache; nothing is downloaded unless `--online` is
 given. It binds to loopback only. HTTP API (OpenAI-shaped where that is simple):
@@ -45,8 +48,18 @@ from typing import Any
 
 import numpy as np
 
-STT_MODEL = "nvidia/parakeet-tdt-0.6b-v3"
-TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+STT_MODELS = {
+    "parakeet": "nvidia/parakeet-tdt-0.6b-v3",
+    "moonshine-small": "moonshine-ai/moonshine-streaming-small",
+    "moonshine-medium": "moonshine-ai/moonshine-streaming-medium",
+}
+"""`--stt` choices. Moonshine v2 streaming is English only (transformers, already a dependency)."""
+TTS_MODELS = {
+    "1.7b": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    "0.6b": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+}
+"""`--tts` choices: the same Qwen3-TTS CustomVoice family and preset voices, two sizes."""
+STT_DTYPES = ("auto", "bf16", "fp16", "fp32")
 STT_RATE = 16000
 TTS_RATE = 24000
 TTS_CHUNK_FRAMES = 8
@@ -90,28 +103,77 @@ def read_wav(data: bytes) -> tuple[np.ndarray, int]:
 
 
 class Models:
-    """Parakeet + Qwen3-TTS, loaded once. Only the worker thread calls into them."""
+    """The STT and the TTS model, loaded once. Only the worker thread calls into them."""
 
-    def __init__(self, device: str, tts_quant: str) -> None:
+    def __init__(
+        self,
+        device: str,
+        tts_quant: str,
+        stt: str = "parakeet",
+        tts: str = "1.7b",
+        stt_device: str | None = None,
+        stt_dtype: str = "auto",
+    ) -> None:
         import torch
         from faster_qwen3_tts.ggml_backend import GGMLQwen3TTS
-        from nano_parakeet import from_pretrained
 
-        if device.startswith("cuda") and not torch.cuda.is_available():
-            raise SystemExit("CUDA is not available (check CUDA_VISIBLE_DEVICES and the driver)")
+        stt_device = stt_device or device
+        for dev in (device, stt_device):
+            if dev.startswith("cuda") and not torch.cuda.is_available():
+                raise SystemExit(
+                    "CUDA is not available (check CUDA_VISIBLE_DEVICES and the driver)"
+                )
         self.device = device
-        self.gpu = torch.cuda.get_device_name(0) if device.startswith("cuda") else "cpu"
-        self.stt = from_pretrained(model_name=STT_MODEL, device=device)
-        self.tts = GGMLQwen3TTS.from_pretrained(TTS_MODEL, quant=tts_quant, local_files_only=True)
+        self.stt_device = stt_device
+        self.gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+        self.stt_name = STT_MODELS[stt]
+        self.tts_name = TTS_MODELS[tts]
+        self.tts_quant = tts_quant
+        dtypes = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+        dtype = dtypes.get(stt_dtype)
+        if stt == "parakeet":
+            from nano_parakeet import from_pretrained
+
+            self.stt = from_pretrained(model_name=self.stt_name, device=stt_device, dtype=dtype)
+            self.moonshine = None
+        else:
+            from transformers import AutoProcessor, MoonshineStreamingForConditionalGeneration
+
+            if dtype is None:
+                dtype = torch.float16 if stt_device.startswith("cuda") else torch.float32
+            model = MoonshineStreamingForConditionalGeneration.from_pretrained(self.stt_name)
+            self.moonshine = (
+                model.to(stt_device).to(dtype).eval(),
+                AutoProcessor.from_pretrained(self.stt_name),
+                dtype,
+            )
+        self.stt_dtype = str(dtype or "auto").removeprefix("torch.")
+        self.tts = GGMLQwen3TTS.from_pretrained(
+            self.tts_name, quant=tts_quant, local_files_only=True
+        )
         self.voices = sorted(v.lower() for v in self.tts.get_supported_speakers())
 
     def transcribe(self, audio: np.ndarray) -> str:
+        if self.moonshine is not None:
+            return self._moonshine(audio)
         out: Any = self.stt.transcribe(audio)
         if isinstance(out, str):
             text = out
         else:
             text = getattr(out, "text", None) or (out[0] if out else "")
         return str(text).strip()
+
+    def _moonshine(self, audio: np.ndarray) -> str:
+        import torch
+
+        model, processor, dtype = self.moonshine  # type: ignore[misc]
+        inputs = processor(audio, return_tensors="pt", sampling_rate=STT_RATE)
+        inputs = inputs.to(self.stt_device, dtype)
+        # About 6.5 tokens per second of audio is the model card's limit for a transcript.
+        max_length = max(8, int(inputs.attention_mask.sum().item() * 6.5 / STT_RATE))
+        with torch.inference_mode():
+            ids = model.generate(**inputs, max_length=max_length)
+        return str(processor.decode(ids[0], skip_special_tokens=True)).strip()
 
     def speak(
         self, text: str, voice: str, language: str, stop: threading.Event
@@ -133,7 +195,8 @@ class Models:
             yield resample(audio, int(sr), TTS_RATE)
 
     def gpu_memory_mib(self) -> int | None:
-        if not self.device.startswith("cuda"):
+        """PyTorch's share only (the STT); the TTS (GGML) is not counted: see nvidia-smi."""
+        if not self.stt_device.startswith("cuda"):
             return None
         import torch
 
@@ -222,8 +285,11 @@ def build_app(service: SpeechService, port_ref: dict[str, int]) -> Any:
     async def health() -> dict[str, Any]:
         return {
             "ok": True,
-            "stt_model": STT_MODEL,
-            "tts_model": TTS_MODEL,
+            "stt_model": models.stt_name,
+            "stt_device": models.stt_device,
+            "stt_dtype": models.stt_dtype,
+            "tts_model": models.tts_name,
+            "tts_quant": models.tts_quant,
             "voices": models.voices,
             "rate": TTS_RATE,
             "language": service.language,
@@ -301,7 +367,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1", help="loopback only")
     parser.add_argument("--port", type=int, default=8772, help="0 picks a free port")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--tts", default="1.7b", choices=sorted(TTS_MODELS))
     parser.add_argument("--tts-quant", default="BF16", choices=["BF16", "Q8_0", "Q4_K_M", "F32"])
+    parser.add_argument("--stt", default="parakeet", choices=sorted(STT_MODELS))
+    parser.add_argument("--stt-device", default=None, help="default: --device (cpu: STT on CPU)")
+    parser.add_argument(
+        "--stt-dtype",
+        default="auto",
+        choices=STT_DTYPES,
+        help="auto: bf16 on Ampere+ GPUs (Parakeet), fp16 (Moonshine), fp32 on CPU",
+    )
     parser.add_argument("--language", default="english")
     parser.add_argument("--online", action="store_true", help="allow model downloads")
     args = parser.parse_args(argv)
@@ -316,7 +391,14 @@ def main(argv: list[str] | None = None) -> int:
     port = sock.getsockname()[1]
 
     started = time.monotonic()
-    models = Models(args.device, args.tts_quant)
+    models = Models(
+        args.device,
+        args.tts_quant,
+        stt=args.stt,
+        tts=args.tts,
+        stt_device=args.stt_device,
+        stt_dtype=args.stt_dtype,
+    )
     load_s = time.monotonic() - started
     warm_s = warm_up(models)
     service = SpeechService(models, args.language)
@@ -335,6 +417,11 @@ def main(argv: list[str] | None = None) -> int:
         load_s=f"{load_s:.1f}",
         warmup_s=f"{warm_s:.1f}",
         gpu_memory_mib=models.gpu_memory_mib(),
+        stt=models.stt_name,
+        stt_device=models.stt_device,
+        stt_dtype=models.stt_dtype,
+        tts=models.tts_name,
+        tts_quant=models.tts_quant,
         pid=os.getpid(),
     )
     try:
