@@ -183,6 +183,10 @@ class ReachyMotion:
         self._states: asyncio.Queue[str] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
         self._idle_timer: asyncio.Task[None] | None = None
+        self._enqueue_lock = asyncio.Lock()
+        self._expressing = 0
+        self._attention: str | None = None
+        """The brain's latest attention state: the idle timeout runs only after `idle`."""
 
     def _arbiter(self) -> MotionArbiter:
         arbiter = self.body.arbiter
@@ -196,6 +200,7 @@ class ReachyMotion:
             emit("MOTION-ERROR", {"detail": "the robot is not connected"}, attention=state)
             return
         self._cancel_idle_timer()
+        self._attention = state
         self._queue(state)
 
     def _queue(self, state: str) -> None:
@@ -211,14 +216,22 @@ class ReachyMotion:
         timer.cancel()
         return True
 
+    def _idle_now(self) -> bool:
+        """No turn running (the last attention state was `idle`, or none came), no state
+        waiting and no expression pending: the idle timeout may run."""
+        idle = self._attention in (None, "idle")
+        return idle and self._states.empty() and not self._expressing
+
     def _start_idle_timer(self) -> None:
         self._cancel_idle_timer()
         self._idle_timer = asyncio.create_task(self._idle_sleep(), name="reachy-idle-sleep")
 
     async def _idle_sleep(self) -> None:
+        started = time.monotonic()
         await asyncio.sleep(self.idle_sleep_s)
         self._idle_timer = None
-        emit("IDLE-SLEEP", after_s=f"{self.idle_sleep_s:g}")
+        emit("IDLE-SLEEP", after_s=f"{self.idle_sleep_s:g}",
+             waited_s=f"{time.monotonic() - started:.2f}")  # fmt: skip
         self._queue("rest")
 
     async def _attend_loop(self) -> None:
@@ -238,7 +251,7 @@ class ReachyMotion:
                 emit("MOTION-ERROR", {"detail": f"{type(exc).__name__}: {exc}"}, attention=state)
                 continue
             emit("MOTION", done or {}, attention=state, moved=str(done is not None).lower())
-            if state == "idle" and done is not None and self._states.empty():
+            if self._idle_now() and done is not None:
                 self._start_idle_timer()  # awake at neutral until the idle timeout
 
     async def rest(self) -> None:
@@ -263,16 +276,25 @@ class ReachyMotion:
                 emit("MOTION", done or {}, rest="true", moved=str(done is not None).lower())
 
     async def express(self, name: str, intensity: float = 1.0) -> bool:
+        """Queue the expression's move on the movement manager in the order the requests came
+        (several may be pending: they play one after the other) and wait for its end."""
         arbiter = self._arbiter()
         started = time.monotonic()
-        arbiter.last_move = None
         self._cancel_idle_timer()  # activity: the idle timeout starts again after it
+        self._expressing += 1
+        record: dict[str, Any] = {}
+        ok = False
         try:
-            ok = await asyncio.to_thread(arbiter.queue_emotion, name, intensity)
+            async with self._enqueue_lock:  # FIFO: the order the requests came
+                queued = await asyncio.to_thread(arbiter.enqueue_emotion, name, intensity)
+            if queued is not None:
+                record = await asyncio.to_thread(arbiter.finish_emotion, queued)
+                ok = True
         finally:
-            if arbiter.attending and self._states.empty():
+            self._expressing -= 1
+            if arbiter.attending and self._idle_now():
                 self._start_idle_timer()
-        emit("MOTION", arbiter.last_move or {}, express=name, intensity=intensity,
+        emit("MOTION", record, express=name, intensity=intensity,
              ok=str(ok).lower(), took_s=f"{time.monotonic() - started:.2f}")  # fmt: skip
         return ok
 

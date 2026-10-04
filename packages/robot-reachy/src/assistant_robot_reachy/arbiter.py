@@ -27,6 +27,7 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -192,6 +193,16 @@ def robot_ready(base: str = DAEMON_URL) -> tuple[bool, str]:
     if status.get("state") != "running" or not ready or status.get("error"):
         return False, f"daemon state {status.get('state')!r}, backend {backend}"
     return True, "daemon running, backend ready"
+
+
+@dataclass(frozen=True)
+class QueuedEmotion:
+    """An emotion's recorded move on the manager's queue (and the goto to its first frame)."""
+
+    move: str
+    duration: float
+    start: Played
+    played: Played
 
 
 class MotionArbiter:
@@ -381,14 +392,23 @@ class MotionArbiter:
             raise MoveIncomplete(f"{played.label}: cancelled ({self.manager.stopped_reason})")
 
     def queue_emotion(self, name: str, intensity: float = 1.0) -> bool:
-        """Play Pollen's recorded move for the emotion `name` through the movement manager
-        (waking the robot if it is at rest; it then stays awake), after the moves before it,
-        and wait for its end; False if this body has no move for it. `random` picks one of
-        Pollen's curated moves. `intensity` is not used by recorded moves."""
+        """Play Pollen's recorded move for the emotion `name` and wait for its end
+        (`enqueue_emotion`, then `finish_emotion`); False if this body has no move for it."""
+        queued = self.enqueue_emotion(name, intensity)
+        if queued is None:
+            return False
+        self.finish_emotion(queued)
+        return True
+
+    def enqueue_emotion(self, name: str, intensity: float = 1.0) -> "QueuedEmotion | None":
+        """Queue Pollen's recorded move for the emotion `name` on the movement manager, after
+        the moves before it (waking the robot if it is at rest; it then stays awake); None if
+        this body has no move for it. `random` picks one of Pollen's curated moves.
+        `intensity` is not used by recorded moves."""
         del intensity
         move_name = random.choice(CURATED_MOVES) if name == "random" else self.emotions.get(name)
         if move_name is None:
-            return False
+            return None
         move = RecordedMove(move_name, self._moves().get(move_name))
         with self._lock:
             ok, detail = robot_ready(self.daemon_url)
@@ -405,21 +425,26 @@ class MotionArbiter:
             except Exception:
                 self._rest_safely("a failed expression")
                 raise
+        return QueuedEmotion(move_name, move.duration, start, played)
+
+    def finish_emotion(self, queued: "QueuedEmotion") -> dict[str, Any]:
+        """Wait for a queued emotion's move to end (the moves before it included); its
+        `last_move` record (t_start/t_end on this machine's monotonic clock, so a sampler next
+        to the daemon can pick out exactly the samples taken while it played)."""
         try:
-            self._wait(played, INITIAL_GOTO_S + move.duration)
+            self._wait(queued.played, INITIAL_GOTO_S + queued.duration)
         except Exception:
             with self._lock:
                 self._rest_safely("a failed expression")
             raise
-        # t_start/t_end: this machine's monotonic clock, so a sampler next to the daemon can
-        # pick out exactly the samples taken while the move played.
-        t_start = start.started or time.monotonic()
-        t_end = played.ended or time.monotonic()
-        self.last_move = {"move": move_name, "duration_s": round(move.duration, 2)}
-        self.last_move["played_s"] = round(t_end - (played.started or t_start), 2)
-        self.last_move["t_start"] = round(t_start, 3)
-        self.last_move["t_end"] = round(t_end, 3)
-        return True
+        t_start = queued.start.started or time.monotonic()
+        t_end = queued.played.ended or time.monotonic()
+        record = {"move": queued.move, "duration_s": round(queued.duration, 2)}
+        record["played_s"] = round(t_end - (queued.played.started or t_start), 2)
+        record["t_start"] = round(t_start, 3)
+        record["t_end"] = round(t_end, 3)
+        self.last_move = record
+        return record
 
     def _moves(self) -> Any:
         """Pollen's emotions library, from the local Hugging Face cache only."""

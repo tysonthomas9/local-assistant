@@ -134,7 +134,7 @@ never skips, when it cannot run (no PipeWire, no MuJoCo). Starts and stops only 
 
 On `[sim, hw]`: antenna_wiggle, head_nod, motor_watchdog, daemon_restart, barge_in_flush,
 daemon_connect (all but its first scenario); with the models: attention_on_robot, voice_loop,
-hello_spoken_reply, barge_in_on_robot, llm/servers_compared.
+hello_spoken_reply, barge_in_on_robot, conversation_on_robot, llm/servers_compared.
 
 hw only, and why:
 
@@ -145,7 +145,7 @@ hw only, and why:
 | edge_config | the XVF3800 (hardware AEC, its far-end reference) |
 | daemon_connect: its first scenario | the camera, WebRTC (8443), the XVF3800 and Reachy Edge.app |
 | edge_host_ready | the edge host's bootstrap, Reachy Edge.app and macOS permissions |
-| wake_word_on_robot, open_mic_on_robot, try_it_on_robot | sound through the air in a real room (acoustics, DOA) |
+| wake_word_on_robot, open_mic_on_robot, try_it_on_robot | sound through the air in a real room (acoustics, DOA): the real voice barge-in with the XVF3800's AEC, the robot's own voice not interrupting it, wake scores through the air (their fed-audio twin is conversation_on_robot) |
 
 What the sim cannot do: render the camera (headless; the PC also lacks GStreamer's
 `webrtcsink`, so no media server, WebRTC or port 8443), acoustics (speaker to microphone through
@@ -333,6 +333,9 @@ reachy bodies do; the link client console does not, so use `brain_state_is` with
 | `voice_overtook_background` | `at_least: int?`, `at_most: int?`, `first = false`, `margin_s = 0.25` | From the brain's LLM request log: how many background requests sent before the voice request got their first token after it (more than `margin_s` later); `first`: no background request still waiting got its first token before it |
 | `llm_parallel_throughput` | `count = 4`, `max_tokens = 300`, `min_tokens: int?` | The scenario's LLM server: one request alone, then `count` at once (unique prompts); each produces at least `min_tokens` (default 80% of `max_tokens`) and together they beat the single stream; the tokens/s and TTFTs go to the timings |
 | `robot_pose_follows` | `client`, `text`, `states: list[str]`, `tolerance_deg = 6`, `max_head_deg = 10`, `remember = true` | Types `text`; the body's MOTION lines follow the attention `states`; a sampler on the robot's machine checks each pose within `tolerance_deg` of neutral turned by the state's roll/pitch, and no more than `max_head_deg` from neutral (remembers the start pose for `robot_back_at_rest` unless `remember: false`, and the neutral pose for `robot_stays_awake`) |
+| `robot_plays_emotions_in_order` | `client`, `emotions: list[str]`, `moves: list[str]` | Sends express for each of `emotions` back to back without waiting; every result is ok and the MOTION lines show Pollen's `moves` played in that order, each to its end, each starting at most 1 s after the one before ended (remembers the start pose) |
+| `robot_sleeps_after_idle` | `client`, `seconds`, `tolerance_s = 0.5` | The body's IDLE-SLEEP: `idle_sleep_s` is `seconds` and its measured idle wait within `tolerance_s`; the motors are disabled within 15 s after it |
+| `robot_wobbles_while_speaking` | `client`, `text`, `min_deg = 1`, `max_deg = 15`, `remember = true` | Types `text`; between the `speaking` pose reached and the `idle` move after the speech a sampler on the robot's machine sees the head turn at least `min_deg` and at most `max_deg` from the neutral pose (the SDK's speech wobble, about 14 degrees at most) |
 | `robot_stays_awake` | `seconds = 3`, `tolerance_deg = 6` | Between turns the motors stay on and the head stays within `tolerance_deg` of the neutral pose `robot_pose_follows` measured (head up, not the sleep pose) |
 
 ### Listening (`steps/listen.py`)
@@ -357,7 +360,7 @@ the robot's own speaker volume is never touched.
 | `speaker_plays` | `client`, `name`, `volume = 50`, `wait = true` | Plays `tests/fixtures/audio/<name>.wav` through the macOS edge host's built-in speaker (refused if it is not the default output) at `volume` (at most 60), restoring the volume and mute after; sets the mark; `wait: false` returns as it starts |
 | `speaker_finished` | `within_s = 60` | The play `speaker_plays` started has finished |
 | `edge_mic_tuned` | `client`, `within_s = 10` | The robot's XVF3800 got Pollen's startup tuning: the body's AEC line says every parameter read back as written; the readback goes in the timings |
-| `barge_in_detected_within` | `ms = 300` | The edge's BARGE-IN came at most `ms` after the voice in the clip `speaker_plays` started began (speaker start on the edge host's clock plus the clip's speech onset); recorded in the timings |
+| `barge_in_detected_within` | `ms = 300`, `source = speaker` | The edge's BARGE-IN came at most `ms` after the voice in the clip began: the clip `speaker_plays` started (`speaker`: speaker start on the edge host's clock) or `feed_golden_wav` fed (`feed`: the agent's FEED wall time), plus the clip's speech onset; recorded in the timings |
 
 ### The try-it launcher (`steps/try_it.py`)
 

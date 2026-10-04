@@ -858,3 +858,60 @@ async def robot_stays_awake(
         )
         await asyncio.sleep(0.25)
     print(f"awake, head up: {reads} reads over {seconds:g} s, at most {worst:.1f} deg from neutral")
+
+
+@step("robot_wobbles_while_speaking")
+async def robot_wobbles_while_speaking(
+    ctx: ScenarioContext,
+    client: str,
+    text: str,
+    min_deg: float = 1.0,
+    max_deg: float = 15.0,
+    remember: bool = True,
+    within_s: float = 120.0,
+) -> None:
+    """Type `text` to the agent; while the robot speaks the reply (from its `speaking` pose
+    reached to the `idle` move that follows the speech) the SDK's speech wobble moves the
+    head with the played audio: a sampler next to the daemon sees it turn at least `min_deg`
+    from the neutral pose (the speaking pose), and never more than `max_deg` (Pollen's sway,
+    SWAY_MASTER 1.5: yaw 11.25, pitch 6.75, roll 3.4 degrees at most, about 14 together).
+    Remembers the pose before (for `robot_back_at_rest`; not with `remember:
+    false`, for a later turn of the same conversation)."""
+    before = await _robot_state(ctx)
+    if remember:
+        _remember_start(ctx, before)
+    name = _client_name(client)
+    agent = ctx.processes.get(name)
+    consumed = ctx.state["link"].consumed.setdefault(name, set())
+    consumed.update(line.index for line in _get_lines(agent, "MOTION"))  # before this turn
+    sampler = await _start_sampler(ctx)
+    try:
+        await agent.write_line(text)
+        moves = {}
+        for state in ("speaking", "idle"):
+            line = await _expect(
+                ctx, name, {"MOTION", "MOTION-ERROR"}, within_s, fields={"attention": state},
+                what=f"MOTION attention={state}",
+            )  # fmt: skip
+            assert line.tag == "MOTION", f"the attention move failed: {line.text}"
+            print(f"  {line.text}")
+            moves[state] = line.payload or {}
+    finally:
+        await sampler.stop()
+    samples = [p for line in _get_lines(sampler, "STATE") if (p := line.payload) is not None]
+    start, end = moves["speaking"]["t_reached"], moves["idle"]["t_start"]
+    during = [s for s in samples if start <= s["t"] <= end]
+    print(f"sampler: {len(samples)} samples, {len(during)} while speaking ({end - start:.1f} s)")
+    assert end - start >= 0.5, f"the robot spoke for {end - start:.2f} s only: nothing to measure"
+    check_sampling(during, end - start)
+    # The speaking pose is neutral: the reference is the neutral pose the arbiter read.
+    neutral = [s for s in samples if s["t"] >= moves["speaking"].get("t_neutral", start)]
+    ref = _matrix((neutral or during)[0]["head_pose"])
+    turns = [_angle(ref, _matrix(s["head_pose"])) for s in during]
+    peak = max(turns)
+    trace = " ".join(f"{t:.1f}" for t in turns[::4])
+    print(f"head turn from neutral every 4th sample while speaking (deg): {trace}")
+    print(f"speech wobble: the head moved up to {peak:.1f} deg while speaking")
+    ctx.state.setdefault("timings", {})["wobble_peak_deg"] = round(peak, 2)
+    assert peak >= min_deg, f"the head moved only {peak:.1f} deg while speaking: no wobble"
+    assert peak <= max_deg, f"the head moved {peak:.1f} deg while speaking (limit {max_deg})"

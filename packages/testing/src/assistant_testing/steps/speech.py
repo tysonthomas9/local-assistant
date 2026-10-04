@@ -455,7 +455,7 @@ async def feed_golden_wav(ctx: ScenarioContext, client: str, name: str) -> None:
     await ctx.processes.get(agent).write_line(f"/feed {GOLDEN_DIR}/{name}.wav")
     line = await _expect(ctx, agent, {"FEED", "CONSOLE-ERROR"}, 15, what="FEED")
     assert line.tag == "FEED", f"the agent did not feed {name}.wav: {line.text}"
-    ctx.state["fed"] = {"name": name, "index": line.index}
+    ctx.state["fed"] = {"name": name, "index": line.index, "wall": line.fields.get("wall")}
     print(line.text)
 
 

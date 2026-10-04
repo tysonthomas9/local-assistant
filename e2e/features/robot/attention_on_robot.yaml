@@ -8,7 +8,7 @@ description: >
   over one second, never more than 10 degrees, through the movement manager). A robot at rest
   wakes up with the SDK's wake_up() for the first turn and stays awake, head up at neutral,
   for the next: a second turn needs no wake-up. `[body.reachy] idle_sleep_s` (8 s here) after
-  the last turn it goes back with goto_sleep() and the motors off (IDLE-SLEEP). Measured by a
+  the last turn it goes back with goto_sleep() and the motors off (IDLE-SLEEP, its idle wait measured within 0.5 s). Measured by a
   sampler next to the daemon (not over the tunnel): every
   pose within 6 degrees of its target (the Lite holds small poses with up to about 5 degrees
   of steady error from its woken neutral) and closer to it than neutral is.
@@ -27,7 +27,7 @@ scenarios:
       - robot_pose_follows: {client: lite, text: "What colour is grass? Answer in one word.", states: [listening, thinking, speaking, idle], remember: false}
       - edge_shows_reply: {client: lite, containing: green, within_s: 60}
       - robot_stays_awake: {seconds: 3}
-      - edge_printed: {client: lite, tag: IDLE-SLEEP, within_s: 15}
+      - robot_sleeps_after_idle: {client: lite, seconds: 8}
       - robot_back_at_rest: {within_s: 10}
       - robot_state_read: {control_mode: disabled}
       - brain_output_clean

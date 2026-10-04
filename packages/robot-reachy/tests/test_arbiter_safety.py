@@ -148,6 +148,20 @@ def test_an_expression_from_rest_wakes_once_plays_through_the_manager_and_stays_
     assert not arbiter.attending
 
 
+def test_queued_emotions_play_one_after_the_other(daemon_url: str) -> None:
+    mini = RecordingMini()
+    arbiter = _arbiter(mini, daemon_url)
+    first = arbiter.enqueue_emotion("yes")
+    second = arbiter.enqueue_emotion("no")
+    assert first is not None
+    assert second is not None
+    done = [arbiter.finish_emotion(first), arbiter.finish_emotion(second)]
+    assert [d["move"] for d in done] == ["yes1", "no1"]
+    assert done[1]["t_start"] >= done[0]["t_end"] - 0.02
+    assert mini.calls.count("wake_up") == 1
+    arbiter.attend("rest")
+
+
 def test_every_express_intent_has_a_move() -> None:
     from assistant_contracts import ExpressName
     from assistant_robot_reachy.arbiter import EMOTION_MOVES

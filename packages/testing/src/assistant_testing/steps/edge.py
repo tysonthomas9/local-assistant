@@ -681,6 +681,73 @@ async def robot_plays_emotion(
     )
 
 
+@step("robot_plays_emotions_in_order")
+async def robot_plays_emotions_in_order(
+    ctx: ScenarioContext, client: str, emotions: list[str], moves: list[str]
+) -> None:
+    """The brain sends `express` for each of `emotions` back to back, without waiting for the
+    results; the body's movement manager queues them and plays Pollen's `moves` one after the
+    other, in the order sent, each to its end (the MOTION lines: each move starts after the one
+    before ended, at most 1 s later, so the robot stays awake between them), and every result
+    is ok. Remembers the pose before (for `robot_back_at_rest`)."""
+    assert len(emotions) == len(moves), "one move per emotion"
+    _remember_start(ctx, await _robot_state(ctx))
+    agent = _agent(ctx, client)
+    seen = {line.index for line in _get_lines(agent, "MOTION")}
+    ids = []
+    for emotion in emotions:
+        command = f"send {client} express {json.dumps({'name': emotion})}"
+        sent = await _server_command(ctx, command, "SENT", device=client, type="express")
+        assert sent.payload is not None, sent.text
+        ids.append(sent.payload["id"])
+    for emotion, id_ in zip(emotions, ids, strict=True):
+        result = await _expect(
+            ctx, SERVER, {"RECV"}, 30 + 10 * len(emotions),
+            fields={"device": client, "type": "result"}, payload={"re": id_},
+            what=f"the result of express {emotion}",
+        )  # fmt: skip
+        ok = (result.payload or {}).get("ok")
+        assert ok is True, f"express {emotion} failed: {result.text}"
+    played = [
+        line.payload or {}
+        for line in _get_lines(agent, "MOTION")
+        if line.index not in seen and line.fields.get("express")
+    ]
+    played.sort(key=lambda m: m.get("t_start", 0.0))
+    print("played: " + ", ".join(
+        f"{m.get('move')} {m.get('t_start')}-{m.get('t_end')}" for m in played
+    ))  # fmt: skip
+    assert [m.get("move") for m in played] == moves, f"played {played}, want {moves} in order"
+    for m in played:
+        assert m["played_s"] >= m["duration_s"] - 0.05, f"{m['move']} did not run to its end: {m}"
+    for prev, nxt in itertools.pairwise(played):
+        gap = nxt["t_start"] - prev["t_end"]
+        assert -0.05 <= gap <= 1.0, f"{nxt['move']} started {gap:.2f} s after {prev['move']} ended"
+
+
+@step("robot_sleeps_after_idle")
+async def robot_sleeps_after_idle(
+    ctx: ScenarioContext, client: str, seconds: float, tolerance_s: float = 0.5
+) -> None:
+    """After the last turn or expression the awake robot waits `seconds` (`[body.reachy]
+    idle_sleep_s`; the body's IDLE-SLEEP line carries its own measured wait, which must be
+    within `tolerance_s`), then goes to rest: the daemon reports the motors disabled within
+    15 s (`goto_sleep()` first)."""
+    line = await _expect(ctx, _client_name(client), {"IDLE-SLEEP"}, seconds + 30, what="IDLE-SLEEP")
+    print(line.text)
+    waited = float(line.fields.get("waited_s", "nan"))
+    assert float(line.fields.get("after_s", "nan")) == seconds, f"idle_sleep_s: {line.text}"
+    assert abs(waited - seconds) <= tolerance_s, (
+        f"went to rest after {waited:.2f} s idle, want {seconds} s (+-{tolerance_s})"
+    )
+    ctx.state.setdefault("timings", {})["idle_sleep_waited_s"] = waited
+    started = time.monotonic()
+    while (mode := (await _robot_state(ctx)).get("control_mode")) != "disabled":
+        assert time.monotonic() - started < 15, f"motors still {mode!r} 15 s after IDLE-SLEEP"
+        await asyncio.sleep(0.25)
+    print(f"motors disabled {time.monotonic() - started:.1f} s after IDLE-SLEEP")
+
+
 def _rest_pose(state: dict[str, Any]) -> dict[str, float]:
     """Head roll/pitch, head yaw relative to the body, and the antennas, in degrees."""
     pose = state["head_pose"]

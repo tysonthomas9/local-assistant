@@ -19,7 +19,7 @@ import shlex
 import time
 import wave
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from assistant_core.levels import dbfs
 from assistant_testing import edge_host
@@ -348,27 +348,38 @@ def speech_onset_s(name: str, dbfs_floor: float = -40.0) -> float:
 
 
 @step("barge_in_detected_within")
-async def barge_in_detected_within(ctx: ScenarioContext, ms: float = 300.0) -> None:
-    """The barge-in (`barge_in_stops_speech`) came at most `ms` after the voice the speaker
-    played started: from the speech onset in the WAV, on the edge host's wall clock (the
-    speaker's start, SPEAKER-START, and the edge's BARGE-IN wall=, the same machine). The
-    speaker's own start-up delay counts against it. Goes in the timings."""
+async def barge_in_detected_within(
+    ctx: ScenarioContext, ms: float = 300.0, source: Literal["speaker", "feed"] = "speaker"
+) -> None:
+    """The barge-in (`barge_in_stops_speech`) came at most `ms` after the voice started: from
+    the speech onset in the golden WAV, on the edge's wall clock. `source: speaker` (the WAV
+    `speaker_plays` played through the air): from the speaker's start (SPEAKER-START, on the
+    edge host, the same machine as the edge's BARGE-IN wall=), so the speaker's own start-up
+    delay counts against it. `source: feed` (the WAV `feed_golden_wav` fed at the mic input):
+    from the agent's FEED wall=. Goes in the timings."""
     barge = ctx.state.get("barge_in")
-    playing: dict[str, Any] | None = ctx.state.get("speaker")
     assert barge is not None, "no barge-in yet; use barge_in_stops_speech first"
-    assert playing is not None, "nothing was played; use speaker_plays first"
-    if "output" not in playing:
-        await speaker_finished(ctx)
-    start = next(
-        (float(x.split()[1]) for x in playing["output"].splitlines()
-         if x.startswith("SPEAKER-START ")), None,
-    )  # fmt: skip
-    assert start is not None, f"the speaker printed no start time: {playing['output']}"
-    onset = speech_onset_s(playing["name"])
+    if source == "feed":
+        fed: dict[str, Any] = ctx.state.get("fed") or {}
+        assert fed.get("wall"), "nothing was fed; use feed_golden_wav first"
+        start, name = float(fed["wall"]), str(fed["name"])
+    else:
+        playing: dict[str, Any] | None = ctx.state.get("speaker")
+        assert playing is not None, "nothing was played; use speaker_plays first"
+        if "output" not in playing:
+            await speaker_finished(ctx)
+        found = next(
+            (float(x.split()[1]) for x in playing["output"].splitlines()
+             if x.startswith("SPEAKER-START ")), None,
+        )  # fmt: skip
+        assert found is not None, f"the speaker printed no start time: {playing['output']}"
+        start, name = found, str(playing["name"])
+    onset = speech_onset_s(name)
     detect_ms = (barge["wall"] - (start + onset)) * 1000
     _timings(ctx)["barge_in_detect_ms"] = round(detect_ms)
+    _timings(ctx)["barge_in_detect_source"] = source
     print(f"barge-in detected {detect_ms:.0f} ms after the voice started "
-          f"({playing['name']}.wav speech at {onset:.2f} s)")  # fmt: skip
+          f"({name}.wav speech at {onset:.2f} s, {source})")  # fmt: skip
     assert 0 < detect_ms <= ms, (
         f"barge-in detected {detect_ms:.0f} ms after the voice (want <= {ms})"
     )

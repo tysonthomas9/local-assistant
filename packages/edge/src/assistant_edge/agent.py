@@ -280,6 +280,7 @@ class EdgeAgent:
             else None
         )
         self._asks: set[asyncio.Task[None]] = set()
+        """Background tasks of the agent's own (Smart Turn verdicts, expressions)."""
         self.wake: WakeEngine | None = (
             make_wake_engine(
                 options.wake_engine,
@@ -456,8 +457,10 @@ class EdgeAgent:
             case Attention():
                 if self.body.motion is not None:
                     await self.body.motion.attention(message.state, message.assistant)
-            case Express():
-                await self._express(message)
+            case Express():  # a move takes seconds: the link keeps reading meanwhile
+                task = asyncio.create_task(self._express(message), name="express")
+                self._asks.add(task)
+                task.add_done_callback(self._asks.discard)
             case LookAt():
                 ok = self.body.motion is not None and await self.body.motion.look_at(message.target)
                 await self._result(message, ok, None if ok else "look_at is not supported")
@@ -722,7 +725,7 @@ class EdgeAgent:
             emit("CONSOLE-ERROR", {"detail": f"feed {path}: need 16 kHz mono 16-bit, got {shape}"})
             return
         frames = (len(pcm) + FRAME_BYTES - 1) // FRAME_BYTES
-        emit("FEED", path=path, frames=frames, ms=frames * FRAME_MS)
+        emit("FEED", path=path, frames=frames, ms=frames * FRAME_MS, wall=f"{time.time():.3f}")
         started = time.monotonic()
         for index in range(frames):
             chunk = pcm[index * FRAME_BYTES : (index + 1) * FRAME_BYTES].ljust(FRAME_BYTES, b"\0")
