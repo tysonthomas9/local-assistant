@@ -20,8 +20,10 @@ face (paused while the robot speaks, holding the pose once the face is gone; TRA
 When a mic window opens for a voice (a wake word, speech in open mic, a follow-up) the body
 reads the XVF3800's direction of arrival from the daemon and turns the head toward it, slowly
 and at most 10 degrees (VOICE-TURN), until the tracker finds a face there. The brain switches
-following at runtime with `look_at{target: {kind: user, follow: true|false}}` and turns the
-head toward a direction with `look_at{target: {kind: doa, doa: degrees}}`.
+following at runtime with the existing v1 targets (no protocol change): `look_at{target:
+{kind: user}}` follows the user's face; `look_at{target: {kind: world, x, y, z}}` stops
+following and turns the head toward that point (robot frame: x ahead, y left; at most 10
+degrees); `look_at{target: {kind: doa, doa: degrees}}` turns toward a direction.
 
 The robot wakes for the first turn (or expression) and stays awake during a conversation:
 the movement manager holds its pose, plays the attention poses and expressions in order, and
@@ -45,6 +47,7 @@ TODO(phase 3):
 import asyncio
 import contextlib
 import json
+import math
 import sys
 import threading
 import time
@@ -63,7 +66,14 @@ from assistant_contracts.capabilities import (
     Capabilities,
     MotionCaps,
 )
-from assistant_contracts.common import Aec, AttentionState, LookAtDoa, LookAtUser, LookTarget
+from assistant_contracts.common import (
+    Aec,
+    AttentionState,
+    LookAtDoa,
+    LookAtUser,
+    LookAtWorld,
+    LookTarget,
+)
 from assistant_core.playback import PacedPlayer
 from assistant_robot_reachy import watchdog
 from assistant_robot_reachy.arbiter import (
@@ -308,13 +318,19 @@ class ReachyMotion:
         return ok
 
     async def look_at(self, target: LookTarget) -> bool:
-        """`user`: follow the user's face (`follow`) or stop; `doa`: turn toward a direction
-        (degrees, positive: the robot's left). TODO(phase 3): look_at_world / look_at_image."""
-        if isinstance(target, LookAtUser):
+        """`user`: follow the user's face; `world`: stop following and turn toward the point
+        (robot frame: x ahead, y left); `doa`: turn toward a direction (degrees, positive: the
+        robot's left). TODO(phase 3): look_at_image."""
+        if isinstance(target, LookAtUser | LookAtWorld):
             arbiter = self._arbiter()
-            ok = await asyncio.to_thread(arbiter.set_follow, target.follow, "brain")
-            emit("FOLLOW", on=str(target.follow).lower(), ok=str(ok).lower(),
+            follow = isinstance(target, LookAtUser)
+            ok = await asyncio.to_thread(arbiter.set_follow, follow, "brain")
+            emit("FOLLOW", on=str(follow).lower(), ok=str(ok).lower(),
                  awake=str(arbiter.attending).lower())  # fmt: skip
+            if ok and isinstance(target, LookAtWorld) and arbiter.attending:
+                yaw = math.degrees(math.atan2(target.y, target.x))
+                if abs(yaw) >= 0.5:
+                    return await self.turn_toward(yaw, "look_at_world")
             return ok
         if isinstance(target, LookAtDoa):
             return await self.turn_toward(target.doa, "look_at")
@@ -519,7 +535,7 @@ class ReachyBody:
             audio_in=AudioInCaps(rate=16000, aec="hw"),
             motion=MotionCaps(
                 expressions=sorted({*self.arbiter.emotions, "random"}) if self.arbiter else [],
-                look_at=["doa"] if self.tracking == "off" else ["user", "doa"],
+                look_at=["doa"] if self.tracking == "off" else ["user", "world", "doa"],
                 attention=True,
             ),
             camera=CameraCaps(w=size[0], h=size[1]) if size else None,

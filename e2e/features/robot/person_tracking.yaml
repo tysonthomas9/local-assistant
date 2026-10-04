@@ -6,9 +6,9 @@ description: >
   (`[body.reachy] tracking`, voice+face by default): TRACKING on when the robot wakes, paused
   (weight 0) at the captured look-at pose while the robot speaks and on again afterwards, the
   pose held 1.5 s after the face was last seen (before Pollen's tracker would recenter at 2 s),
-  off when the robot goes to rest. The brain switches following at runtime
-  (`look_at{target: {kind: user, follow: false|true}}`) and turns the head toward a direction
-  (`look_at{target: {kind: doa}}`); a voice that opens a mic window makes the body read the
+  off when the robot goes to rest. The brain switches following at runtime with v1 targets (no
+  protocol change: `look_at` `world` stops following, `user` follows again) and turns the head
+  toward a direction (`look_at{target: {kind: doa}}`); a voice that opens a mic window makes the body read the
   XVF3800's direction of arrival and turn toward it (VOICE-TURN). A turn is a move of ours: at
   most 10 degrees of yaw from neutral, at 10 degrees a second. Killing the edge mid-tracking
   makes the watchdog switch the tracker off and rest the robot, motors off. Measured by the
@@ -55,10 +55,10 @@ scenarios:
       - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 6}}
       - server_sends: {client: lite, type: attention, fields: {state: listening}}
       - edge_printed: {client: lite, tag: TRACKING, fields: {state: "on", reason: awake}, within_s: 30}
-      - edge_answers: {client: lite, type: look_at, fields: {target: {kind: user, follow: false}}}
+      - edge_answers: {client: lite, type: look_at, fields: {target: {kind: world, x: 1.0, y: 0.0, z: 0.0}}}
       - edge_printed: {client: lite, tag: TRACKING, fields: {state: "off", reason: brain}}
       - edge_printed: {client: lite, tag: FOLLOW, fields: {"on": "false", ok: "true", awake: "true"}}
-      - edge_answers: {client: lite, type: look_at, fields: {target: {kind: user, follow: true}}}
+      - edge_answers: {client: lite, type: look_at, fields: {target: {kind: user}}}
       - edge_printed: {client: lite, tag: TRACKING, fields: {state: "on", reason: brain}}
       - server_sends: {client: lite, type: attention, fields: {state: idle}}
       - robot_sleeps_after_idle: {client: lite, seconds: 6}
@@ -67,7 +67,7 @@ scenarios:
       - kill_process: {process: "client:lite", signal_name: TERM}
       - start_edge_agent: {id: lite2, body: reachy, where: edge_host, body_options: {tracking: "off"}}
       - edge_printed: {client: lite2, tag: TRACKING-MODE, fields: {mode: "off"}}
-      - edge_answers: {client: lite2, type: look_at, fields: {target: {kind: user, follow: true}}, ok: false, error_contains: not supported}
+      - edge_answers: {client: lite2, type: look_at, fields: {target: {kind: user}}, ok: false, error_contains: not supported}
       - edge_output_clean: lite2
       - edge_host_clean
 
