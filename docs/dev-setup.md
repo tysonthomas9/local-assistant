@@ -125,6 +125,9 @@ CPU memory. `GATE_GPU=two` runs them.
 The cost is speed (measured with the sim robot on a single-RTX 3090 machine): TTS and LLM share the card, so the TTS first audio takes about 95 ms
 instead of 20 ms. Typed input to first audio is about 215 ms (83 ms on two cards); voice is
 about 245 ms (252 ms on two cards).
+These are times to the start of playback. The 0.6B TTS begins most replies with 0.1-1 s of
+silence (the 1.7B: 80 ms), so its first audible sound comes about 0.4 s later. Trimming that
+silence in the speech server (it is generated about 8x faster than real time) is still to do.
 
 If vLLM cannot start (e.g. GPU0 is busy), the gate's status names the processes on GPU0 and
 points to `[llm] server = "ollama"`.
