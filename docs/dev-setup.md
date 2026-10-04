@@ -117,6 +117,11 @@ work still leaves 0.7 GB free. The 1.7B BF16 TTS (6.8 GB) leaves too little for 
 context. fp8 KV is not possible on an RTX 3090: Gemma 4's 512-wide heads need SM89+ (Triton)
 or SM100+ (FlashInfer) for it.
 
+`GATE_GPU=one` runs the gate this way. It leaves out the features that start a second LLM
+or speech server next to the stack's (servers_compared, llm_down, vllm_down,
+speech_server_down): one card has no room for a second copy, and putting the stack's vLLM to sleep moves its 16 GB of weights into
+CPU memory. `GATE_GPU=two` runs them.
+
 The cost is speed (measured with the sim robot on a single-RTX 3090 machine): TTS and LLM share the card, so the TTS first audio takes about 95 ms
 instead of 20 ms. Typed input to first audio is about 215 ms (83 ms on two cards); voice is
 about 245 ms (252 ms on two cards).

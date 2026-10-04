@@ -68,7 +68,9 @@
 #   GATE_NO_HW=1      the same as GATE_ROBOT=sim                               } and exits 3
 #   GATE_NO_MODELS=1  skip stage h and the model features of s and g           } (incomplete)
 #   GATE_GPU=one|two  the GPU layout of the model servers (sets ASSISTANT__GPU__LAYOUT; default:
-#                     `[gpu] layout` of the config). one = the whole stack on one card
+#                     `[gpu] layout` of the config). one = the whole stack on one card; it
+#                     leaves out the features that start a second LLM or speech server (no
+#                     room for a second copy), named in the stage notes
 #   LEGACY_PYTHON     python for the legacy suite (default: third_party/speech-to-speech/.venv)
 #   LEGACY_APP_DIR    reachy_mini_conversation_app to link (default: from the main checkout)
 #
@@ -173,11 +175,25 @@ duration() { printf '%dm%02ds' $(($1 / 60)) $(($1 % 60)); }
 
 # pytest_features <marker expression>: run one tier; "no tests collected" (exit 5) means 0
 # features.
+# Features that start a model server of their own next to the stack's (start_llm_server,
+# start_speech_server): on one card (layout one) there is no room for a second copy, so they
+# are left out there, named in the stage's note; layout two runs them.
+second_server_features() {
+    grep -rl --include='*.yaml' -E '^\s*- start_(llm|speech)_server' e2e/features | sort
+}
+
 pytest_features() {
-    local marker="$1" out rc passed
+    local marker="$1" out rc passed feature left_out=()
+    local args=(-m "$marker" -v -p no:cacheprovider)
     out="$STATE_DIR/pytest-${marker// /_}.log"
+    if [[ "$GPU_LAYOUT" == one ]]; then
+        while IFS= read -r feature; do
+            args+=(--deselect "$feature")
+            left_out+=("$(basename "$feature" .yaml)")
+        done < <(second_server_features)
+    fi
     set +e
-    uv run --locked pytest e2e -m "$marker" -v -p no:cacheprovider 2>&1 | tee "$out"
+    uv run --locked pytest e2e "${args[@]}" 2>&1 | tee "$out"
     rc=${PIPESTATUS[0]}
     set -e
     if [[ $rc -eq 5 ]]; then
@@ -185,6 +201,9 @@ pytest_features() {
         return 0
     fi
     passed="$(grep -E '^=+ .* in [0-9.]+s' "$out" | tail -1 | sed -E 's/^=+ (.*) in [0-9.]+s.*/\1/' || true)"
+    if [[ ${#left_out[@]} -gt 0 ]]; then
+        passed="${passed:-no pytest summary}; layout one leaves out ${left_out[*]} (a second model server: GATE_GPU=two runs them)"
+    fi
     note "${passed:-no pytest summary}"
     return "$rc"
 }
