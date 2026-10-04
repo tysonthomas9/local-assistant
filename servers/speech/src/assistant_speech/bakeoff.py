@@ -7,15 +7,23 @@ started on its own, measured over HTTP exactly as the brain uses it, and stopped
 
 - VRAM: the server process's GPU memory (nvidia-smi, sampled every 0.2 s): after load and the
   peak while measuring.
-- STT: each golden clip of tests/fixtures/audio, plus the reference TTS clips (1.7B BF16, ryan
-  and eric), sent whole after the speech ended (as the brain does): wall time per request and
-  word error rate (lower case, no punctuation) against the expected text.
+- STT: each golden clip of tests/fixtures/audio, the reference TTS clips (1.7B BF16, ryan and
+  eric) and, once made with `--make-stt-set`, a harder set: the clean golden clips with pink
+  noise at 5 dB SNR and with 3-voice babble at 8 dB SNR (0.3 s lead, 0.8 s tail), and
+  accented English (Qwen3-TTS's sohee, ono_anna, uncle_fu, vivian). Each is sent whole after
+  the speech ended, as the brain does after the VAD hands over, so the wall time per request is
+  the STT's share of the turn latency. Word error rate (lower case, no punctuation) per group;
+  every transcript is kept (`--report` writes them side by side).
 - TTS: each sentence in ryan's and eric's voice: time to first audio, synthesis real-time
-  factor, and the round-trip word error rate (the reference Parakeet transcribes it). The audio
-  is saved as WAV for listening (`DIR/clips/<candidate>/`).
+  factor, the round-trip word error rate (the reference Parakeet transcribes it), the leading
+  silence (frames 25 dB under the clip's own speech level: loudness-normalized) and so the time
+  to the first audible sound, the speech level, and the speaking time per voice. The audio is
+  saved as WAV for listening (`DIR/clips/<candidate>/`).
 
 Kokoro-82M (reference only: no Ryan/Eric voices) runs in-process with `--kokoro` from an env
 that has the `kokoro` package; its round trip uses `--stt-url` (a running reference server).
+Qwen3-ASR (`--qwen-asr Qwen/Qwen3-ASR-0.6B`, transformers backend, bf16, language detected)
+likewise runs in-process from an env with the `qwen-asr` package.
 
 Results: `DIR/results.json` (one entry per candidate) and a Markdown table on stdout.
 """
@@ -64,6 +72,11 @@ SENTENCES = [
     "Once upon a time, a little robot found a box of paints and began to draw the sky.",
 ]
 VOICES = ["ryan", "eric"]
+ACCENTED = ["sohee", "ono_anna", "uncle_fu", "vivian"]
+"""Qwen3-TTS speakers whose native language is not English (Korean, Japanese, Chinese)."""
+PINK_SNR_DB = 5.0
+BABBLE_SNR_DB = 8.0
+LEAD_S, TAIL_S = 0.3, 0.8
 STT_RATE = 16000
 TTS_RATE = 24000
 
@@ -161,6 +174,18 @@ def synthesize(url: str, text: str, voice: str) -> tuple[bytes, float, float]:
     return b"".join(chunks), first or 0.0, (time.monotonic() - started) * 1000
 
 
+def synthesize_lang(url: str, text: str, voice: str, language: str) -> tuple[bytes, float, float]:
+    body = {"input": text, "voice": voice, "language": language, "response_format": "pcm"}
+    request = urllib.request.Request(
+        f"{url}/v1/audio/speech", data=json.dumps(body).encode(), method="POST"
+    )
+    request.add_header("Content-Type", "application/json")
+    started = time.monotonic()
+    with urllib.request.urlopen(request, timeout=300) as response:
+        pcm = response.read()
+    return pcm, 0.0, (time.monotonic() - started) * 1000
+
+
 def to_16k(pcm: bytes, rate: int) -> bytes:
     audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
     n = round(len(audio) * STT_RATE / rate)
@@ -246,34 +271,211 @@ def reference_items(out: Path) -> list[tuple[str, bytes, str]]:
     return items
 
 
+def frames_db(audio: np.ndarray, rate: int) -> np.ndarray:
+    """dBFS of each 20 ms frame of float audio in [-1, 1]."""
+    n = rate // 50
+    f = audio[: len(audio) // n * n].reshape(-1, n)
+    return 20 * np.log10(np.sqrt((f.astype(np.float64) ** 2).mean(axis=1)) + 1e-9)
+
+
+def level(pcm: bytes, rate: int) -> dict[str, float]:
+    """Speech level (dBFS of the frames within 25 dB of the loudest: loudness-independent),
+    leading silence before the first such frame, and the speaking time between the first and
+    the last."""
+    audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
+    db = frames_db(audio, rate)
+    if not len(db):
+        return {"lead_ms": 0.0, "speech_dbfs": -120.0, "speech_s": 0.0}
+    top = float(np.percentile(db, 95))
+    voiced = np.flatnonzero(db > top - 25)
+    energy = (10 ** (db[voiced] / 10)).mean()
+    return {
+        "lead_ms": float(voiced[0] * 20),
+        "speech_dbfs": round(float(10 * np.log10(energy)), 1),
+        "speech_s": float((voiced[-1] - voiced[0] + 1) / 50),
+    }
+
+
+def as_float(pcm: bytes) -> np.ndarray:
+    return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768
+
+
+def as_pcm(audio: np.ndarray) -> bytes:
+    return (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+
+
+def trimmed(audio: np.ndarray) -> np.ndarray:
+    """The speech of a clip with LEAD_S of quiet before and TAIL_S after."""
+    db = frames_db(audio, STT_RATE)
+    voiced = np.flatnonzero(db > db.max() - 40)
+    speech = audio[voiced[0] * 320 : (voiced[-1] + 1) * 320]
+    lead, tail = np.zeros(int(LEAD_S * STT_RATE)), np.zeros(int(TAIL_S * STT_RATE))
+    return np.concatenate([lead, speech, tail]).astype(np.float32)
+
+
+def speech_rms(audio: np.ndarray) -> float:
+    db = frames_db(audio, STT_RATE)
+    voiced = db > db.max() - 25
+    return float(np.sqrt((10 ** (db[voiced] / 10)).mean()))
+
+
+def pink(n: int, rng: np.random.Generator) -> np.ndarray:
+    spectrum = np.fft.rfft(rng.standard_normal(n))
+    spectrum /= np.sqrt(np.maximum(np.arange(len(spectrum)), 1))
+    noise = np.fft.irfft(spectrum, n)
+    return (noise / np.sqrt((noise**2).mean())).astype(np.float32)
+
+
+def babble(n: int, voices: list[np.ndarray], rng: np.random.Generator) -> np.ndarray:
+    """Three talkers at once (each looped from a random point), unit RMS."""
+    mix = np.zeros(n, dtype=np.float32)
+    for v in voices:
+        v = v / max(speech_rms(v), 1e-6)
+        start = int(rng.integers(0, len(v)))
+        mix += np.resize(np.roll(v, -start), n)
+    return mix / np.sqrt((mix**2).mean())
+
+
+def make_stt_set(out: Path, url: str) -> None:
+    """The harder STT clips under DIR/stt-set: accented English (made with the server at
+    `url`), and the clean golden clips with pink noise and with babble (deterministic)."""
+    stt_set = out / "stt-set"
+    talkers: list[np.ndarray] = []
+    for i, text in enumerate(SENTENCES):
+        for voice in ACCENTED:
+            pcm, _, _ = synthesize_lang(url, text, voice, "english")
+            write_wav(stt_set / "accented" / f"{voice}-{i}.wav", pcm, TTS_RATE)
+            talkers.append(as_float(to_16k(pcm, TTS_RATE)))
+    for i in range(len(SENTENCES)):
+        for voice in VOICES:
+            path = out / "clips/tts-1.7b-bf16" / f"{voice}-{i}.wav"
+            if path.exists():
+                pcm, rate = read_wav(path)
+                talkers.append(as_float(to_16k(pcm, rate)))
+    rng = np.random.default_rng(1234)
+    for name in SPEECH_GOLDEN:
+        if name in GOLDEN_TEXT_OVERRIDE:
+            continue
+        pcm, rate = read_wav(GOLDEN / f"{name}.wav")
+        clean = trimmed(as_float(to_16k(pcm, rate) if rate != STT_RATE else pcm))
+        level_rms = speech_rms(clean)
+        noise = pink(len(clean), rng) * level_rms / 10 ** (PINK_SNR_DB / 20)
+        write_wav(stt_set / "pink" / f"{name}.wav", as_pcm(clean + noise), STT_RATE)
+        picks = [talkers[j] for j in rng.choice(len(talkers), 3, replace=False)]
+        noise = babble(len(clean), picks, rng) * level_rms / 10 ** (BABBLE_SNR_DB / 20)
+        write_wav(stt_set / "babble" / f"{name}.wav", as_pcm(clean + noise), STT_RATE)
+    print(f"stt set: {sum(1 for _ in stt_set.rglob('*.wav'))} clips in {stt_set}")
+
+
+def stt_set_items(out: Path) -> list[tuple[str, bytes, str]]:
+    """The clips of `make_stt_set` (empty if not made)."""
+    texts = tomllib.loads((GOLDEN / "golden.toml").read_text())
+    items = []
+    for group in ("pink", "babble"):
+        for path in sorted((out / "stt-set" / group).glob("*.wav")):
+            pcm, rate = read_wav(path)
+            items.append((f"{group}/{path.stem}", wav_bytes(pcm, rate), texts[path.stem]["text"]))
+    for path in sorted((out / "stt-set/accented").glob("*.wav")):
+        pcm, rate = read_wav(path)
+        text = SENTENCES[int(path.stem.rsplit("-", 1)[1])]
+        items.append((f"accented/{path.stem}", wav_bytes(to_16k(pcm, rate), STT_RATE), text))
+    return items
+
+
+def stt_items(out: Path) -> list[tuple[str, bytes, str]]:
+    return golden_items() + reference_items(out) + stt_set_items(out)
+
+
 # ---------------------------------------------------------------- measuring
 
 
-def measure_stt(url: str, items: list[tuple[str, bytes, str]], repeats: int) -> dict[str, Any]:
-    golden_lat, other_lat, golden_pairs, other_pairs, bad = [], [], [], [], []
-    for _ in range(repeats):
-        for name, wav, text in items:
-            hyp, ms = transcribe(url, wav)
-            (golden_lat if name.startswith("golden/") else other_lat).append(ms)
-            pairs = golden_pairs if name.startswith("golden/") else other_pairs
-            pairs.append((text, hyp))
-            if wer(text, hyp) > 0.2:
-                bad.append({"clip": name, "expected": text, "got": hyp})
-    lat = golden_lat + other_lat
+def group_of(clip: str) -> str:
+    """golden (clean), golden-noise (the one golden clip in room noise), tts, pink, babble,
+    accented."""
+    group = clip.split("/", 1)[0]
+    if group == "golden" and clip.endswith("_in_noise"):
+        return "golden-noise"
+    return group
+
+
+def stt_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Latency and word error rate per clip group of `records` ({clip, expected, got, ms})."""
+    lat = [r["ms"] for r in records]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in records:
+        groups.setdefault(group_of(r["clip"]), []).append(r)
+    transcripts: dict[str, str] = {}
+    expected: dict[str, str] = {}
+    for r in records:
+        transcripts.setdefault(r["clip"], r["got"])
+        expected.setdefault(r["clip"], r["expected"])
     return {
         "stt_ms_p50": statistics.median(lat),
         "stt_ms_p90": pct(lat, 0.9),
         "stt_ms_max": max(lat),
-        "golden_ms_p50": statistics.median(golden_lat),
-        "wer_golden": corpus_wer(golden_pairs),
-        "wer_tts_clips": corpus_wer(other_pairs) if other_pairs else None,
+        "golden_ms_p50": statistics.median(
+            [r["ms"] for r in records if group_of(r["clip"]) == "golden"]
+        ),
+        "wer_golden": corpus_wer([(r["expected"], r["got"]) for r in groups.get("golden", [])]),
+        "wer_tts_clips": corpus_wer([(r["expected"], r["got"]) for r in groups["tts"]])
+        if "tts" in groups
+        else None,
+        "wer_by_group": {
+            g: round(corpus_wer([(r["expected"], r["got"]) for r in rs]), 4)
+            for g, rs in sorted(groups.items())
+        },
+        "ms_p50_by_group": {
+            g: round(statistics.median([r["ms"] for r in rs]), 1)
+            for g, rs in sorted(groups.items())
+        },
         "requests": len(lat),
-        "over_0_2": bad[: 3 * len(items)],
+        "transcripts": transcripts,
+        "expected": expected,
+        "over_0_2": [
+            {"clip": r["clip"], "expected": r["expected"], "got": r["got"]}
+            for r in records
+            if wer(r["expected"], r["got"]) > 0.2
+        ][:60],
+    }
+
+
+def measure_stt(url: str, items: list[tuple[str, bytes, str]], repeats: int) -> dict[str, Any]:
+    records = []
+    for _ in range(repeats):
+        for name, wav, text in items:
+            hyp, ms = transcribe(url, wav)
+            records.append({"clip": name, "expected": text, "got": hyp, "ms": ms})
+    return stt_summary(records)
+
+
+def tts_summary(
+    ttfa: list[float],
+    rtf: list[float],
+    pairs: list[tuple[str, str]],
+    durations: dict[tuple[int, str], list[float]],
+    levels: list[dict[str, float]],
+    first_audible: list[float],
+) -> dict[str, Any]:
+    by_voice: dict[str, float] = {}
+    for (_, voice), values in durations.items():
+        by_voice[voice] = by_voice.get(voice, 0.0) + statistics.median(values)
+    return {
+        "ttfa_ms_p50": statistics.median(ttfa),
+        "ttfa_ms_p90": pct(ttfa, 0.9),
+        "first_audible_ms_p50": statistics.median(first_audible),
+        "lead_ms_p50": statistics.median([lv["lead_ms"] for lv in levels]),
+        "speech_dbfs": round(statistics.median([lv["speech_dbfs"] for lv in levels]), 1),
+        "speaking_s_by_voice": {v: round(t, 1) for v, t in sorted(by_voice.items())},
+        "rtf_p50": statistics.median(rtf),
+        "wer_roundtrip": corpus_wer(pairs),
+        "requests": len(ttfa),
+        **runaways(durations),
+        "roundtrip": [{"expected": t, "got": h} for t, h in pairs if wer(t, h) > 0],
     }
 
 
 def measure_tts(url: str, ref_stt_url: str, clips: Path, repeats: int) -> dict[str, Any]:
-    ttfa, rtf, pairs = [], [], []
+    ttfa, rtf, pairs, levels, audible = [], [], [], [], []
     durations: dict[tuple[int, str], list[float]] = {}
     for r in range(repeats):
         for i, text in enumerate(SENTENCES):
@@ -282,20 +484,15 @@ def measure_tts(url: str, ref_stt_url: str, clips: Path, repeats: int) -> dict[s
                 seconds = len(pcm) / 2 / TTS_RATE
                 durations.setdefault((i, voice), []).append(seconds)
                 ttfa.append(first_ms)
+                lv = level(pcm, TTS_RATE)
+                levels.append(lv)
+                audible.append(first_ms + lv["lead_ms"])
                 rtf.append(total_ms / 1000 / max(seconds, 1e-3))
                 if r == 0:
                     write_wav(clips / f"{voice}-{i}.wav", pcm, TTS_RATE)
                     hyp, _ = transcribe(ref_stt_url, wav_bytes(to_16k(pcm, TTS_RATE), STT_RATE))
                     pairs.append((text, hyp))
-    return {
-        "ttfa_ms_p50": statistics.median(ttfa),
-        "ttfa_ms_p90": pct(ttfa, 0.9),
-        "rtf_p50": statistics.median(rtf),
-        "wer_roundtrip": corpus_wer(pairs),
-        "requests": len(ttfa),
-        **runaways(durations),
-        "roundtrip": [{"expected": t, "got": h} for t, h in pairs if wer(t, h) > 0],
-    }
+    return tts_summary(ttfa, rtf, pairs, durations, levels, audible)
 
 
 def runaways(durations: dict[tuple[int, str], list[float]]) -> dict[str, Any]:
@@ -332,8 +529,7 @@ def run_candidate(
             url = f"http://127.0.0.1:{port}"
             health = json.loads(urllib.request.urlopen(f"{url}/health", timeout=10).read())
             if spec["measure"] == "stt":
-                items = golden_items() + reference_items(out)
-                result = measure_stt(url, items, repeats)
+                result = measure_stt(url, stt_items(out), repeats)
             else:
                 result = measure_tts(url, url, out / "clips" / name, repeats)
         finally:
@@ -372,7 +568,7 @@ def run_kokoro(out: Path, stt_url: str, repeats: int) -> dict[str, Any]:
         torch.cuda.synchronize()
         time.sleep(1.0)
         after_load, _ = gpu.sample()
-        ttfa, rtf, pairs = [], [], []
+        ttfa, rtf, pairs, levels, audible = [], [], [], [], []
         durations: dict[tuple[int, str], list[float]] = {}
         for r in range(repeats):
             for i, text in enumerate(SENTENCES):
@@ -388,6 +584,9 @@ def run_kokoro(out: Path, stt_url: str, repeats: int) -> dict[str, Any]:
                     audio = np.concatenate(parts)
                     pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
                     ttfa.append(first or 0.0)
+                    lv = level(pcm, TTS_RATE)
+                    levels.append(lv)
+                    audible.append((first or 0.0) + lv["lead_ms"])
                     durations.setdefault((i, voice), []).append(len(audio) / TTS_RATE)
                     rtf.append(total / max(len(audio) / TTS_RATE, 1e-3))
                     if r == 0:
@@ -400,21 +599,77 @@ def run_kokoro(out: Path, stt_url: str, repeats: int) -> dict[str, Any]:
         "ready_s": round(ready_s, 1),
         "vram_mib_loaded": after_load,
         "vram_mib_peak": gpu.peak_proc,
-        "ttfa_ms_p50": statistics.median(ttfa),
-        "ttfa_ms_p90": pct(ttfa, 0.9),
-        "rtf_p50": statistics.median(rtf),
-        "wer_roundtrip": corpus_wer(pairs),
-        "requests": len(ttfa),
-        **runaways(durations),
-        "roundtrip": [{"expected": t, "got": h} for t, h in pairs if wer(t, h) > 0],
+        **tts_summary(ttfa, rtf, pairs, durations, levels, audible),
     }
+
+
+def run_qwen_asr(out: Path, repo: str, repeats: int) -> dict[str, Any]:
+    """Qwen3-ASR in-process on the GPU (transformers backend, bf16, language detected); the
+    time per clip is the `transcribe` call (the server's HTTP adds about a millisecond)."""
+    import torch
+    from qwen_asr import Qwen3ASRModel
+
+    with GpuSampler({os.getpid()}) as gpu:
+        started = time.monotonic()
+        model = Qwen3ASRModel.from_pretrained(
+            repo, dtype=torch.bfloat16, device_map="cuda:0", max_inference_batch_size=1,
+            max_new_tokens=256,
+        )  # fmt: skip
+        model.transcribe(audio=(np.zeros(STT_RATE, dtype=np.float32), STT_RATE))
+        ready_s = time.monotonic() - started
+        torch.cuda.synchronize()
+        time.sleep(1.0)
+        after_load, _ = gpu.sample()
+        records = []
+        for _ in range(repeats):
+            for name, wav, text in stt_items(out):
+                import io
+
+                with wave.open(io.BytesIO(wav)) as w:
+                    pcm, rate = w.readframes(w.getnframes()), w.getframerate()
+                t0 = time.monotonic()
+                got = model.transcribe(audio=(as_float(pcm), rate))[0].text
+                torch.cuda.synchronize()
+                ms = (time.monotonic() - t0) * 1000
+                records.append({"clip": name, "expected": text, "got": got, "ms": ms})
+    short = repo.rsplit("/", 1)[-1].lower().replace("qwen3-asr-", "")
+    return {
+        "name": f"stt-qwen3-asr-{short}",
+        "args": [f"{repo} (in-process, transformers, bf16)"],
+        "ready_s": round(ready_s, 1),
+        "vram_mib_loaded": after_load,
+        "vram_mib_peak": gpu.peak_proc,
+        **stt_summary(records),
+    }
+
+
+def transcripts_md(results: list[dict[str, Any]], groups: tuple[str, ...]) -> str:
+    """The STT candidates' transcripts of the clips in `groups`, side by side."""
+    stt = [r for r in results if "transcripts" in r]
+    if not stt:
+        return ""
+    clips = [c for c in stt[0]["transcripts"] if group_of(c) in groups]
+    expected = stt[0].get("expected", {})
+    lines = [
+        "| clip | expected | " + " | ".join(r["name"].removeprefix("stt-") for r in stt) + " |",
+        "|---|---|" + "---|" * len(stt),
+    ]
+    for clip in clips:
+        cells = []
+        for r in stt:
+            got = r["transcripts"].get(clip, "")
+            cells.append(got.replace("|", "/") or "(empty)")
+        lines.append(f"| {clip} | {expected.get(clip, '')} | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
 
 
 def table(results: list[dict[str, Any]]) -> str:
     rows = [
         "| candidate | VRAM loaded / peak (MiB) | STT p50 / p90 (ms) | WER golden | WER TTS clips "
-        "| TTS first audio p50 / p90 (ms) | TTS RTF | round-trip WER | runaways |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| WER pink 5 dB | WER babble 8 dB | WER accented "
+        "| TTS first audio p50 / p90 (ms) | first audible p50 (ms) | speech dBFS "
+        "| speaking s ryan / eric | TTS RTF | round-trip WER | runaways |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
 
     def f(v: Any, fmt: str) -> str:
@@ -422,11 +677,18 @@ def table(results: list[dict[str, Any]]) -> str:
 
     for r in results:
         runaway = f"{r['runaways']}/{r['runaway_of']}" if "runaways" in r else "-"
+        groups = r.get("wer_by_group", {})
+        speaking = r.get("speaking_s_by_voice", {})
+        talk = " / ".join(f"{v:.1f}" for v in speaking.values()) if speaking else "-"
         rows.append(
             f"| {r['name']} | {r['vram_mib_loaded']} / {r['vram_mib_peak']} "
             f"| {f(r.get('stt_ms_p50'), '.0f')} / {f(r.get('stt_ms_p90'), '.0f')} "
             f"| {f(r.get('wer_golden'), '.3f')} | {f(r.get('wer_tts_clips'), '.3f')} "
+            f"| {f(groups.get('pink'), '.3f')} | {f(groups.get('babble'), '.3f')} "
+            f"| {f(groups.get('accented'), '.3f')} "
             f"| {f(r.get('ttfa_ms_p50'), '.0f')} / {f(r.get('ttfa_ms_p90'), '.0f')} "
+            f"| {f(r.get('first_audible_ms_p50'), '.0f')} | {f(r.get('speech_dbfs'), '.1f')} "
+            f"| {talk} "
             f"| {f(r.get('rtf_p50'), '.2f')} | {f(r.get('wer_roundtrip'), '.3f')} "
             f"| {runaway} |"
         )
@@ -441,12 +703,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8790)
     parser.add_argument("--kokoro", action="store_true", help="measure Kokoro-82M in-process")
     parser.add_argument("--stt-url", default="", help="reference STT for Kokoro's round trip")
+    parser.add_argument("--qwen-asr", default="", help="measure this Qwen3-ASR repo in-process")
+    parser.add_argument(
+        "--make-stt-set", default="", metavar="URL",
+        help="make the noisy and accented STT clips with the TTS server at URL",
+    )  # fmt: skip
+    parser.add_argument(
+        "--report", action="store_true",
+        help="write DIR/table.md and DIR/transcripts.md from DIR/results.json",
+    )  # fmt: skip
     args = parser.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
     results_path = args.out / "results.json"
     results: dict[str, Any] = json.loads(results_path.read_text()) if results_path.exists() else {}
+    if args.make_stt_set:
+        make_stt_set(args.out, args.make_stt_set)
+        return 0
+    if args.report:
+        done = [r for r in results.values() if "error" not in r]
+        (args.out / "table.md").write_text(table(done) + "\n")
+        (args.out / "transcripts.md").write_text(
+            "## Noisy (pink 5 dB, babble 8 dB) and the golden clip in room noise\n\n"
+            + transcripts_md(done, ("pink", "babble", "golden-noise"))
+            + "\n\n## Accented English\n\n"
+            + transcripts_md(done, ("accented",))
+            + "\n"
+        )
+        print(table(done))
+        return 0
     if args.kokoro:
         results["tts-kokoro-82m"] = run_kokoro(args.out, args.stt_url, args.repeats)
+    elif args.qwen_asr:
+        result = run_qwen_asr(args.out, args.qwen_asr, args.repeats)
+        results[result["name"]] = result
     else:
         names = args.only or list(CANDIDATES)
         # The reference TTS clips feed the STT candidates: make them first.
