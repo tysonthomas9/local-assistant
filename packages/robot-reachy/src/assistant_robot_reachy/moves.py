@@ -19,8 +19,10 @@ limits. Under it, every move of ours is composed onto a "look-at base" (`compose
 as Pollen's app anchors queued moves at the tracked pose), so attention poses and recorded
 moves play on top of where the robot looks instead of fighting it:
 
-- speaking pauses tracking (weight 0) at the captured look-at pose (`hold_present`: the base
-  becomes the measured head pose, so nothing moves) and resumes it (weight 1) afterwards;
+- speaking pauses tracking (weight 0) at the captured look-at pose (`hold_tracked`: while
+  Pollen's tracker steers the head, the base becomes the measured head pose, so nothing moves;
+  with no face seen it captures nothing, so servo lag is never frozen into the base) and
+  resumes it (weight 1) afterwards;
 - `HOLD_AFTER_S` without a face, the head holds where it is (the base is captured and the
   tracker re-armed, before Pollen's tracker would recenter the head at 2 s);
 - a voice turn (`turn_toward`) glides the base to at most `MAX_TURN_DEG` of yaw toward the
@@ -61,6 +63,7 @@ END_EPSILON_S = 1e-3
 TRACK_POLL_S = 0.1
 """How often the tracking monitor asks the daemon whether a face is seen."""
 HOLD_AFTER_S = 1.5
+POLLEN_LOST_S = 2.0  # Pollen's tracker keeps aiming this long after the face was last seen
 """No face this long: hold the pose. Pollen's tracker recenters the head 2 s after it last saw
 a face; holding (and re-arming it) a little before keeps that recentering from starting."""
 MAX_TURN_DEG = 10.0
@@ -332,7 +335,8 @@ class MovementManager:
             if not enabled:
                 self._tracking = False
                 if hold:
-                    self.hold_present()
+                    self.hold_tracked()
+                self._last_face = 0.0
                 try:
                     self.tracker.disable()
                 except Exception as exc:
@@ -363,7 +367,7 @@ class MovementManager:
             if not self._tracking:
                 return
             if speaking:
-                self.hold_present()
+                self.hold_tracked()
                 self._enable(0.0)
                 self._state("paused", weight="0", reason="speaking")
             else:
@@ -392,7 +396,8 @@ class MovementManager:
                 elif not seen and self.track_state == "on":
                     lost = now - max(self._last_face, self._searching_since)
                     if lost >= HOLD_AFTER_S:
-                        self.hold_present()
+                        self.hold_tracked()
+                        self._last_face = 0.0
                         self._enable(0.0)  # re-armed: Pollen's tracker forgets the lost face
                         self._enable(1.0)
                         self._state("hold", after_s=f"{lost:.2f}", reason="no_face")
@@ -415,6 +420,14 @@ class MovementManager:
             return target
         self._base = np.array(linear_pose_interpolation(start, end, s), dtype=float)
         return self._base
+
+    def hold_tracked(self) -> None:
+        """Hold the pose Pollen's tracker turned the head to, if it is steering it (the camera
+        is on and a face was seen within its lost timeout); otherwise the base stays as it is:
+        the measured pose then differs from ours only by servo lag and steady error."""
+        steering = self.camera and time.monotonic() - self._last_face < POLLEN_LOST_S
+        if steering:
+            self.hold_present()
 
     def hold_present(self) -> None:
         """Hold the head where it is now: the base becomes the measured head pose relative to

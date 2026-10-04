@@ -162,18 +162,36 @@ def test_without_a_face_the_pose_is_held_before_pollen_recenters(daemon_url: str
     seen, on_event = _events()
     mini = RecordingMini()
     arbiter = MotionArbiter(mini, daemon_url=daemon_url, on_event=on_event)
-    started = time.monotonic()
+    _Daemon.face = True
     arbiter.attend("listening")
     mini.head = yaw_pose(30.0)  # where Pollen's tracker had turned the head
+    time.sleep(0.3)
+    _Daemon.face = False  # the face leaves; Pollen's tracker keeps aiming for 2 s
+    lost = time.monotonic()
     _wait_for(lambda: seen[-1]["state"] == "hold", moves.HOLD_AFTER_S + 1.0)
-    held = time.monotonic() - started
-    assert moves.HOLD_AFTER_S <= held < 2.0
+    held = time.monotonic() - lost
+    assert moves.HOLD_AFTER_S - moves.TRACK_POLL_S <= held < moves.POLLEN_LOST_S
     time.sleep(0.1)
     # The held pose is the measured one: no jump when the tracker lets go.
     assert rotation_deg(mini.targets[-1], yaw_pose(30.0)) < 0.5
     assert _Daemon.calls[-2:] == ["enable 0.0", "enable 1.0"]  # re-armed
     _Daemon.face = True
     _wait_for(lambda: seen[-1]["state"] == "on")
+    arbiter.attend("rest")
+
+
+def test_without_a_tracked_face_nothing_is_captured(daemon_url: str) -> None:
+    """Servo lag (the measured pose behind ours) is never frozen into the base: with no face
+    seen, speaking and the no-face hold keep the head on our own pose."""
+    mini = RecordingMini()
+    arbiter = MotionArbiter(mini, daemon_url=daemon_url)
+    arbiter.attend("listening")
+    mini.head = yaw_pose(8.0)  # lagging behind, not steered by the tracker
+    arbiter.set_speaking(True)
+    time.sleep(0.1)
+    assert rotation_deg(mini.targets[-1], np.eye(4)) < 6.0  # the listening pose, not yaw 8
+    assert rotation_deg(mini.targets[-1], yaw_pose(8.0)) > 5.0
+    arbiter.breathe()
     arbiter.attend("rest")
 
 
