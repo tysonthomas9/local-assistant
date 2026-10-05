@@ -45,8 +45,9 @@ from assistant_testing.steps.link import SERVER, _client_name, _expect, _free_po
 
 SPEECH = "speech"
 SHARED_SPEECH_URL = "http://127.0.0.1:8772"
-MIN_FREE_GPU_MIB = 8000
-"""What the speech server needs on its GPU (it uses about 6.8 GB)."""
+MIN_FREE_GPU_MIB = int(os.environ.get("ASSISTANT_SPEECH_MIN_FREE_MIB", "8000"))
+"""What the speech server needs on its GPU (the default one uses about 6.8 GB; with
+`ASSISTANT_SPEECH_ARGS="--tts 0.6b --tts-quant Q8_0"` about 4.1 GB: lower it to match)."""
 READY_TIMEOUT_S = 300.0
 GOLDEN_DIR = "tests/fixtures/audio"
 SILENCE_DBFS = -45.0
