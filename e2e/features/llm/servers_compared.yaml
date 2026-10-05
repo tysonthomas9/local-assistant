@@ -1,0 +1,69 @@
+feature: The same voice and text turn on vLLM and on Ollama
+tier: [sim, hw, models]
+description: >
+  Either LLM server can run the stack: vLLM (the default) and Ollama (the fallback, one config
+  value away) each get exactly the same turns on the real robot. A real server of the
+  scenario's own is started on GPU0 by scripts/llm_server.sh (the stack's server sleeps or
+  unloads meanwhile) and checked to hold reachy-gemma4 entirely on GPU0; the brain runs with
+  [llm] server set to it. The golden "hello" WAV is fed into the robot's edge agent as real mic
+  frames (voice turn: STT, LLM, TTS, the robot's speaker; the room is measured on the real
+  microphone first and the energy trigger is armed only by the fed audio, so ordinary room
+  sound cannot open a window before it), then "hello" is typed on the same
+  edge (text turn). Both replies play on the robot's speaker and transcribe to words. Then 4
+  real requests run at once straight on that server (the sub-agent case) after one alone.
+  The timings (LLM time to first token, input to the speaker's first audio, the server's GPU
+  memory, single and 4-parallel tokens/s) are written per server, so the two can be compared.
+scenarios:
+  - name: on vLLM, a voice turn and a text turn on the robot, then 4 parallel requests
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_llm_server: {server: vllm}
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, llm: test, speech: true}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, energy_trigger_dbfs: -35, energy_trigger_feed_only: true, vad_end_ms: 700, record: true}
+      - room_level_measured: {client: lite}
+      - feed_golden_wav: {client: lite, name: hello}
+      - voice_turn_transcribed: {client: lite, max_wer: 0.2}
+      - robot_speaks_reply: {client: lite, min_ms: 500}
+      - turn_logged: {kind: voice, ttft: true}
+      - recorded_reply_transcript_not_empty: {client: lite}
+      - timings_recorded: {name: llm_vllm_voice}
+      - edge_types: {client: lite, text: hello}
+      - robot_speaks_reply: {client: lite, min_ms: 500}
+      - turn_logged: {kind: text, ttft: true}
+      - recorded_reply_transcript_not_empty: {client: lite}
+      - timings_recorded: {name: llm_vllm_text}
+      - llm_parallel_throughput: {count: 4, max_tokens: 300}
+      - timings_recorded: {name: llm_vllm}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: on Ollama, a voice turn and a text turn on the robot, then 4 parallel requests
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_llm_server: {server: ollama}
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, llm: test, speech: true}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, energy_trigger_dbfs: -35, energy_trigger_feed_only: true, vad_end_ms: 700, record: true}
+      - room_level_measured: {client: lite}
+      - feed_golden_wav: {client: lite, name: hello}
+      - voice_turn_transcribed: {client: lite, max_wer: 0.2}
+      - robot_speaks_reply: {client: lite, min_ms: 500}
+      - turn_logged: {kind: voice, ttft: true}
+      - recorded_reply_transcript_not_empty: {client: lite}
+      - timings_recorded: {name: llm_ollama_voice}
+      - edge_types: {client: lite, text: hello}
+      - robot_speaks_reply: {client: lite, min_ms: 500}
+      - turn_logged: {kind: text, ttft: true}
+      - recorded_reply_transcript_not_empty: {client: lite}
+      - timings_recorded: {name: llm_ollama_text}
+      - llm_parallel_throughput: {count: 4, max_tokens: 300}
+      - timings_recorded: {name: llm_ollama}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean

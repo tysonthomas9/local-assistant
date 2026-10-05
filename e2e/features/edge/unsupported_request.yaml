@@ -1,0 +1,59 @@
+feature: The edge agent handles every brain-to-edge message
+tier: core
+description: >
+  Every message type the brain may send to the edge is handled by the real edge agent with the
+  console body; none is dropped as unhandled. Requests are answered with a result matched by
+  id: supported ones (express on the console body) with ok:true, unsupported ones (snapshot
+  without a camera, look_at, play_sound before sound clips exist) with ok:false and a reason.
+scenarios:
+  - name: "unsupported request <type> is answered with result ok:false"
+    examples:
+      - {type: snapshot, fields: {slot: 1, max_side: 640}, reason: "no camera"}
+      - {type: look_at, fields: {target: {kind: user}}, reason: "not supported"}
+      - {type: play_sound, fields: {sound_id: chime}, reason: "not supported"}
+    steps:
+      - start_link_server
+      - start_edge_agent: {id: desk}
+      - edge_answers: {client: desk, type: <type>, fields: <fields>, ok: false, error_contains: <reason>}
+      - edge_output_clean: desk
+
+  - name: a supported request is answered with result ok:true
+    steps:
+      - start_link_server
+      - start_edge_agent: {id: desk}
+      - edge_answers: {client: desk, type: express, fields: {name: happy, intensity: 0.5}, ok: true}
+      - edge_output_clean: desk
+
+  - name: "brain -> edge: <type> is handled"
+    examples:
+      - {type: attention, fields: {state: listening}}
+      - {type: mic.follow_up, fields: {seconds: 2}}
+      - {type: mic.close, fields: {reason: done}}
+      - {type: wake.cancel, fields: {reason: lost_arbitration}}
+      - {type: privacy, fields: {muted: false}}
+      - {type: timer.sync, fields: {jobs: []}}
+      - {type: duck, fields: {channel: speech, gain_db: -12}}
+      - {type: speak.begin, fields: {stream_id: 3}}
+      - {type: speak.end, fields: {stream_id: 3}}
+      - {type: flush, fields: {stream_id: all}}
+      - {type: error, fields: {code: test, message: a real error message}}
+    steps:
+      - start_link_server
+      - start_edge_agent: {id: desk}
+      - server_sends: {client: desk, type: <type>, fields: <fields>}
+      - client_receives: {client: desk, type: <type>, fields: <fields>}
+      - wait: {seconds: 0.5}
+      - edge_output_clean: desk
+      - server_output_clean
+
+  - name: a mute request is confirmed by the edge, and the mic stays shut while muted
+    steps:
+      - start_link_server
+      - start_edge_agent: {id: desk}
+      - server_sends: {client: desk, type: privacy, fields: {muted: true}}
+      - server_receives: {client: desk, type: privacy, fields: {muted: true}}
+      - server_sends: {client: desk, type: mic.follow_up, fields: {seconds: 2}}
+      - uplink_carries_no_audio: {client: desk, seconds: 1}
+      - edge_types: {client: desk, text: /unmute}
+      - server_receives: {client: desk, type: privacy, fields: {muted: false}}
+      - edge_output_clean: desk

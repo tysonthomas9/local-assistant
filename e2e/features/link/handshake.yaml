@@ -1,0 +1,33 @@
+feature: EdgeLink handshake
+tier: core
+description: >
+  A real edge client process dials a real link server process on 127.0.0.1 with the dev
+  bearer token. It says hello, the server opens a session and answers with welcome.
+scenarios:
+  - name: hello and welcome with the dev token
+    steps:
+      - start_link_server
+      - start_link_client: {id: desk, wait: false}
+      - server_connected:
+          client: desk
+          fields: {proto: "1.0", body: {kind: console}}
+      - client_receives: {client: desk, type: welcome, fields: {v: 1, audio: {out_rate: 24000}}}
+      - capability_negotiated: {client: desk, capability: opus, negotiated: false}
+
+  - name: speak_text is negotiated when the edge advertises it
+    steps:
+      - start_link_server
+      - start_link_client: {id: desk, speak_text: true}
+      - capability_negotiated: {client: desk, capability: speak_text}
+
+  - name: two edges hold separate sessions
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - start_link_client: kitchen
+      - server_connected: {client: desk}
+      - server_connected: {client: kitchen}
+      - server_sends: {client: kitchen, type: attention, fields: {state: listening}}
+      - client_receives: {client: kitchen, type: attention, fields: {state: listening}}
+      - client_sends: {client: desk, type: text.input, fields: {text: hello from the desk}}
+      - server_receives: {client: desk, type: text.input, fields: {text: hello from the desk}}

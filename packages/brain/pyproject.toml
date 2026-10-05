@@ -1,0 +1,25 @@
+[project]
+name = "assistant-brain"
+version = "0.1.0"
+description = "The brain: sessions, routing, dialog, turn engines, skill host"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "assistant-contracts",
+    "assistant-core",
+    "assistant-link",
+    "assistant-skill-sdk",
+    "httpx>=0.28",
+]
+
+[project.scripts]
+assistant-brain = "assistant_brain.app:main"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+assistant-contracts = { workspace = true }
+assistant-core = { workspace = true }
+assistant-link = { workspace = true }
+assistant-skill-sdk = { workspace = true }

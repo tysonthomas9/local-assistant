@@ -1,0 +1,39 @@
+feature: The robot's microphone reaches the brain
+tier: hw
+description: >
+  Push-to-talk opens a mic window; the robot's real microphone (the XVF3800's echo-cancelled
+  output, read through the reachy-mini SDK) streams 20 ms frames to the server, and they carry
+  a live signal, not the digital silence of a denied or muted microphone. Outside a window, and
+  while muted, nothing is sent.
+scenarios:
+  - name: push-to-talk streams live microphone audio
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - uplink_carries_no_audio: {client: lite, seconds: 1}
+      - press_push_to_talk: lite
+      - server_receives: {client: lite, type: vad, fields: {state: start}}
+      - uplink_audio_live: {client: lite, min_frames: 100}
+      - release_push_to_talk: lite
+      - server_receives: {client: lite, type: vad, fields: {state: end}}
+      - uplink_carries_no_audio: {client: lite, seconds: 1}
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: muted, push-to-talk is refused and nothing is sent
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - edge_types: {client: lite, text: /mute}
+      - server_receives: {client: lite, type: privacy, fields: {muted: true}}
+      - edge_types: {client: lite, text: /ptt down}
+      - uplink_carries_no_audio: {client: lite, seconds: 2}
+      - edge_types: {client: lite, text: /unmute}
+      - server_receives: {client: lite, type: privacy, fields: {muted: false}}
+      - edge_host_clean

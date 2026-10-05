@@ -1,0 +1,420 @@
+"""The edge host: the machine the robot is plugged into, when that is not this one.
+
+The brain, the models and the test runner stay on this PC; the device side (the reachy-mini
+daemon and, from S3, the edge agent) runs where the robot's USB cable is. The tests reach that
+machine only by an SSH alias (config `[test.edge_host] ssh`, or the env var ASSISTANT_EDGE_HOST)
+defined in ~/.ssh/config, so no address or user name is ever in the repo.
+
+    python -m assistant_testing.edge_host check   # which host has the robot; exit 1 if none
+    python -m assistant_testing.edge_host sweep   # stop leftovers: edge-dir processes, test ssh
+                                                  # clients/tunnels here, their forwards there
+    python -m assistant_testing.edge_host lock --pid <pid>   # take the exclusive hw-run lock
+    python -m assistant_testing.edge_host unlock             # release it (only our own)
+
+Only one hw run may use the robot at a time: the gate takes an exclusive lock on the robot's
+machine (`~/assistant-edge/hw-run.lock`) before its pre-run sweep and releases it in teardown, so
+a second run fails fast instead of sweeping the first run's processes. Output from the edge host
+never shows its home directory: `$HOME` is rewritten to `~`.
+
+A robot attached to this machine is always used first. Everything on the edge host lives in
+`~/assistant-edge/` (see scripts/edge_host_bootstrap.sh). EdgeLink and the daemon API stay on
+loopback on both machines; they are joined by SSH tunnels (`-L`/`-R`) until S7 adds TLS.
+"""
+
+import glob
+import hashlib
+import os
+import shlex
+import subprocess
+import sys
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from assistant_core.config import load_config
+from assistant_testing.processes import (
+    RUN_ID,
+    TEST_SSH_PATTERN,
+    die_with_parent,
+    home_scrubber,
+    ssh_argv,
+)
+
+ENV_VAR = "ASSISTANT_EDGE_HOST"
+EDGE_DIR = "~/assistant-edge"
+"""The edge host's working dir (`~` = the edge host's home)."""
+REMOTE_VENV = "~/assistant-edge/src/.venv-assistant"
+"""The synced checkout's env (UV_PROJECT_ENVIRONMENT=.venv-assistant)."""
+DAEMON_BIN = "~/assistant-edge/daemon/bin/reachy-mini-daemon"
+SYNC_REF = "refs/heads/under-test"
+EDGE_PACKAGES = ("assistant-edge", "assistant-robot-reachy")
+"""What `uv sync` installs on the edge host: the edge/robot packages and their deps only."""
+ROBOT_GLOBS = ("/dev/ttyACM*", "/dev/cu.usbmodem*")
+"""Serial devices of a USB-attached Reachy Mini (Linux, macOS)."""
+_SWEEP_PATTERN = "[/]assistant-edge/(daemon|src|Reachy Edge[.]app)/"
+"""pgrep/pkill -f pattern (an extended regex on macOS and Linux) for processes run from the edge
+dir (Reachy Edge.app included); `[/]` keeps it from matching the shell that runs it."""
+APP_JOB_PREFIX = "com.assistant.reachy-edge."
+"""Label prefix of the per-run LaunchAgents that run code inside Reachy Edge.app (macOS)."""
+_APP_JOBS = "launchctl list 2>/dev/null | awk '$3 ~ /^com[.]assistant[.]reachy-edge[.]/ {print $3}'"
+REVERSE_PORTS = range(47000, 48000)
+"""Edge-host loopback ports for `ssh -R` tunnels (EdgeLink). A listener in this range owned by
+sshd is a test tunnel, so the sweep can find one a crashed runner left behind."""
+LOCK_DIR = "$HOME/assistant-edge/hw-run.lock"
+"""The exclusive hw-run lock on the robot's machine (`mkdir` is atomic on macOS and Linux)."""
+_HOMES: dict[str | None, str] = {}
+
+
+@dataclass(frozen=True)
+class EdgeHost:
+    """Where the robot is: `ssh` is the alias of the edge host, or None for this machine."""
+
+    ssh: str | None
+
+    @property
+    def remote(self) -> bool:
+        return self.ssh is not None
+
+    @property
+    def label(self) -> str:
+        return f"edge host {self.ssh!r} (over SSH)" if self.ssh else "this machine"
+
+    def sh(self, script: str, *, tag: bool = True) -> list[str]:
+        """argv that runs the POSIX sh `script` on the edge host (ssh tagged as a test run)."""
+        if self.ssh is None:
+            return ["/bin/sh", "-c", script]
+        return ssh_argv(self.ssh, script, tag=tag)
+
+    def run(
+        self, script: str, timeout_s: float = 60.0, *, tag: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        """Run `script` there and return its result (stdout and stderr captured)."""
+        return subprocess.run(
+            self.sh(script, tag=tag),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+            preexec_fn=die_with_parent(),
+        )
+
+    def home(self) -> str:
+        """The edge host's $HOME (asked once per host and cached)."""
+        if self.ssh not in _HOMES:
+            if self.ssh is None:
+                _HOMES[None] = str(Path.home())
+            else:
+                done = self.run('printf %s "$HOME"', timeout_s=30, tag=False)
+                _HOMES[self.ssh] = done.stdout.strip() if done.returncode == 0 else ""
+        return _HOMES[self.ssh]
+
+    def scrub(self, text: str) -> str:
+        """`text` with the edge host's home directory shown as `~` (never the user name)."""
+        return home_scrubber(self.home())(text)
+
+
+def local_robot() -> str | None:
+    """The serial device of a robot attached to this machine, if any."""
+    for pattern in ROBOT_GLOBS:
+        found = sorted(glob.glob(pattern))
+        if found:
+            return found[0]
+    return None
+
+
+def configured_alias(repo_root: Path, environ: Mapping[str, str] | None = None) -> str:
+    env = os.environ if environ is None else environ
+    alias = env.get(ENV_VAR, "").strip()
+    if alias:
+        return alias
+    return load_config(repo_root / "config", environ={}).test.edge_host.ssh.strip()
+
+
+def resolve(repo_root: Path, environ: Mapping[str, str] | None = None) -> EdgeHost:
+    """This machine if a robot is attached here, else the configured edge host (if any)."""
+    if local_robot() is not None:
+        return EdgeHost(None)
+    alias = configured_alias(repo_root, environ)
+    return EdgeHost(alias or None)
+
+
+ROBOT_PROBE = (
+    "for d in " + " ".join(ROBOT_GLOBS) + '; do if [ -e "$d" ]; then echo "$d"; exit 0; fi; done; '
+    "exit 1"
+)
+
+
+def robot_device(host: EdgeHost) -> str | None:
+    """The robot's serial device on `host` (None: no robot there, or SSH failed)."""
+    if not host.remote:
+        return local_robot()
+    done = host.run(ROBOT_PROBE, timeout_s=30)
+    return done.stdout.strip() or None if done.returncode == 0 else None
+
+
+def _local_test_ssh() -> list[str]:
+    """ssh clients and tunnels of any test run still alive on this machine ("pid argv")."""
+    done = subprocess.run(
+        ["pgrep", "-af", TEST_SSH_PATTERN], capture_output=True, text=True, check=False
+    )
+    return [line for line in done.stdout.splitlines() if line.strip()]
+
+
+_FORWARDS = (
+    'lsof -nP -a -u "$(id -un)" -c sshd -iTCP:{lo}-{hi} -sTCP:LISTEN 2>/dev/null'
+    " | awk 'NR > 1 {{print $2, $1, $9}}' | sort -u"
+)
+
+
+def _edge_forwards(host: EdgeHost) -> list[str]:
+    """sshd listeners for test `ssh -R` tunnels on the edge host ("pid sshd addr:port")."""
+    if host.ssh is None:
+        return []
+    lo, hi = REVERSE_PORTS.start, REVERSE_PORTS.stop - 1
+    done = host.run(_FORWARDS.format(lo=lo, hi=hi), timeout_s=30, tag=False)
+    return [line for line in done.stdout.splitlines() if line.strip()]
+
+
+def _kill_local(lines: list[str]) -> None:
+    pids = [int(line.split()[0]) for line in lines]
+    for sig in ("TERM", "KILL"):
+        alive = [pid for pid in pids if _alive(pid)]
+        if not alive:
+            return
+        subprocess.run(["kill", f"-{sig}", *map(str, alive)], capture_output=True, check=False)
+        time.sleep(2)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def sweep(host: EdgeHost) -> list[str]:
+    """Stop and return every leftover of a test run, wherever it is:
+
+    - LaunchAgents of Reachy Edge.app jobs on a macOS edge host (unloaded), and processes
+      still running from the edge dir there;
+    - tagged ssh clients and tunnels on this machine (`-o SetEnv=ASSISTANT_TEST_RUN=...`);
+    - sshd listeners for test `ssh -R` tunnels on the edge host (REVERSE_PORTS).
+
+    Its own ssh calls are untagged, so it never finds itself.
+    """
+    return [host.scrub(line) for line in _sweep(host)]
+
+
+DAEMON_API = "http://127.0.0.1:8000/api"
+"""The reachy-mini daemon's REST API on the robot's machine (loopback)."""
+_REST_ROBOT = f"""
+api={DAEMON_API}
+curl -s -m 3 -o /dev/null "$api/daemon/status" || exit 0
+mode=$(curl -s -m 3 "$api/motors/status")
+case "$mode" in *'"disabled"'*) exit 0 ;; esac
+echo "motors were $mode"
+curl -s -m 5 -X POST "$api/move/play/goto_sleep" >/dev/null
+i=0
+while [ $i -lt 30 ]; do
+  sleep 0.5; i=$((i + 1))
+  [ "$(curl -s -m 3 "$api/move/running")" = "[]" ] && break
+done
+curl -s -m 5 -X POST "$api/motors/set_mode/disabled" >/dev/null
+curl -s -m 3 "$api/motors/status"
+"""
+
+
+def rest_robot(host: EdgeHost) -> str | None:
+    """If a daemon answers and the motors are not disabled: the SDK's `goto_sleep`, then
+    torque off (the daemon's own REST API). The motors' torque outlives the daemon, so a robot
+    left awake would start the next run awake. Returns what was done, or None."""
+    done = host.run(_REST_ROBOT, timeout_s=60, tag=False)
+    text = " ".join(done.stdout.split())
+    return text or None
+
+
+def _sweep(host: EdgeHost) -> list[str]:
+    found = [f"edge forward: {line}" for line in _edge_forwards(host)]
+    # Before any daemon is stopped: a robot left awake goes back to sleep, torque off.
+    if rested := rest_robot(host):
+        found.append(f"robot put to rest: {rested}")
+    local = _local_test_ssh()
+    found += [f"this machine: {line}" for line in local]
+    _kill_local(local)
+    # App jobs first: unloading a LaunchAgent stops its whole process group.
+    jobs = (
+        f'for label in $({_APP_JOBS}); do echo "$label"; '
+        'launchctl bootout "gui/$(id -u)/$label" 2>/dev/null; done; '
+        f'rm -rf "$HOME/assistant-edge/run/{APP_JOB_PREFIX}"*; true'
+    )
+    done = host.run(jobs, timeout_s=60, tag=False)
+    found += [f"edge app job: {line}" for line in done.stdout.splitlines() if line.strip()]
+    pattern = shlex.quote(_SWEEP_PATTERN)
+    script = (
+        f"found=$(pgrep -fl {pattern} || true); "
+        f'if [ -n "$found" ]; then printf "%s\\n" "$found"; '
+        f"pkill -TERM -f {pattern}; sleep 3; pkill -KILL -f {pattern}; fi; true"
+    )
+    done = host.run(script, timeout_s=60, tag=False)
+    found += [f"edge process: {line}" for line in done.stdout.splitlines() if line.strip()]
+    # The forwards close with their ssh client; kill any sshd that still holds one.
+    deadline = time.monotonic() + 10
+    while (forwards := _edge_forwards(host)) and time.monotonic() < deadline:
+        time.sleep(1)
+    if forwards:
+        pids = " ".join(sorted({line.split()[0] for line in forwards}))
+        host.run(f"kill -TERM {pids} 2>/dev/null; sleep 2; kill -KILL {pids} 2>/dev/null; true",
+                 timeout_s=30, tag=False)  # fmt: skip
+        found += [f"edge forward (killed): {line}" for line in forwards]
+    return found
+
+
+def leftovers(host: EdgeHost) -> list[str]:
+    """Processes still running from the edge dir, and app jobs still loaded (none after a
+    clean teardown)."""
+    script = f"pgrep -fl {shlex.quote(_SWEEP_PATTERN)}; {_APP_JOBS}; true"
+    done = host.run(script, timeout_s=30, tag=False)
+    return [host.scrub(line) for line in done.stdout.splitlines() if line.strip()]
+
+
+# ---------------------------------------------------------------- the exclusive hw-run lock
+
+
+def machine_id() -> str:
+    """A short, stable id of this machine (a hash, so no host or user name leaks)."""
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            raw = Path(path).read_text().strip()
+        except OSError:
+            continue
+        if raw:
+            return hashlib.sha256(raw.encode()).hexdigest()[:12]
+    import socket
+
+    return hashlib.sha256(socket.gethostname().encode()).hexdigest()[:12]
+
+
+def _parse_owner(text: str) -> dict[str, str]:
+    return dict(item.split("=", 1) for item in text.split() if "=" in item)
+
+
+class LockHeld(Exception):
+    """Another hw run holds the robot."""
+
+
+def acquire_lock(host: EdgeHost, owner_pid: int, run_id: str = RUN_ID) -> str:
+    """Take the exclusive hw-run lock on the robot's machine; return a status line.
+
+    `owner_pid` is the process on THIS machine whose life the lock follows (the gate). A lock
+    left by a dead owner on this machine is stale and taken over; a live one, or one from
+    another machine, raises `LockHeld` ("another hw run is in progress").
+    """
+    owner = f"run={run_id} machine={machine_id()} pid={owner_pid} since={int(time.time())}"
+    script = (
+        f'mkdir -p "$HOME/assistant-edge" && if mkdir "{LOCK_DIR}" 2>/dev/null; then '
+        f'printf "%s\\n" {shlex.quote(owner)} > "{LOCK_DIR}/owner"; echo ACQUIRED; '
+        f'else echo HELD; cat "{LOCK_DIR}/owner" 2>/dev/null; fi'
+    )
+    for _ in range(2):
+        done = host.run(script, timeout_s=30, tag=False)
+        if done.returncode != 0:
+            raise RuntimeError(f"could not reach {host.label} for the hw-run lock: {done.stderr}")
+        lines = done.stdout.splitlines()
+        if lines[:1] == ["ACQUIRED"]:
+            return f"hw-run lock taken on {host.label} ({owner})"
+        held = _parse_owner(" ".join(lines[1:]))
+        same_machine = held.get("machine") == machine_id()
+        pid = int(held.get("pid", "0") or 0)
+        if held.get("run") == run_id:
+            return f"hw-run lock already held by this run on {host.label}"
+        if not same_machine or (pid > 0 and _alive(pid)) or not held:
+            since = held.get("since")
+            age = f", for {int(time.time()) - int(since)} s" if since and since.isdigit() else ""
+            raise LockHeld(
+                f"another hw run is in progress on {host.label} (run {held.get('run', '?')}"
+                f"{age}); wait for it, or if it is surely dead remove {LOCK_DIR} there"
+            )
+        # The owner on this machine is dead (e.g. a gate killed with -9): take the lock over.
+        host.run(f'rm -rf "{LOCK_DIR}"', timeout_s=30, tag=False)
+    raise LockHeld(f"could not take the hw-run lock on {host.label}")
+
+
+def release_lock(host: EdgeHost, run_id: str = RUN_ID) -> str:
+    """Release the hw-run lock if this run holds it (never someone else's)."""
+    script = (
+        f'if grep -q "^run={run_id} " "{LOCK_DIR}/owner" 2>/dev/null; then '
+        f'rm -rf "{LOCK_DIR}"; echo RELEASED; else echo NOT-OURS; fi'
+    )
+    done = host.run(script, timeout_s=30, tag=False)
+    if "RELEASED" in done.stdout:
+        return f"hw-run lock released on {host.label}"
+    return f"hw-run lock on {host.label} not held by this run (nothing released)"
+
+
+def _check(repo_root: Path) -> int:
+    device = local_robot()
+    if device is not None:
+        print(f"robot: {device} on this machine (used before any edge host)")
+        return 0
+    alias = configured_alias(repo_root)
+    if not alias:
+        print(
+            "robot: none on this machine ({}), and no edge host configured "
+            "([test.edge_host] ssh or {})".format(", ".join(ROBOT_GLOBS), ENV_VAR)
+        )
+        return 1
+    host = EdgeHost(alias)
+    reach = host.run("true", timeout_s=30)
+    if reach.returncode != 0:
+        print(
+            f"robot: none on this machine; edge host {alias!r} unreachable over SSH: "
+            f"{reach.stderr.strip()}"
+        )
+        return 1
+    device = robot_device(host)
+    if device is None:
+        print(
+            f"robot: none on this machine; edge host {alias!r} reachable but has no "
+            f"{' or '.join(ROBOT_GLOBS)}"
+        )
+        return 1
+    print(f"robot: {device} on edge host {alias!r} (over SSH)")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    repo_root = Path.cwd()
+    if args[:1] == ["check"]:
+        return _check(repo_root)
+    if args[:1] == ["lock"]:
+        pid = int(args[2]) if args[1:2] == ["--pid"] and len(args) > 2 else os.getppid()
+        try:
+            print(acquire_lock(resolve(repo_root), pid))
+        except LockHeld as exc:
+            print(f"hw-run lock: {exc}")
+            return 1
+        return 0
+    if args[:1] == ["unlock"]:
+        print(release_lock(resolve(repo_root)))
+        return 0
+    if args[:1] == ["sweep"]:
+        host = resolve(repo_root)
+        found = sweep(host)
+        for line in found:
+            print(f"stopped leftover ({host.label}): {line}")
+        print(f"sweep: {len(found)} leftover process(es) (this machine and {host.label})")
+        return 0
+    print(
+        "usage: python -m assistant_testing.edge_host check|sweep|lock [--pid N]|unlock",
+        file=sys.stderr,
+    )
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

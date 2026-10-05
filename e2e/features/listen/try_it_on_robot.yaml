@@ -1,0 +1,28 @@
+feature: The try-it launcher runs the whole stack on the robot, hands-free, and Ctrl-C leaves nothing behind
+tier: [hw, models]
+description: >
+  scripts/try_it.sh run as a user runs it: it starts (or reuses) the LLM and speech servers,
+  syncs the checkout to the robot's machine and starts the daemon, the brain, the SSH tunnels
+  and the edge agent inside Reachy Edge.app. Without --listen it listens for the wake word
+  (the default). A question played through the air from the Mac mini's speaker shows up as
+  what was heard ("you:") and gets a spoken reply ("robot:"). Ctrl-C (SIGINT to its process
+  group, as a terminal sends it) stops everything it started: the robot is put to rest with its
+  motors off, and no process is left on this PC or the robot's machine.
+scenarios:
+  - name: the default is the wake word; hey jarvis gets an answer; Ctrl-C cleans up
+    steps:
+      - robot_host_found
+      - try_it_started: {mode: wake_word}
+      - speaker_plays: {client: try_it, name: hey_jarvis_whats_your_name}
+      - try_it_shows: {wake: true}
+      - try_it_stopped
+      - edge_host_clean
+
+  - name: --listen open_mic answers a question without a wake word; Ctrl-C cleans up
+    steps:
+      - robot_host_found
+      - try_it_started: {listen: open_mic, mode: open_mic}
+      - speaker_plays: {client: try_it, name: what_time_is_it}
+      - try_it_shows
+      - try_it_stopped
+      - edge_host_clean

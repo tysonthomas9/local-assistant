@@ -1,0 +1,105 @@
+# Base config for the new assistant stack (proposal section 5.5).
+# Precedence: code defaults < this file < config/profiles/<profile>.toml
+#             < env ASSISTANT__SECTION__KEY < CLI overrides.
+
+[net]
+edgelink_bind = "0.0.0.0:8770"     # EdgeLink is the only LAN-facing port; the dev profile keeps it on loopback
+admin_bind = "127.0.0.1:8771"
+# tls_cert = "data/tls/brain.crt"  # set both to enable wss:// (task S7 creates a dev cert)
+# tls_key = "data/tls/brain.key"
+
+[privacy]
+online_skills = false              # online skills stay hidden unless enabled here
+hard_mute_button = true
+
+[brain]
+data_dir = "~/.local/share/assistant"
+default_assistant = "jarvis"
+wake_arbitration_ms = 200
+follow_up_s = 10
+announce_devices = ["lite"]
+
+[engine]
+impl = "basic"                     # "realtime" (HF speech-to-speech) becomes the default in phase 2
+vad_stop_s = 0.2
+smart_turn = true                  # end of turn by Smart Turn v3.2 on the edge (a pause mid-sentence keeps the turn open)
+smart_turn_threshold = 0.5
+smart_turn_max_wait_ms = 2000      # an unfinished-sounding turn ends after this much quiet
+speech = true                      # basic engine: STT in, TTS replies ([stt], [tts]: the speech server)
+
+[llm]
+# The stack's own LLM server on GPU0 (scripts/llm_server.sh, OpenAI-compatible API): vLLM by
+# default; server = "ollama" falls back to Ollama on the same port with the same model name.
+impl = "openai"
+server = "vllm"
+base_url = "http://127.0.0.1:8773/v1"
+model = "gemma4-26b"
+ctx = 16384
+max_concurrency = 8                # priority gate: requests in flight across all sessions
+reserved_voice_slots = 1           # always keep one slot free for a voice turn
+send_priority = true               # vLLM only (its --scheduling-policy priority)
+priority = { voice = 0, proactive = 5, background = 10 }
+reasoning_effort = "none"         # no thinking before a spoken reply ("" omits the field)
+
+[stt]
+base_url = "http://127.0.0.1:8772"
+model = "parakeet-tdt-0.6b-v3"
+
+[tts]
+base_url = "http://127.0.0.1:8772"
+backend = "qwen3-ggml"
+
+[gpu]
+# Where the LLM server and the speech server run (scripts/llm_server.sh, the gate).
+layout = "two"                     # "two": LLM on GPU0, speech on GPU1; "one": both on gpu_index
+gpu_index = 0                      # layout "one": the shared card
+margin_mib = 768                   # layout "one": memory left free at the peak of a busy turn
+max_model_len = 65536              # layout "one": vLLM context (bf16 KV cache; needs the 0.6B Q8_0 TTS)
+max_num_seqs = 8                   # layout "one": vLLM concurrent sequences (sharing the KV cache)
+
+[edge]
+device_id = "lite"
+room = "living"
+brain_url = "mdns"
+body = "reachy"
+
+[edge.audio]
+input = "default"
+output = "default"
+aec = "hw"
+
+[edge.listen]
+mode = "wake_word"                 # wake_word (default) | open_mic | push_to_talk (debugging)
+
+[edge.vad]                         # Silero VAD on the edge CPU
+threshold = 0.5
+start_ms = 160                     # speech this long opens a window (open mic, follow-up)
+end_ms = 700                       # silence that ends a window
+pre_roll_ms = 600
+barge_in_stop_delay_ms = 350       # a barge-in lets the robot speak this long more, then fades it out
+
+[edge.wake]
+engine = "openwakeword"            # or "phrase" (sherpa-onnx, the edge's `phrase` extra)
+models = ["hey_jarvis"]
+threshold = 0.4                    # until the brain's welcome gives the assistant's thresholds
+pre_roll_s = 0.1                   # from just before the detection: the wake word itself is not sent
+no_speech_s = 8                    # wait this long for speech after a wake; a bare wake gets "Yes?"
+max_window_s = 120                 # hard cap of every mic window (at most 120 s; the edge clamps longer requests)
+
+[body.reachy]
+connection = "localhost_only"
+expressions = "config/bodies/reachy.toml"
+idle_sleep_s = 120                 # awake during a conversation; asleep (motors off) after this long idle
+tracking = "voice+face"            # turn toward a voice (DOA), then follow the face; "face" or "off"
+
+[observability]
+otlp = ""
+log_level = "info"
+capture_content = false
+
+[test.edge_host]
+# The robot tests (tier hw) run the device side on the machine the robot is plugged into.
+# A robot attached to this machine is always used first; otherwise the tests reach the edge host
+# through this SSH alias (define it in ~/.ssh/config; never put addresses or user names here).
+# The env var ASSISTANT_EDGE_HOST overrides it. See docs/robot-on-another-machine.md.
+ssh = "reachy-mac"

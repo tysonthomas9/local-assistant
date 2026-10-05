@@ -1,0 +1,20 @@
+# Development on one machine: loopback only, our own LLM server on GPU0 (scripts/llm_server.sh), readable logs.
+
+[net]
+edgelink_bind = "127.0.0.1:8770"
+
+[llm]
+impl = "openai"
+server = "vllm"                          # "ollama" is the fallback (scripts/llm_server.sh)
+base_url = "http://127.0.0.1:8773/v1"    # our LLM server on GPU0
+model = "reachy-gemma4"
+
+[edge]
+body = "console"
+
+[edge.audio]
+aec = "none"
+
+[observability]
+log_level = "debug"
+log_format = "console"

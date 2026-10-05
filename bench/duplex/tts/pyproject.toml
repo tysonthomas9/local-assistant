@@ -1,0 +1,27 @@
+[project]
+name = "dx-tts"
+version = "0.1.0"
+description = "DX-POC: generates the scenario clips with Kokoro-82M (Apache-2.0, stock synthetic voice)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "kokoro==0.9.4",
+    "soundfile==0.13.1",
+    "scipy==1.16.2",
+    "numpy==2.2.6",
+    "torch==2.8.0",
+    "en-core-web-sm",
+    "transformers==4.56.2",
+    "misaki[en]==0.9.4",
+]
+
+[tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv]
+package = false

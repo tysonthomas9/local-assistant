@@ -1,0 +1,28 @@
+feature: A dead LLM server is spoken about, not hidden
+tier: models
+description: >
+  The brain talks to a real `ollama serve` of the scenario's own (the fallback server, same
+  models as the system service, on its own loopback port; turn/vllm_down is the same for vLLM), which is killed for real (SIGKILL) between two turns. The
+  next turn fails fast: the user is told the language model cannot be reached (speak text), the
+  turn log records the error, and attention goes back to idle. Once the server is back, the
+  next turn is answered again. The system Ollama service is never touched.
+scenarios:
+  - name: the LLM server dies; the turn says so and the next one works once it is back
+    steps:
+      - start_llm_server: {server: ollama}
+      - start_brain: {engine: basic, llm: test}
+      - start_edge_agent: {id: desk}
+      - edge_types: {client: desk, text: "What is the capital of Italy? Answer in one word."}
+      - edge_shows_reply: {client: desk, containing: Rome, within_s: 180}
+      - turn_logged: {kind: text, ttft: true}
+      - kill_llm_server
+      - attention_sequence_is: {client: desk, states: [idle, listening, thinking, speaking, idle]}
+      - edge_types: {client: desk, text: "Are you still there?"}
+      - edge_shows_reply: {client: desk, containing: "can't reach my language model", within_s: 15}
+      - attention_sequence_is: {client: desk, states: [listening, thinking, speaking, idle]}
+      - turn_logged: {kind: text, outcome: error, error_contains: "127.0.0.1"}
+      - restart_llm_server
+      - edge_types: {client: desk, text: "What is the capital of Spain? Answer in one word."}
+      - edge_shows_reply: {client: desk, containing: Madrid, within_s: 180}
+      - turn_logged: {kind: text, outcome: finished, ttft: true}
+      - edge_output_clean: desk

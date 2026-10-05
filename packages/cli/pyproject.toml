@@ -1,0 +1,15 @@
+[project]
+name = "assistant-cli"
+version = "0.1.0"
+description = "The assistant command-line tool"
+requires-python = ">=3.12,<3.13"
+dependencies = ["assistant-core", "assistant-brain", "assistant-edge"]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+assistant-core = { workspace = true }
+assistant-brain = { workspace = true }
+assistant-edge = { workspace = true }

@@ -1,0 +1,217 @@
+# uv workspace root for the new assistant stack (see docs/architecture.md once written).
+# The legacy stack (local_backend/, start_*.sh, run_*.py) is not part of this workspace.
+[project]
+name = "assistant-workspace"
+version = "0.1.0"
+description = "Workspace root: installs every assistant package plus the dev tools"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "assistant-contracts",
+    "assistant-core",
+    "assistant-link",
+    "assistant-skill-sdk",
+    "assistant-brain",
+    "assistant-skills-builtin",
+    "assistant-skills-web",
+    "assistant-edge",
+    "assistant-robot-reachy",
+    "assistant-cli",
+    "assistant-testing",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.21",
+    "hypothesis>=6.112",
+    "import-linter>=2.1",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "rust-just>=1.36",
+]
+# The simulated robot (tier sim): Pollen's daemon with `--sim` needs MuJoCo, pinned to what
+# reachy-mini 1.10.0 asks for (its `mujoco` extra). Only the sim env has it:
+# `UV_PROJECT_ENVIRONMENT=.venv-sim uv sync --locked --no-default-groups --group sim`
+# (python -m assistant_testing.sim prepare does that).
+sim = ["mujoco==3.3.0"]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+assistant-contracts = { workspace = true }
+assistant-core = { workspace = true }
+assistant-link = { workspace = true }
+assistant-skill-sdk = { workspace = true }
+assistant-brain = { workspace = true }
+assistant-skills-builtin = { workspace = true }
+assistant-skills-web = { workspace = true }
+assistant-edge = { workspace = true }
+assistant-robot-reachy = { workspace = true }
+assistant-cli = { workspace = true }
+assistant-testing = { workspace = true }
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["packages/*/src", "packages/*/tests", "servers/*/src", "tests"]
+include = ["packages/**/*.py", "servers/**/*.py", "tests/**/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC", "PT", "TID"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test steps and helpers may touch the filesystem briefly inside async code.
+"packages/testing/**" = ["ASYNC240"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pipecat".msg = "Pipecat is not used (proposal amendment F)."
+
+# ---------------------------------------------------------------- basedpyright
+[tool.basedpyright]
+pythonVersion = "3.12"
+include = ["packages", "tests"]
+exclude = ["**/__pycache__", "**/.venv", "**/.venv-assistant"]
+venvPath = "."
+venv = ".venv-assistant"
+typeCheckingMode = "standard"
+reportUnnecessaryTypeIgnoreComment = "error"
+reportMissingModuleSource = "none"
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["packages", "tests", "e2e"]
+addopts = [
+    "--import-mode=importlib",
+    "--strict-markers",
+    "-p", "pytester",
+    "-m", "not (sim or hw or models or bench or locality or online)",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "unit: pure logic that is hard to reach end to end (runs in the gate's unit stage)",
+    "core: feature tier core: real code, no robot, GPU or network",
+    "sim: feature tier sim: the simulated robot (Pollen's daemon in MuJoCo) on this PC",
+    "hw: feature tier hw: needs the robot attached",
+    "models: feature tier models: needs both GPUs and the model servers",
+    "bench: latency benchmarks (brain PC only)",
+    "locality: network locality and GPU placement checks",
+    "online: needs internet access (opt-in)",
+]
+
+# ---------------------------------------------------------------- import-linter (proposal section 6)
+[tool.importlinter]
+root_packages = [
+    "assistant_contracts",
+    "assistant_core",
+    "assistant_link",
+    "assistant_skill_sdk",
+    "assistant_brain",
+    "assistant_skills_builtin",
+    "assistant_skills_web",
+    "assistant_edge",
+    "assistant_robot_reachy",
+    "assistant_cli",
+    "assistant_testing",
+]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "contracts imports no internal package and no third party except pydantic"
+type = "forbidden"
+source_modules = ["assistant_contracts"]
+forbidden_modules = [
+    "assistant_core", "assistant_link", "assistant_skill_sdk", "assistant_brain",
+    "assistant_skills_builtin", "assistant_skills_web", "assistant_edge",
+    "assistant_robot_reachy", "assistant_cli", "assistant_testing",
+    "pydantic_settings", "structlog", "websockets", "httpx", "openai", "numpy",
+    "sounddevice", "reachy_mini",
+]
+
+[[tool.importlinter.contracts]]
+name = "skill-sdk depends on contracts only"
+type = "forbidden"
+source_modules = ["assistant_skill_sdk"]
+forbidden_modules = [
+    "assistant_core", "assistant_link", "assistant_brain", "assistant_skills_builtin",
+    "assistant_skills_web", "assistant_edge", "assistant_robot_reachy", "assistant_cli",
+    "assistant_testing",
+]
+
+[[tool.importlinter.contracts]]
+name = "skills depend on skill-sdk and contracts only"
+type = "forbidden"
+source_modules = ["assistant_skills_builtin", "assistant_skills_web"]
+forbidden_modules = [
+    "assistant_core", "assistant_link", "assistant_brain", "assistant_edge",
+    "assistant_robot_reachy", "assistant_cli", "assistant_testing",
+]
+
+[[tool.importlinter.contracts]]
+name = "brain never imports the edge, robot-reachy or reachy_mini"
+type = "forbidden"
+source_modules = ["assistant_brain"]
+forbidden_modules = ["assistant_edge", "assistant_robot_reachy", "reachy_mini"]
+
+[[tool.importlinter.contracts]]
+name = "model-server clients (openai, httpx) only in assistant_brain.adapters and engine.realtime"
+type = "forbidden"
+source_modules = ["assistant_brain"]
+forbidden_modules = ["openai", "httpx"]
+ignore_imports = [
+    "assistant_brain.adapters.** -> openai",
+    "assistant_brain.adapters.** -> httpx",
+    "assistant_brain.engine.realtime.** -> openai",
+    "assistant_brain.engine.realtime.** -> httpx",
+]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+name = "edge never imports the brain"
+type = "forbidden"
+source_modules = ["assistant_edge"]
+forbidden_modules = ["assistant_brain"]
+
+[[tool.importlinter.contracts]]
+name = "only robot-reachy imports reachy_mini"
+type = "forbidden"
+source_modules = [
+    "assistant_contracts", "assistant_core", "assistant_link", "assistant_skill_sdk",
+    "assistant_brain", "assistant_skills_builtin", "assistant_skills_web", "assistant_edge",
+    "assistant_cli", "assistant_testing",
+]
+forbidden_modules = ["reachy_mini"]
+
+[[tool.importlinter.contracts]]
+name = "robot-reachy depends on contracts and core only"
+type = "forbidden"
+source_modules = ["assistant_robot_reachy"]
+forbidden_modules = [
+    "assistant_link", "assistant_skill_sdk", "assistant_brain", "assistant_skills_builtin",
+    "assistant_skills_web", "assistant_edge", "assistant_cli", "assistant_testing",
+]
+
+[[tool.importlinter.contracts]]
+name = "production packages never import assistant_testing"
+type = "forbidden"
+source_modules = [
+    "assistant_contracts", "assistant_core", "assistant_link", "assistant_skill_sdk",
+    "assistant_brain", "assistant_skills_builtin", "assistant_skills_web", "assistant_edge",
+    "assistant_robot_reachy", "assistant_cli",
+]
+forbidden_modules = ["assistant_testing"]
+
+[[tool.importlinter.contracts]]
+name = "no pipecat anywhere (amendment F)"
+type = "forbidden"
+source_modules = [
+    "assistant_contracts", "assistant_core", "assistant_link", "assistant_skill_sdk",
+    "assistant_brain", "assistant_skills_builtin", "assistant_skills_web", "assistant_edge",
+    "assistant_robot_reachy", "assistant_cli", "assistant_testing",
+]
+forbidden_modules = ["pipecat"]

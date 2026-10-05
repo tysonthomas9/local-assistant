@@ -1,0 +1,91 @@
+feature: All 23 EdgeLink messages over a real link
+tier: core
+description: >
+  Every EdgeLink v1 message type travels over a real WebSocket between a real link server
+  process and a real client process, in its proposal section 5.1 direction: 9 edge-to-brain
+  (privacy and error go both ways) and 16 brain-to-edge, 23 types in all. The receiver
+  prints the decoded message and the fields are checked. Sending a type the wrong way is
+  refused by the sender's link, and a hand-made wrong-way message is refused by the peer.
+scenarios:
+  - name: "edge -> brain: <type>"
+    examples:
+      - {type: hello, fields: {device_id: desk, sw_version: 0.1.0, body: {kind: console}, last_seq: 17}}
+      - {type: wake, fields: {word: hey jarvis, score: 0.83, doa: 12.5}}
+      - {type: vad, fields: {state: start, barge_in: true, stream_id: 2, played_ms: 640}}
+      - {type: text.input, fields: {text: what time is it}}
+      - {type: playback, fields: {stream_id: 2, played_ms: 400, state: progress}}
+      - {type: result, fields: {re: m-17, ok: true, data: {bytes: 20480, chunks: 3}}}
+      - {type: privacy, fields: {muted: true, hard: true}}
+      - {type: event, fields: {kind: button, data: {pressed: true}}}
+      - {type: error, fields: {code: bad_request, message: unknown stream}}
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - client_sends: {client: desk, type: <type>, fields: <fields>}
+      - server_receives: {client: desk, type: <type>, fields: <fields>}
+
+  - name: "brain -> edge: <type>"
+    examples:
+      - {type: welcome, fields: {session_id: s-2, wake_words: [{word: hey jarvis, model: hey_jarvis, threshold: 0.4}], mute: true}}
+      - {type: wake.cancel, fields: {reason: lost_arbitration}}
+      - {type: mic.close, fields: {reason: turn complete}}
+      - {type: mic.follow_up, fields: {seconds: 8}}
+      - {type: speak.begin, fields: {stream_id: 2, channel: speech, rate: 24000, text: It is ten.}}
+      - {type: speak.end, fields: {stream_id: 2, channel: speech}}
+      - {type: flush, fields: {stream_id: all}}
+      - {type: duck, fields: {channel: media, gain_db: -12}}
+      - {type: play_sound, fields: {sound_id: chime, channel: alert}}
+      - {type: attention, fields: {state: thinking, assistant: jarvis}}
+      - {type: express, fields: {name: happy, intensity: 0.7}}
+      - {type: look_at, fields: {target: {kind: world, x: 0.5, y: 0.0, z: 0.2}}}
+      - {type: snapshot, fields: {slot: 1, max_side: 1024}}
+      - {type: privacy, fields: {muted: false}}
+      - {type: timer.sync, fields: {jobs: [{id: t1, at_utc: "2026-09-26T10:00:00Z", sound: alarm}]}}
+      - {type: error, fields: {code: busy, message: try again}}
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - server_sends: {client: desk, type: <type>, fields: <fields>}
+      - client_receives: {client: desk, type: <type>, fields: <fields>}
+
+  - name: the edge's link will not send brain-to-edge types
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - sender_refuses_locally: {client: desk, sender: edge, type: attention, fields: {state: idle}}
+      - sender_refuses_locally: {client: desk, sender: edge, type: welcome, fields: {session_id: s-x}}
+      - sender_refuses_locally: {client: desk, sender: edge, type: speak.begin, fields: {stream_id: 1}}
+
+  - name: the brain's link will not send edge-to-brain types
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - sender_refuses_locally: {client: desk, sender: brain, type: wake, fields: {word: x, score: 0.5}}
+      - sender_refuses_locally: {client: desk, sender: brain, type: hello, fields: {device_id: x, sw_version: "1", body: {kind: console}}}
+      - sender_refuses_locally: {client: desk, sender: brain, type: playback, fields: {stream_id: 1, played_ms: 0, state: started}}
+
+  - name: a wrong-way message on the wire is refused by the receiver
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - client_sends_raw: {client: desk, message: {v: 1, type: attention, state: idle}}
+      - server_refuses: {client: desk, code: wrong_direction}
+      - client_receives: {client: desk, type: error, fields: {code: wrong_direction}}
+      - server_sends_raw: {client: desk, message: {v: 1, type: wake, word: x, score: 0.5}}
+      - client_refuses: {client: desk, code: wrong_direction}
+      - server_receives: {client: desk, type: error, fields: {code: wrong_direction}}
+      # the link stays up after a refusal
+      - client_sends: {client: desk, type: text.input, fields: {text: still here}}
+      - server_receives: {client: desk, type: text.input, fields: {text: still here}}
+
+  - name: a malformed message is refused and the link stays up
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - client_sends_raw: {client: desk, message: {v: 1, type: wake, word: x, score: 1.5}}
+      - server_refuses: {client: desk, code: bad_message}
+      - client_receives: {client: desk, type: error, fields: {code: bad_message}}
+      - client_sends_raw: {client: desk, text: "not json"}
+      - server_refuses: {client: desk, code: bad_message}
+      - client_sends: {client: desk, type: wake, fields: {word: hey jarvis, score: 0.9}}
+      - server_receives: {client: desk, type: wake, fields: {word: hey jarvis}}

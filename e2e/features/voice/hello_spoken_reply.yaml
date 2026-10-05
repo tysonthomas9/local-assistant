@@ -1,0 +1,27 @@
+feature: Hello gets a spoken reply on the robot
+tier: [sim, hw, models]
+description: >
+  "hello" typed on the robot's edge agent goes to the real brain (basic engine, the real LLM
+  reachy-gemma4, vLLM by default), whose reply is spoken by the real speech server (Qwen3-TTS on GPU1, Jarvis's
+  voice ryan): speak.begin, 0x02 PCM frames, speak.end, played by the robot's speaker with its
+  playback clock reporting started, progress and done. What the speaker was given transcribes
+  to real words. The time from typing to the speaker's first audio and the turn's STT / LLM /
+  TTS timings are written as an artifact.
+scenarios:
+  - name: hello -> LLM -> TTS -> the robot's speaker
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - llm_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, record: true}
+      - edge_types: {client: lite, text: hello}
+      - robot_speaks_reply: {client: lite, min_ms: 500}
+      - turn_logged: {kind: text, ttft: true}
+      - recorded_reply_transcript_not_empty: {client: lite}
+      - timings_recorded: {name: hello_spoken_reply}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean

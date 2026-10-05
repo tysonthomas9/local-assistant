@@ -1,0 +1,76 @@
+# Speech server
+
+A minimal loopback HTTP server for the brain's speech: Parakeet TDT 0.6B v3 speech-to-text
+(`nano-parakeet`, PyTorch) and Qwen3-TTS 1.7B CustomVoice text-to-speech (`faster-qwen3-tts`
+through qwentts.cpp, BF16 GGUF), both on one GPU (GPU1 on the brain PC, about 7 GB).
+
+It has its own locked venv (`servers/speech/.venv`, about 6 GB with CUDA PyTorch), separate
+from the uv workspace (`.venv-assistant`) and the legacy root `.venv`:
+
+```bash
+uv sync --locked --project servers/speech
+CUDA_VISIBLE_DEVICES=1 CUDA_DEVICE_ORDER=PCI_BUS_ID servers/speech/.venv/bin/python -m assistant_speech --port 8772
+```
+
+It prints `READY url=http://127.0.0.1:8772 gpu=... gpu_memory_mib=... load_s=...` once both
+models are loaded and warmed up (about 10 s) and `STOPPED` when it exits (SIGTERM or Ctrl-C).
+It binds to loopback only. Options: `--port` (0 picks a free one), `--device`, `--tts-quant`
+(BF16, Q8_0, Q4_K_M, F32), `--tts` (`1.7b`, the default, or `0.6b`), `--stt` (`parakeet`, the
+default, `moonshine-small` or `moonshine-medium`: English only), `--stt-device` (e.g. `cpu`;
+default `--device`), `--stt-dtype` (auto, bf16, fp16, fp32), `--language`, `--online`. The
+default (1.7B BF16 + Parakeet) takes about 6.8 GB; `--tts 0.6b --tts-quant Q8_0` about 4.1 GB,
+the size that leaves vLLM a 64k context when both share one 24 GB card (`[gpu] layout = "one"`).
+
+The models run in a worker process under a small supervisor that holds the port. A native
+crash in a model (GGML aborts the whole process on a CUDA error; Python cannot catch it) kills
+only the worker: the request in flight fails, the supervisor prints `WORKER-DIED ...` and
+starts a new worker on the same socket, which prints `READY ... restarts=1` (`/health` has
+`pid`, `supervisor_pid`, `restarts`). Requests sent meanwhile wait for it (about 10-15 s on a
+GPU) instead of being refused. A worker that dies before READY is not restarted, and more
+than 5 deaths in 10 minutes stop the supervisor (`GIVING-UP`). `--no-restart` runs the models
+in the one process.
+
+## Bake-off
+
+`python -m assistant_speech.bakeoff --out <dir>` starts this server once per candidate (the
+TTS sizes and quants, the STT models, dtypes and devices) and measures GPU memory, TTS time to
+first audio, real-time factor and round-trip word error rate (plus runaway generations), STT
+latency and word error rate on the golden clips; `--kokoro` adds Kokoro 82M for reference
+(in-process, its own venv). Clips go to `<dir>/clips`, the table to stdout and
+`<dir>/results.json`.
+
+## Weights
+
+The server runs offline (`HF_HUB_OFFLINE=1`) from the Hugging Face cache
+(`~/.cache/huggingface/hub`):
+
+| Model | Cache | Size |
+|---|---|---|
+| STT `nvidia/parakeet-tdt-0.6b-v3` | `models--nvidia--parakeet-tdt-0.6b-v3` | 2.4 GB |
+| TTS `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` (and `-0.6B-`) as GGUF | `models--Serveurperso--Qwen3-TTS-GGUF` | 4.0 GB (BF16 1.7B) |
+| STT `moonshine-ai/moonshine-streaming-{small,medium}` (optional) | `models--moonshine-ai--...` | 0.5 GB, 1.0 GB |
+
+Start it once with `--online` to download missing weights.
+
+## API
+
+| Request | Body | Answer |
+|---|---|---|
+| `GET /health` | | `{ok, stt_model, tts_model, voices, rate, device, gpu, gpu_memory_mib, ...}` |
+| `GET /requests` | | The last 200 requests: kind (`stt`/`tts`), voice, time to first audio, audio length, outcome |
+| `POST /v1/audio/transcriptions` | a WAV (`audio/wav`) or raw s16le mono (`audio/pcm`, `?rate=16000`) | `{id, text, audio_ms, ms}` |
+| `POST /v1/audio/speech` | JSON `{input, voice, response_format: "pcm"}` | streamed s16le mono PCM at 24 kHz (`X-Sample-Rate`, `X-Request-Id`); closing the response stops the synthesis |
+
+Voices: aiden, dylan, eric, ono_anna, ryan, serena, sohee, uncle_fu, vivian (the assistants'
+`voice.speaker`, lower case: Jarvis is ryan, Marvin is eric). One request runs on the GPU at a
+time; others wait.
+
+## Golden voice clips
+
+`tests/fixtures/audio/*.wav` (synthetic speech, 16 kHz mono 16-bit, with silence before and
+after) are the e2e features' voice input. They were made with this server's TTS from
+`tests/fixtures/audio/golden.toml`:
+
+```bash
+servers/speech/.venv/bin/python -m assistant_speech.golden --url http://127.0.0.1:8772
+```

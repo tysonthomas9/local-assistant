@@ -1,0 +1,23 @@
+feature: The edge comes back when the brain restarts
+tier: core
+description: >
+  A real fault on the real brain: it is killed (SIGKILL) in the middle of a session and started
+  again on the same port. The edge agent reconnects on its own within 3 s, gets a new session,
+  is told its attention state (idle) again, and the next turn is answered.
+scenarios:
+  - name: the brain is killed and restarted; the edge reconnects and turns work again
+    steps:
+      - start_brain: {engine: echo}
+      - start_edge_agent: {id: desk}
+      - attention_sequence_is: {client: desk, states: [idle]}
+      - edge_types: {client: desk, text: before the restart}
+      - edge_shows_reply: {client: desk, text: before the restart}
+      - kill_process: {process: server}
+      - restart_process: {process: server}
+      - client_reconnects_within: {client: desk, seconds: 3}
+      - attention_sequence_is: {client: desk, states: [listening, thinking, speaking, idle, idle]}
+      - edge_types: {client: desk, text: are you back}
+      - edge_shows_reply: {client: desk, text: are you back}
+      - turn_logged: {kind: text, reply: are you back}
+      - brain_output_clean
+      - edge_output_clean: desk

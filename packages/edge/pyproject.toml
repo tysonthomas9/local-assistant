@@ -1,0 +1,37 @@
+[project]
+name = "assistant-edge"
+version = "0.1.0"
+description = "Edge agent: audio, wake, VAD, earcons, bodies"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "assistant-contracts",
+    "assistant-core",
+    "assistant-link",
+    "numpy>=2.2.5",
+    "onnxruntime>=1.20",
+    "openwakeword==0.4.0",
+    "pysilero-vad==3.4.0",
+    "sounddevice>=0.5",
+]
+
+[project.optional-dependencies]
+# The open-vocabulary wake phrase spotter ([edge.wake] engine = "phrase"): sherpa-onnx's keyword
+# spotter, with its model directory in [edge.wake] phrase_model_dir.
+phrase = ["sherpa-onnx>=1.10", "sentencepiece>=0.2"]
+
+[project.scripts]
+assistant-edge = "assistant_edge.cli:main"
+
+[project.entry-points."assistant.bodies"]
+console = "assistant_edge.bodies.console:ConsoleBody"
+null = "assistant_edge.bodies.null:NullBody"
+sounddevice = "assistant_edge.bodies.sounddevice:SoundDeviceBody"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+assistant-contracts = { workspace = true }
+assistant-core = { workspace = true }
+assistant-link = { workspace = true }

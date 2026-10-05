@@ -1,0 +1,112 @@
+feature: Open mic on the robot answers speech, ignores claps, music and its own voice, and lets you talk over it
+tier: [hw, models]
+description: >
+  Open mic on the real robot: the edge agent inside Reachy Edge.app with Silero VAD on the
+  robot machine's CPU, on the robot's own echo-cancelled microphone (XVF3800). Sound comes
+  through the air from a real speaker next to the robot (the Mac mini's built-in speaker;
+  volume set for the play and restored; the robot's speaker volume is never touched). A
+  spoken question opens a window by itself (reason vad), ends with the speech and gets a
+  spoken reply from the real brain (Parakeet, the real LLM, Qwen3-TTS). Claps and music start
+  no turn. The robot's own long reply, through its own speaker at the user's volume, never
+  starts a turn (the XVF3800's echo canceller alone, with Pollen's startup tuning: no extra
+  gate). Talking over the reply is a barge-in, detected within 300 ms of the voice starting;
+  the speech goes on 250-500 ms (350 ms, then a short fade) and the next turn is what was
+  said. The same works in room noise
+  at about -28 dBFS played through the speaker. Room levels go in the artifacts. Before each
+  sound the scenario waits for a moment without speech in the room (someone talking elsewhere
+  would rightly open a window).
+scenarios:
+  - name: a spoken question gets a reply; claps, music and the robot's own reply start no turn
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - llm_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true, follow_up_s: 0}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: open_mic}
+      - edge_listens: {client: lite, mode: open_mic}
+      - room_level_measured: {client: lite}
+      - room_quiet: {client: lite}
+      - speaker_plays: {client: lite, name: clap}
+      - no_turn_for: {client: lite, seconds: 1}
+      - room_quiet: {client: lite}
+      - speaker_plays: {client: lite, name: music}
+      - no_turn_for: {client: lite, seconds: 1}
+      - room_quiet: {client: lite}
+      - speaker_plays: {client: lite, name: what_time_is_it}
+      - mic_opened: {client: lite, reason: vad}
+      - mic_closed: {client: lite, reason: vad_end, opened_by: vad}
+      - voice_turn_transcribed: {client: lite, max_wer: 0.35}
+      - listen_mark: lite
+      - robot_speaks_reply: {client: lite, min_ms: 500}
+      - turn_logged: {kind: voice}
+      - no_turn_for: {client: lite, seconds: 3}
+      - edge_types: {client: lite, text: "Please tell me a story about a little robot who learns to paint, in four sentences."}
+      - listen_mark: lite
+      - robot_speaks_reply: {client: lite, min_ms: 4000}
+      - turn_logged: {kind: text}
+      - no_turn_for: {client: lite, seconds: 3}
+      - brain_state_is: {client: lite, state: idle}
+      - timings_recorded: {name: open_mic_on_robot}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: talking over the robot's reply barges in, and what was said is the next turn
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - llm_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true, follow_up_s: 0}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: open_mic}
+      - room_level_measured: {client: lite}
+      - edge_mic_tuned: {client: lite}
+      - room_quiet: {client: lite}
+      - edge_types: {client: lite, text: "Please tell me a long story about a little robot who learns to paint, in at least six sentences."}
+      - robot_speaks_reply: {client: lite, wait_done: false}
+      - playback_progress_at_least: {client: lite, ms: 3000}
+      - speaker_plays: {client: lite, name: weather_in_paris, wait: false}
+      - mic_opened: {client: lite, reason: vad, barge_in: true}
+      - barge_in_stops_speech: {client: lite}
+      - barge_in_detected_within: {ms: 300}
+      - turn_truncated_at_played_ms
+      - speaker_finished
+      - mic_closed: {client: lite, reason: vad_end, opened_by: vad}
+      - voice_turn_transcribed: {client: lite, max_wer: 0.5}
+      - robot_speaks_reply: {client: lite, min_ms: 300}
+      - turn_logged: {kind: voice}
+      - timings_recorded: {name: barge_in_open_mic_on_robot}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: in room noise (about -28 dBFS) the question still opens a window; the noise alone does not
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - llm_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true, follow_up_s: 0}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: open_mic}
+      - room_level_measured: {client: lite}
+      - room_quiet: {client: lite}
+      - speaker_plays: {client: lite, name: room_noise, wait: false}
+      - wait: {seconds: 1}
+      - room_level_measured: {client: lite, seconds: 2, key: room_level_with_noise, min_mean_dbfs: -40}
+      - speaker_finished
+      - no_turn_for: {client: lite, seconds: 1}
+      - room_quiet: {client: lite}
+      - speaker_plays: {client: lite, name: what_time_is_it_in_noise}
+      - mic_opened: {client: lite, reason: vad}
+      - mic_closed: {client: lite, reason: vad_end, opened_by: vad}
+      - voice_turn_transcribed: {client: lite, text: "What time is it?", max_wer: 0.4}
+      - robot_speaks_reply: {client: lite, min_ms: 300}
+      - turn_logged: {kind: voice}
+      - timings_recorded: {name: open_mic_in_noise_on_robot}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean

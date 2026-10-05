@@ -1,0 +1,20 @@
+feature: The brain gets a camera frame from the robot
+tier: hw
+description: >
+  The brain sends snapshot; the reachy body takes a real frame from the robot's camera (served
+  by the daemon), encodes it as JPEG no larger than max_side and sends it as 0x03 chunks on the
+  requested slot. The server reassembles a whole JPEG whose size matches the result.
+scenarios:
+  - name: "a snapshot of at most <max_side> px arrives on slot <slot>"
+    examples:
+      - {slot: 1, max_side: 640}
+      - {slot: 2, max_side: 1024}
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - robot_camera_frame: {client: lite, slot: <slot>, max_side: <max_side>}
+      - edge_output_clean: lite
+      - edge_host_clean

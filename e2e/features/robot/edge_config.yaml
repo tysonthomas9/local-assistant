@@ -1,0 +1,24 @@
+feature: The edge agent on the robot runs from config/assistant.toml as is
+tier: hw
+description: >
+  Started the way a user starts it, with only the link's address and token on its command
+  line, the edge agent on the robot's machine takes everything else from the base
+  config/assistant.toml: its device id (lite), the reachy body with the XVF3800 echo
+  canceller its [edge.audio] expects (no AEC-MISMATCH), the wake word listening mode
+  (hey_jarvis) and the 120 s mic cap. Speech in the room (the edge host's speaker) starts
+  nothing without the wake word, and the robot stays at rest with its motors off.
+scenarios:
+  - name: only --url and --token -> device lite (the server took its hello), reachy body, wake word, hardware AEC
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, config_only: true}
+      - edge_body_is: {client: lite, aec: hw}
+      - edge_listens: {client: lite, mode: wake_word}
+      - server_sends: {client: lite, type: mic.follow_up, fields: {seconds: 600}}
+      - edge_printed: {client: lite, tag: FOLLOW-UP, fields: {seconds: "120"}}
+      - robot_state_read: {control_mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean

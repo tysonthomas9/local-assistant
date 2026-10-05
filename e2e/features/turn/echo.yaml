@@ -1,0 +1,65 @@
+feature: A turn goes through the real brain and back to the edge
+tier: core
+description: >
+  The real brain (echo engine, no models) serves the real edge agent and a link client. A typed
+  line is a text turn: the edge's attention follows the turn (idle -> listening -> thinking ->
+  speaking -> idle) and the reply reaches it as speak text (speak.begin{text} + speak.end, no
+  audio until TTS arrives). Speech is a voice turn: the mic window's audio comes back as 0x02
+  frames, the brain waits for the edge's playback clock to report the stream done, then opens a
+  follow-up window that ends in idle. Proactive speech waits while the user may be talking.
+scenarios:
+  - name: a typed line is answered as speak text and attention follows the turn
+    steps:
+      - start_brain: {engine: echo}
+      - start_edge_agent: {id: desk}
+      - attention_sequence_is: {client: desk, states: [idle]}
+      - edge_types: {client: desk, text: hello brain}
+      - edge_shows_reply: {client: desk, text: hello brain}
+      - attention_sequence_is: {client: desk, states: [listening, thinking, speaking, idle]}
+      - turn_logged: {kind: text, reply: hello brain, states: [listening, thinking, speaking]}
+      - edge_types: {client: desk, text: and again}
+      - edge_shows_reply: {client: desk, text: and again}
+      - attention_sequence_is: {client: desk, states: [listening, thinking, speaking, idle]}
+      - brain_output_clean
+      - edge_output_clean: desk
+
+  - name: speech is echoed as audio, played to its end, then a follow-up window opens
+    steps:
+      - start_brain: {engine: echo, follow_up_s: 2}
+      - start_link_client: {id: desk, speak_text: true}
+      - brain_state_is: {client: desk, state: idle}
+      - client_sends: {client: desk, type: vad, fields: {state: start}}
+      - brain_state_is: {client: desk, state: listening}
+      - client_floods: {client: desk, kind: mic_pcm, count: 25, bytes: 640, stream: 0}
+      - flood_finished: desk
+      - client_sends: {client: desk, type: vad, fields: {state: end}}
+      - client_receives: {client: desk, type: speak.begin, fields: {stream_id: 1, rate: 16000}}
+      - client_receives_frame: {client: desk, kind: out_pcm, bytes: 640}
+      - client_receives: {client: desk, type: speak.end, fields: {stream_id: 1}}
+      - brain_state_is: {client: desk, state: speaking}
+      - client_sends: {client: desk, type: playback, fields: {stream_id: 1, played_ms: 500, state: done}}
+      - client_receives: {client: desk, type: mic.follow_up, fields: {seconds: 2}}
+      - brain_state_is: {client: desk, state: listening}
+      - turn_logged: {kind: voice, states: [listening, thinking, speaking]}
+      - brain_state_is: {client: desk, state: idle, within_s: 6}
+      - brain_output_clean
+
+  - name: proactive speech is spoken when idle and queued while the user talks
+    steps:
+      - start_brain: {engine: echo}
+      - start_link_client: {id: desk, speak_text: true}
+      - brain_state_is: {client: desk, state: idle}
+      - brain_says: {client: desk, text: The tea is ready.}
+      - client_receives: {client: desk, type: speak.begin, fields: {text: The tea is ready.}}
+      - client_receives: {client: desk, type: speak.end}
+      - brain_state_is: {client: desk, state: idle}
+      - client_sends: {client: desk, type: vad, fields: {state: start}}
+      - brain_state_is: {client: desk, state: listening}
+      - brain_says: {client: desk, text: Your timer is done.}
+      - speech_queued: {client: desk}
+      - wait: {seconds: 1}
+      - brain_state_is: {client: desk, state: listening}
+      - client_sends: {client: desk, type: vad, fields: {state: end}}
+      - client_receives: {client: desk, type: speak.begin, fields: {text: Your timer is done.}}
+      - turn_logged: {kind: proactive, reply: Your timer is done.}
+      - brain_output_clean

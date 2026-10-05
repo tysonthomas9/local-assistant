@@ -1,0 +1,40 @@
+feature: The robot nods when the brain says yes
+tier: [sim, hw]
+description: >
+  The brain sends express{yes}; the body wakes the robot (the SDK's wake_up) and its movement
+  manager plays Pollen's recorded nod yes1 to its end (Pollen's tested moves are the exception
+  to our 10 degree head limit). The robot then stays awake; after `[body.reachy]
+  idle_sleep_s` (5 s here) it goes back to sleep with the motors off. The daemon's own state,
+  sampled during the move, is the measurement: the head pitches well beyond 10 degrees from
+  neutral, and the robot ends in the sleep pose it started in with the motors disabled. Every
+  express intent has a move (the unit tests check the map). Expressions sent back to back
+  queue up and play in the order sent, each to its end, without a rest between them.
+scenarios:
+  - name: express yes plays the nod yes1 and the idle robot goes back to sleep
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 5}}
+      - robot_state_read: {control_mode: disabled}
+      - robot_plays_emotion: {client: lite, emotion: "yes", move: yes1, min_head_deg: 10}
+      - robot_back_at_rest: {within_s: 15}
+      - robot_state_read: {control_mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean
+
+
+  - name: expressions sent back to back play one after the other, in order, then the robot rests
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 5}}
+      - robot_state_read: {control_mode: disabled}
+      - robot_plays_emotions_in_order: {client: lite, emotions: ["yes", "no"], moves: [yes1, no1]}
+      - robot_sleeps_after_idle: {client: lite, seconds: 5}
+      - robot_back_at_rest: {within_s: 5}
+      - edge_output_clean: lite
+      - edge_host_clean

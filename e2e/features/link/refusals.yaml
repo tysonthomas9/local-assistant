@@ -1,0 +1,49 @@
+feature: EdgeLink refusals
+tier: core
+description: >
+  A real link server process refuses a real client process that speaks another major
+  protocol version (close code 4001) or presents a bad bearer token (close code 4003).
+  Both are final: the client does not retry and exits.
+scenarios:
+  - name: a hello with another major version is closed with 4001
+    steps:
+      - start_link_server
+      - start_link_client: {id: future, proto: "2.0", wait: false}
+      - server_refuses: {client: future, code: version_mismatch}
+      - connection_closed_with_code: {client: future, code: 4001}
+
+  - name: a message with another major v is closed with 4001
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - client_sends_raw: {client: desk, message: {v: 2, type: wake, word: hey jarvis, score: 0.5}}
+      - server_refuses: {client: desk, code: version_mismatch}
+      - connection_closed_with_code: {client: desk, code: 4001}
+      - server_disconnects: {client: desk, code: 4001}
+
+  - name: a bad token is refused with the auth close code
+    steps:
+      - start_link_server
+      - start_link_client: {id: intruder, token: not-the-dev-token, wait: false}
+      - server_refuses: {client: intruder, code: auth}
+      - connection_closed_with_code: {client: intruder, code: 4003}
+
+  - name: a refused client does not disturb a connected one
+    steps:
+      - start_link_server
+      - start_link_client: desk
+      - start_link_client: {id: intruder, token: wrong, wait: false}
+      - connection_closed_with_code: {client: intruder, code: 4003}
+      - client_sends: {client: desk, type: wake, fields: {word: hey jarvis, score: 0.9}}
+      - server_receives: {client: desk, type: wake}
+
+  - name: peers that leave before hello do not disturb the server
+    steps:
+      - start_link_server
+      - peer_leaves_before_hello: {stage: tcp}
+      - peer_leaves_before_hello: {stage: upgraded}
+      - peer_leaves_before_hello: {stage: upgraded}
+      - start_link_client: desk
+      - client_sends: {client: desk, type: wake, fields: {word: hey jarvis, score: 0.9}}
+      - server_receives: {client: desk, type: wake}
+      - server_output_clean

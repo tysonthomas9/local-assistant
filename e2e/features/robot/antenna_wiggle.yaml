@@ -1,0 +1,22 @@
+feature: The robot moves its antennas when calming
+tier: [sim, hw]
+description: >
+  The brain sends express{calming}; the body wakes the robot and its movement manager plays
+  Pollen's recorded move calming1 (Pollen's app's choice for calming) to its end; the robot
+  stays awake, then after `[body.reachy] idle_sleep_s` (5 s here) goes back to sleep with the
+  motors off. Measured from the daemon's state: the antennas swing well beyond 30 degrees,
+  and the robot ends in the sleep pose it started in with the motors disabled.
+scenarios:
+  - name: express calming plays calming1 and the idle robot goes back to sleep
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_link_server
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 5}}
+      - robot_state_read: {control_mode: disabled}
+      - robot_plays_emotion: {client: lite, emotion: calming, move: calming1, min_antenna_deg: 30}
+      - robot_back_at_rest: {within_s: 15}
+      - robot_state_read: {control_mode: disabled}
+      - edge_output_clean: lite
+      - edge_host_clean

@@ -1,0 +1,31 @@
+feature: A dead speech server is spoken about, not hidden
+tier: models
+description: >
+  The brain (basic engine, the real LLM reachy-gemma4, vLLM by default) speaks its replies through a real speech
+  server of the scenario's own on GPU1, which is killed for real (SIGKILL) between two turns.
+  The next turn fails fast: the user is told the speech server cannot be reached (speak text),
+  the turn log records the error and attention goes back to idle. Once the server is started
+  again the next reply is spoken again. A shared speech server is never touched.
+scenarios:
+  - name: the speech server dies; the turn says so and the next one is spoken once it is back
+    steps:
+      - llm_serves
+      - start_speech_server
+      - start_brain: {engine: basic, speech: true}
+      - start_edge_agent: {id: desk}
+      - edge_types: {client: desk, text: "What is the capital of Italy? Answer in one word."}
+      - robot_speaks_reply: {client: desk, min_ms: 300}
+      - edge_shows_reply: {client: desk, containing: Rome}
+      - turn_logged: {kind: text, ttft: true}
+      - kill_speech_server
+      - attention_sequence_is: {client: desk, states: [idle, listening, thinking, speaking, idle]}
+      - edge_types: {client: desk, text: "Are you still there?"}
+      - edge_shows_reply: {client: desk, containing: "can't reach my speech server", within_s: 60}
+      - attention_sequence_is: {client: desk, states: [listening, thinking, speaking, idle]}
+      - turn_logged: {kind: text, outcome: error, error_contains: "127.0.0.1"}
+      - restart_speech_server
+      - edge_types: {client: desk, text: "What is the capital of Spain? Answer in one word."}
+      - robot_speaks_reply: {client: desk, min_ms: 300}
+      - edge_shows_reply: {client: desk, containing: Madrid}
+      - turn_logged: {kind: text, outcome: finished, ttft: true}
+      - edge_output_clean: desk

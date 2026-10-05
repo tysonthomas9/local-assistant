@@ -1,0 +1,21 @@
+feature: The speech server transcribes the golden voice clips
+tier: models
+description: >
+  The real speech server (Parakeet TDT 0.6B v3 on GPU1) transcribes each golden WAV of
+  tests/fixtures/audio (synthetic speech, 16 kHz mono, see golden.toml) with a word error rate
+  of at most 0.2 (lower case, no punctuation). STT times are recorded.
+scenarios:
+  - name: every golden WAV is transcribed with WER <= 0.2
+    steps:
+      - speech_server_running
+      - transcribe_golden_wav: {name: hello}
+      - transcript_matches: {max_wer: 0.2}
+      - transcribe_golden_wav: {name: capital_of_france}
+      - transcript_matches: {max_wer: 0.2}
+      - transcribe_golden_wav: {name: weather_in_paris}
+      - transcript_matches: {max_wer: 0.2}
+      - transcribe_golden_wav: {name: what_time_is_it}
+      - transcript_matches: {max_wer: 0.2}
+      - transcribe_golden_wav: {name: tell_me_a_story}
+      - transcript_matches: {max_wer: 0.2}
+      - timings_recorded: {name: stt_golden}

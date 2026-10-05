@@ -1,0 +1,115 @@
+feature: A conversation with the robot feels like one (wake once, talk over it, it stops like a person)
+tier: [sim, hw, models]
+description: >
+  The listening behaviour of the conversation on the robot, with the golden utterances fed as
+  real 20 ms mic frames at the edge agent's mic input point (the same on the simulator and the
+  real robot; the real voice through the air, with the XVF3800's echo canceller, is in
+  wake_word_on_robot and open_mic_on_robot, hw only). A bare "Hey Jarvis." gets a short
+  "Yes?" once the 8 s wake window ends without speech, and the wake word never reaches the
+  LLM; the wake word, a 3 s pause and then the question is one turn. Talking over a long reply
+  is a barge-in, in wake-word mode without the wake word and in open mic: detected within
+  300 ms of the fed voice starting, the speech then goes on 250-500 ms (350 ms, then a short
+  fade) and stops, the brain's turn log has the reply truncated at the played_ms, and what was
+  said is the next turn. While the robot speaks, the SDK's speech wobble moves its head with
+  the audio (at least 1 degree, at most 15; no breathing); `[body.reachy] idle_sleep_s` (8 s
+  here) after the reply it goes back to rest with the motors off.
+scenarios:
+  - name: the head wobbles while the robot speaks, stays up, and rests after the idle time
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - llm_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true, follow_up_s: 0}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, body_options: {idle_sleep_s: 8}}
+      - robot_state_read: {control_mode: disabled}
+      - robot_wobbles_while_speaking: {client: lite, text: "Please tell me a short story about the moon, in three sentences."}
+      - robot_speaks_reply: {client: lite, min_ms: 2000}
+      - robot_sleeps_after_idle: {client: lite, seconds: 8}
+      - robot_back_at_rest: {within_s: 10}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: a bare wake word gets "Yes?"; the wake word, a pause and the question are one turn
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - llm_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true, follow_up_s: 0}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: wake_word}
+      - edge_listens: {client: lite, mode: wake_word}
+      - feed_golden_wav: {client: lite, name: hey_jarvis}
+      - wake_detected: {client: lite, model: hey_jarvis, word: hey jarvis, min_score: 0.5}
+      - mic_closed: {client: lite, reason: no_speech, opened_by: wake, within_s: 15}
+      - robot_speaks_reply: {client: lite, min_ms: 200}
+      - turn_logged: {kind: voice, reply: "Yes?"}
+      - feed_golden_wav: {client: lite, name: hey_jarvis_then_what_time_is_it}
+      - wake_detected: {client: lite, model: hey_jarvis, word: hey jarvis, min_score: 0.5}
+      - mic_closed: {client: lite, reason: vad_end, opened_by: wake, min_s: 1.0}
+      - voice_turn_transcribed: {client: lite, text: "What time is it?", max_wer: 0.35}
+      - listen_mark: lite
+      - robot_speaks_reply: {client: lite, min_ms: 300}
+      - turn_logged: {kind: voice}
+      - no_turn_for: {client: lite, seconds: 3}
+      - timings_recorded: {name: conversation_wake_on_robot}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: in wake-word mode, talking over a reply barges in without the wake word
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - llm_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true, follow_up_s: 0}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: wake_word}
+      - edge_types: {client: lite, text: "Please tell me a long story about a little robot who learns to paint, in at least six sentences."}
+      - robot_speaks_reply: {client: lite, wait_done: false}
+      - playback_progress_at_least: {client: lite, ms: 3000}
+      - feed_golden_wav: {client: lite, name: weather_in_paris}
+      - mic_opened: {client: lite, reason: barge_in, barge_in: true}
+      - barge_in_stops_speech: {client: lite}
+      - barge_in_detected_within: {ms: 300, source: feed}
+      - turn_truncated_at_played_ms
+      - golden_wav_fed: {client: lite}
+      - mic_closed: {client: lite, reason: vad_end, opened_by: barge_in}
+      - voice_turn_transcribed: {client: lite, max_wer: 0.35}
+      - robot_speaks_reply: {client: lite, min_ms: 300}
+      - turn_logged: {kind: voice}
+      - timings_recorded: {name: conversation_barge_in_wake_word_on_robot}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean
+
+  - name: in open mic, talking over a reply barges in and what was said is the next turn
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - llm_serves
+      - speech_server_running
+      - start_reachy_daemon
+      - start_brain: {engine: basic, speech: true, follow_up_s: 0}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host, listen: open_mic}
+      - edge_types: {client: lite, text: "Please tell me a long story about a little robot who learns to paint, in at least six sentences."}
+      - robot_speaks_reply: {client: lite, wait_done: false}
+      - playback_progress_at_least: {client: lite, ms: 3000}
+      - feed_golden_wav: {client: lite, name: weather_in_paris}
+      - mic_opened: {client: lite, reason: vad, barge_in: true}
+      - barge_in_stops_speech: {client: lite}
+      - barge_in_detected_within: {ms: 300, source: feed}
+      - turn_truncated_at_played_ms
+      - golden_wav_fed: {client: lite}
+      - mic_closed: {client: lite, reason: vad_end, opened_by: vad}
+      - voice_turn_transcribed: {client: lite, max_wer: 0.35}
+      - robot_speaks_reply: {client: lite, min_ms: 300}
+      - turn_logged: {kind: voice}
+      - timings_recorded: {name: conversation_barge_in_open_mic_on_robot}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean

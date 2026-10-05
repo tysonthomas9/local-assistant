@@ -1,0 +1,6 @@
+# Expressions of the Reachy Mini body ([body.reachy] expressions in config/assistant.toml).
+# The built-in ones map an expression to one of Pollen's recorded emotion moves
+# (pollen-robotics/reachy-mini-emotions-library); see EMOTION_MOVES in
+# packages/robot-reachy/src/assistant_robot_reachy/arbiter.py. This table adds expressions or
+# replaces built-in ones: name = "move name", e.g. happy = "cheerful1".
+[moves]
