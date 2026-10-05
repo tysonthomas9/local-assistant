@@ -18,6 +18,7 @@ scenarios:
       - start_edge_agent: {id: desk}
       - edge_types: {client: desk, text: "What is the capital of Italy? Answer in one word."}
       - robot_speaks_reply: {client: desk, min_ms: 300}
+      - edge_shows_reply: {client: desk, containing: Rome}
       - turn_logged: {kind: text, outcome: finished, ttft: true}
       - edge_types: {client: desk, text: "Tell me about Rome in five long sentences."}
       - crash_speech_worker: {during: tts}
