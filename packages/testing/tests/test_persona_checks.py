@@ -14,7 +14,7 @@ pytestmark = pytest.mark.unit
         "Here I go, watch me bust a move!",
         "I'll play some jazz for you now.",
         "Let me search the web for that.",
-        "I’m waving my arms at you!",
+        "I\u2019m waving my arms at you!",
     ],
 )
 def test_claims_are_caught(reply: str) -> None:
@@ -25,7 +25,7 @@ def test_claims_are_caught(reply: str) -> None:
     "reply",
     [
         "I'm afraid I can't dance yet; I have no arms or legs.",
-        "Sorry, I can’t play music yet, but I could tell you a joke.",
+        "Sorry, I can\u2019t play music yet, but I could tell you a joke.",
         "I cannot search the web yet.",
     ],
 )

@@ -120,7 +120,7 @@ CANNOT: tuple[tuple[str, str], ...] = (
     ("timers", "set timers, alarms or reminders, or tell the current time or date"),
     ("devices", "control lights, apps or other devices"),
     ("messages", "send messages, emails or calls"),
-    ("memory", "remember anything after this conversation ends"),
+    ("memory", "keep memories once this conversation is over"),
 )
 """What the assistant cannot do unless an ability with that name is registered."""
 
@@ -154,7 +154,9 @@ def capabilities_section(abilities: Sequence[Ability]) -> str:
     names = {a.name for a in abilities}
     can = [
         "talk: answer questions from what you already know (it may be out of date), explain, "
-        "chat, tell jokes and short stories"
+        "chat, tell jokes and short stories",
+        "remember everything said earlier in this conversation (what people tell you, their "
+        "name, what they like) and use it when asked",
     ]
     can += [a.does for a in abilities]
     cannot = [does for name, does in CANNOT if name not in names]
