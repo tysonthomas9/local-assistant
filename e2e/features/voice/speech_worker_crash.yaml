@@ -5,7 +5,8 @@ description: >
   port: a native crash (GGML's CUDA abort in the TTS) takes the whole worker with it and
   cannot be caught in Python. The brain (basic engine, the real LLM reachy-gemma4) speaks a
   long reply through a speech server of the scenario's own, whose worker is killed for real
-  (SIGKILL) while a TTS stream sends audio. The turn does not hang: the user is told the
+  (SIGKILL) while a TTS stream sends audio. The reply that had begun ends and the turn does not
+  hang: the user is told the
   speech server cannot be reached (speak text) and the turn log records the error. Nobody
   restarts anything: the supervisor starts a new worker on the same port and the next reply is
   spoken again. A shared speech server is never touched.
@@ -22,6 +23,7 @@ scenarios:
       - turn_logged: {kind: text, outcome: finished, ttft: true}
       - edge_types: {client: desk, text: "Tell me about Rome in five long sentences."}
       - crash_speech_worker: {during: tts}
+      - edge_shows_reply: {client: desk, containing: Rome}
       - edge_shows_reply: {client: desk, containing: "can't reach my speech server", within_s: 60}
       - turn_logged: {kind: text, outcome: error, error_contains: "127.0.0.1"}
       - speech_server_restarted: {within_s: 180}
