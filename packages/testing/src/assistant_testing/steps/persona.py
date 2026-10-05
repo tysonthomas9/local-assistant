@@ -47,6 +47,9 @@ ADMISSIONS: tuple[str, ...] = (
 )  # fmt: skip
 """Phrases that say it cannot (yet); an honest refusal has at least one."""
 
+MIN_JOKE_WORDS = 8
+"""Shorter than this is no setup with its punchline (a one-liner joke is longer)."""
+
 WAITING_FOR_ANSWER = ("give up", "want to hear", "any guesses", "can you guess", "guess what")
 """A joke that stops after its setup asks for an answer with one of these."""
 
@@ -70,8 +73,10 @@ def whole_joke_problems(reply: str) -> list[str]:
     text = reply.strip()
     problems: list[str] = []
     sentences = [s for s in re.split(r"(?<=[.!?…])\s+", text) if any(c.isalnum() for c in s)]
-    if len(sentences) < 2:
-        problems.append("one sentence: no setup and punchline")
+    if len(text.split()) < MIN_JOKE_WORDS:
+        problems.append(f"under {MIN_JOKE_WORDS} words: no setup and punchline")
+    if normalized(text).rstrip(" .!").endswith("knock knock"):
+        problems.append("a knock-knock setup alone")
     if text.endswith("?"):
         problems.append("it ends with a question (the setup, waiting for an answer)")
     waiting = [p for p in WAITING_FOR_ANSWER if p in normalized(text)]
@@ -145,7 +150,7 @@ async def reply_is_honest(
 async def reply_tells_whole_joke(
     ctx: ScenarioContext, client: str, ask: str = "Tell me a joke.", within_s: float = 120.0
 ) -> None:
-    """Ask for a joke: one reply has the setup and the punchline (at least two sentences, not
+    """Ask for a joke: one reply has the setup and the punchline (a one-liner or more, not
     ending on the setup's question, not waiting for a guess)."""
     turn = await _ask(ctx, client, ask, within_s)
     reply = str(turn.get("reply_text") or "")

@@ -34,14 +34,25 @@ def test_honest_refusals_pass(reply: str) -> None:
     assert admissions_in(reply)
 
 
-def test_a_whole_joke_passes() -> None:
-    joke = "Why did the robot go on holiday? It needed to recharge its batteries."
+@pytest.mark.parametrize(
+    "joke",
+    [
+        "Why did the robot go on holiday? It needed to recharge its batteries.",
+        "A skeleton walks into a bar and orders a beer and a mop.",
+    ],
+)
+def test_a_whole_joke_passes(joke: str) -> None:
     assert whole_joke_problems(joke) == []
 
 
 @pytest.mark.parametrize(
     "reply",
-    ["Why did the robot go on holiday?", "Knock knock. Want to hear who's there?", "Ha."],
+    [
+        "Why did the robot go on holiday?",
+        "Knock knock. Want to hear who's there?",
+        "Here is one: knock knock.",
+        "Ha.",
+    ],
 )
 def test_a_setup_alone_fails(reply: str) -> None:
     assert whole_joke_problems(reply)
