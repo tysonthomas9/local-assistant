@@ -21,6 +21,15 @@ default `--device`), `--stt-dtype` (auto, bf16, fp16, fp32), `--language`, `--on
 default (1.7B BF16 + Parakeet) takes about 6.8 GB; `--tts 0.6b --tts-quant Q8_0` about 4.1 GB,
 the size that leaves vLLM a 64k context when both share one 24 GB card (`[gpu] layout = "one"`).
 
+The models run in a worker process under a small supervisor that holds the port. A native
+crash in a model (GGML aborts the whole process on a CUDA error; Python cannot catch it) kills
+only the worker: the request in flight fails, the supervisor prints `WORKER-DIED ...` and
+starts a new worker on the same socket, which prints `READY ... restarts=1` (`/health` has
+`pid`, `supervisor_pid`, `restarts`). Requests sent meanwhile wait for it (about 10-15 s on a
+GPU) instead of being refused. A worker that dies before READY is not restarted, and more
+than 5 deaths in 10 minutes stop the supervisor (`GIVING-UP`). `--no-restart` runs the models
+in the one process.
+
 ## Bake-off
 
 `python -m assistant_speech.bakeoff --out <dir>` starts this server once per candidate (the

@@ -119,7 +119,7 @@ or SM100+ (FlashInfer) for it.
 
 `GATE_GPU=one` runs the gate this way. It leaves out the features that start a second LLM
 or speech server next to the stack's (servers_compared, llm_down, vllm_down,
-speech_server_down): one card has no room for a second copy, and putting the stack's vLLM to sleep moves its 16 GB of weights into
+speech_server_down, speech_worker_crash): one card has no room for a second copy, and putting the stack's vLLM to sleep moves its 16 GB of weights into
 CPU memory. `GATE_GPU=two` runs them.
 
 The cost is speed (measured with the sim robot on a single-RTX 3090 machine): TTS and LLM share the card, so the TTS first audio takes about 95 ms

@@ -28,6 +28,17 @@ It serves one session: model work runs on one worker thread, in arrival order. A
 goes away mid-stream stops its TTS at the next chunk. The first line on stdout is
 `READY url=http://127.0.0.1:<port> ...` once both models are loaded and warmed up; `STOPPED`
 is the last.
+
+The models run in a worker process under a small supervisor (this process, which binds the
+port and never loads a model). A native crash in a model (GGML aborts the process on a CUDA
+error) kills only the worker: the request in flight fails (its stream ends incomplete), the
+supervisor prints `WORKER-DIED ...` and starts a new worker on the same socket, which prints
+`READY` again (`restarts=1`, and `/health` `pid`, `supervisor_pid`, `restarts`). Requests made
+meanwhile wait in the socket's backlog (about 10-15 s on a GPU) instead of being refused. A
+worker that dies before READY is not restarted (the supervisor exits with its code), and more
+than `MAX_RESTARTS` deaths in `RESTART_WINDOW_S` end the supervisor (`GIVING-UP`). SIGTERM
+and SIGINT go to the worker; a killed supervisor takes the worker with it (Linux
+PR_SET_PDEATHSIG). `--no-restart` loads the models in this one process, as before.
 """
 
 import argparse
@@ -66,6 +77,9 @@ TTS_CHUNK_FRAMES = 8
 """Codec frames per streamed TTS chunk (12.5 frames/s: about 0.64 s of audio per chunk)."""
 TTS_TOKENS_PER_S = 12.5
 REQUEST_LOG_SIZE = 200
+MAX_RESTARTS = 5
+RESTART_WINDOW_S = 600.0
+"""The supervisor gives up after more than MAX_RESTARTS worker deaths in RESTART_WINDOW_S."""
 MAX_TEXT_CHARS = 2000
 
 
@@ -298,6 +312,8 @@ def build_app(service: SpeechService, port_ref: dict[str, int]) -> Any:
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
             "gpu_memory_mib": models.gpu_memory_mib(),
             "pid": os.getpid(),
+            "supervisor_pid": int(os.environ.get("ASSISTANT_SPEECH_SUPERVISOR", "0")) or None,
+            "restarts": int(os.environ.get("ASSISTANT_SPEECH_RESTARTS", "0")),
             "port": port_ref["port"],
         }
 
@@ -362,6 +378,86 @@ def warm_up(models: Models) -> float:
     return time.monotonic() - started
 
 
+def _die_with_parent() -> None:
+    """In the worker, before exec: SIGKILL when the supervisor dies (Linux), so a killed
+    supervisor never leaves the models on the GPU."""
+    import ctypes
+    import signal
+
+    with contextlib.suppress(OSError, AttributeError):
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+    if os.getppid() == 1:  # the supervisor was already gone
+        os._exit(1)
+
+
+def supervise(sock: socket.socket, argv: list[str]) -> int:
+    """Run the models in a worker process on the supervisor's listening socket, and start a
+    new worker when one dies after it was ready (a native TTS crash takes the whole process
+    with it: it cannot be caught in Python). Requests made meanwhile wait in the socket's
+    backlog for the new worker. A worker that dies before READY is not restarted (bad options,
+    no GPU, no weights): its exit code is the supervisor's. SIGTERM/SIGINT go to the worker."""
+    import signal
+    import subprocess
+
+    worker: subprocess.Popen[bytes] | None = None
+    stopping = False
+
+    def forward(signum: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+        if worker is not None and worker.poll() is None:
+            worker.send_signal(signum)
+
+    signal.signal(signal.SIGTERM, forward)
+    signal.signal(signal.SIGINT, forward)
+    restarts: list[float] = []
+    while True:
+        ready_r, ready_w = os.pipe()
+        env = os.environ | {
+            "ASSISTANT_SPEECH_RESTARTS": str(len(restarts)),
+            "ASSISTANT_SPEECH_SUPERVISOR": str(os.getpid()),
+        }
+        command = [sys.executable, "-m", "assistant_speech", *argv]
+        command += ["--worker-fd", str(sock.fileno()), "--ready-fd", str(ready_w)]
+        worker = subprocess.Popen(
+            command,
+            pass_fds=(sock.fileno(), ready_w),
+            env=env,
+            preexec_fn=_die_with_parent,
+            start_new_session=True,  # a terminal's Ctrl-C reaches the worker once, via forward()
+        )
+        os.close(ready_w)
+        code = worker.wait()
+        os.set_blocking(ready_r, False)
+        try:
+            was_ready = bool(os.read(ready_r, 1))
+        except BlockingIOError:
+            was_ready = False
+        os.close(ready_r)
+        if stopping or not was_ready:
+            return code if code >= 0 else 128 - code
+        now = time.monotonic()
+        restarts = [t for t in restarts if now - t < RESTART_WINDOW_S] + [now]
+        how = f"signal {-code}" if code < 0 else f"exit {code}"
+        line("WORKER-DIED", pid=worker.pid, how=how.replace(" ", "_"), restarts=len(restarts))
+        if len(restarts) > MAX_RESTARTS:
+            line("GIVING-UP", restarts=len(restarts), window_s=RESTART_WINDOW_S)
+            return 1
+
+
+def _without_port(argv: list[str]) -> list[str]:
+    out: list[str] = []
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+        elif arg == "--port":
+            skip = True
+        elif not arg.startswith("--port="):
+            out.append(arg)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m assistant_speech")
     parser.add_argument("--host", default="127.0.0.1", help="loopback only")
@@ -379,15 +475,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--language", default="english")
     parser.add_argument("--online", action="store_true", help="allow model downloads")
+    parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="load the models in this process (no supervisor: a native crash ends the server)",
+    )
+    parser.add_argument("--worker-fd", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--ready-fd", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.host not in ("127.0.0.1", "::1", "localhost"):
         parser.error("the speech server binds to loopback only")
     if not args.online:
         os.environ["HF_HUB_OFFLINE"] = "1"
 
-    sock = socket.socket(socket.AF_INET6 if ":" in args.host else socket.AF_INET)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((args.host, args.port))
+    if args.worker_fd is not None:
+        sock = socket.socket(fileno=args.worker_fd)
+    else:
+        sock = socket.socket(socket.AF_INET6 if ":" in args.host else socket.AF_INET)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((args.host, args.port))
+        # From here on a request waits (in the backlog) for a worker instead of being refused.
+        sock.listen(128)
+        if not args.no_restart:
+            port = sock.getsockname()[1]
+            given = sys.argv[1:] if argv is None else list(argv)
+            return supervise(sock, [*_without_port(given), "--port", str(port)])
     port = sock.getsockname()[1]
 
     started = time.monotonic()
@@ -408,7 +520,6 @@ def main(argv: list[str] | None = None) -> int:
 
     config = uvicorn.Config(app, log_level="warning", access_log=False, lifespan="off")
     server = uvicorn.Server(config)
-    sock.listen(128)  # from here on a request waits for uvicorn instead of being refused
     line(
         "READY",
         url=f"http://{args.host}:{port}",
@@ -423,7 +534,11 @@ def main(argv: list[str] | None = None) -> int:
         tts=models.tts_name,
         tts_quant=models.tts_quant,
         pid=os.getpid(),
+        restarts=os.environ.get("ASSISTANT_SPEECH_RESTARTS", "0"),
     )
+    if args.ready_fd is not None:
+        os.write(args.ready_fd, b"R")
+        os.close(args.ready_fd)
     try:
         server.run(sockets=[sock])
     finally:

@@ -294,18 +294,94 @@ async def start_speech_server(ctx: ScenarioContext) -> None:
     ctx.state["speech"] = await _start_own(ctx)
 
 
+async def _gone(pid: int, within_s: float) -> bool:
+    deadline = time.monotonic() + within_s
+    while Path(f"/proc/{pid}").exists():
+        if time.monotonic() > deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
 @step("kill_speech_server")
 async def kill_speech_server(ctx: ScenarioContext) -> None:
     """Kill the scenario's speech server (SIGKILL); it no longer answers and its GPU memory
-    is released."""
+    is released (its model worker dies with its supervisor)."""
     speech = _speech(ctx)
     assert speech.get("owned"), "the speech server is shared, not the scenario's: not killed"
+    before = await asyncio.to_thread(_health, speech["url"])
     proc = ctx.processes.get(SPEECH)
     proc.send_signal(signal.SIGKILL)
     await proc.wait(15)
+    if before is not None and before.get("pid"):
+        worker = int(before["pid"])
+        assert await _gone(worker, 15), f"the speech worker (pid {worker}) outlived its supervisor"
     health = await asyncio.to_thread(_health, speech["url"])
     assert health is None, f"the speech server at {speech['url']} still answers after the kill"
     print(f"speech server killed (exit {proc.proc.returncode})")
+
+
+@step("crash_speech_worker")
+async def crash_speech_worker(
+    ctx: ScenarioContext, during: str = "tts", within_s: float = 60.0
+) -> None:
+    """Kill the scenario's speech model worker for real (SIGKILL: what a native crash such as
+    GGML's CUDA abort does) while a TTS stream is sending audio (`during: tts`) or at once
+    (`during: idle`). Its supervisor, the server process the scenario started, stays."""
+    speech = _speech(ctx)
+    assert speech.get("owned"), "the speech server is shared, not the scenario's: not crashed"
+    health = await asyncio.to_thread(_health, speech["url"])
+    assert health is not None, f"the speech server at {speech['url']} does not answer"
+    supervisor = health.get("supervisor_pid")
+    assert supervisor, "the speech server runs without its supervisor (--no-restart?)"
+    worker = int(health["pid"])
+    assert during in ("tts", "idle"), f"during: tts or idle, not {during!r}"
+    if during == "tts":
+        deadline = time.monotonic() + within_s
+        while True:
+            data, _ = await asyncio.to_thread(
+                _request, "GET", f"{speech['url']}/requests", None, timeout_s=5
+            )
+            running = [
+                r for r in json.loads(data)
+                if r.get("kind") == "tts" and r.get("outcome") == "running" and "ttfa_ms" in r
+            ]  # fmt: skip
+            if running:
+                print(f"TTS {running[-1]['id']} is streaming ({running[-1]['chars']} chars)")
+                break
+            assert time.monotonic() < deadline, f"no TTS stream within {within_s:.0f} s"
+            await asyncio.sleep(0.02)
+    os.kill(worker, signal.SIGKILL)
+    assert await _gone(worker, 15), f"the speech worker (pid {worker}) survived SIGKILL"
+    assert ctx.processes.get(SPEECH).proc.returncode is None, "the supervisor died too"
+    speech["crashed_worker"] = {"pid": worker, "restarts": int(health.get("restarts", 0))}
+    print(f"speech worker pid {worker} killed (supervisor pid {supervisor} still runs)")
+
+
+@step("speech_server_restarted")
+async def speech_server_restarted(ctx: ScenarioContext, within_s: float = 120.0) -> None:
+    """After `crash_speech_worker`: the supervisor reported the death (WORKER-DIED) and a new
+    worker answers on the same URL (a new pid, one more restart), with the same models."""
+    speech = _speech(ctx)
+    crashed = speech.get("crashed_worker")
+    assert crashed is not None, "no worker crashed; use crash_speech_worker first"
+    started = time.monotonic()
+    deadline = started + within_s
+    while True:
+        health = await asyncio.to_thread(_health, speech["url"])
+        if health is not None and health.get("pid") != crashed["pid"]:
+            break
+        assert time.monotonic() < deadline, f"no new speech worker within {within_s:.0f} s"
+        await asyncio.sleep(0.5)
+    assert int(health.get("restarts", 0)) == crashed["restarts"] + 1, f"restarts: {health}"
+    _check_health(health)
+    for key in ("stt_model", "tts_model", "tts_quant"):
+        assert health[key] == speech["health"][key], f"{key}: {health[key]} after the restart"
+    died = [x for x in ctx.processes.get(SPEECH).lines if x.startswith("WORKER-DIED ")]
+    assert died, "the supervisor did not report the worker's death"
+    print(died[-1])
+    print(f"new worker pid {health['pid']} (restart {health['restarts']}) answers "
+          f"{time.monotonic() - started:.1f} s after the crash was seen")  # fmt: skip
 
 
 @step("stop_speech_server")
