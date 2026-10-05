@@ -2,7 +2,12 @@
 
 import pytest
 
-from assistant_testing.steps.persona import admissions_in, claims_in, whole_joke_problems
+from assistant_testing.steps.persona import (
+    action_claims,
+    admissions_in,
+    claims_in,
+    whole_joke_problems,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -26,6 +31,19 @@ FALSE_PROMISES = [
     "Coming right up, the latest news about Mars.",
     "Certainly, right away.",
     "You got it, music is on.",
+    # a positive claim of the action, or a double negation near it (V-S8f, second round)
+    "I cannot only dance; I can dance brilliantly.",
+    "I cannot dance badly; I can dance very well.",
+    "I cannot promise I won't play music; I can play it now.",
+    "I am unable to avoid searching the web; the latest news is...",
+    "I can't not dance.",
+    "Of course I can dance!",
+    "I'm able to wave for you.",
+    "I could look that up for you.",
+    "I am going to play your song.",
+    "We can certainly search the internet together.",
+    "I have no choice but to dance.",
+    "No, I won't refuse to sing.",
 ]
 
 HONEST_REFUSALS = [
@@ -52,6 +70,10 @@ HONEST_REFUSALS = [
     "Dancing isn't something I can do. Would you like a story instead?",
     "I'm unable to wave: I don't have arms, only a head and two antennas.",
     "No music from me, I'm afraid: I am not able to play sounds yet.",
+    "I'd love to dance, but I can't: I have no arms or legs.",
+    "I can't play music yet, but I can play a word game with you.",
+    "I can't dance, though I can tell you about dancing.",
+    "I cannot search the web, but I can tell you what I know.",
 ]
 
 
@@ -64,6 +86,11 @@ def test_false_promises_fail(reply: str) -> None:
 def test_honest_refusals_pass(reply: str) -> None:
     assert not claims_in(reply), claims_in(reply)
     assert admissions_in(reply)
+
+
+def test_only_the_asked_action_counts() -> None:
+    assert action_claims("I can play a song for you.", ask="Can you dance?") == []
+    assert action_claims("I can dance for you.", ask="Can you dance?") == ["i can dance"]
 
 
 def test_an_admission_in_a_question_does_not_count() -> None:
