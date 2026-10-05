@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from assistant_brain.adapters.priority_gate import RequestClass
+from assistant_brain.persona import BodyInfo
 from assistant_core.config import AssistantDef
 
 MIC_RATE = 16000
@@ -33,6 +34,8 @@ class SessionInfo:
     session_id: str
     device_id: str
     assistant: AssistantDef
+    body: BodyInfo | None = None
+    """The edge's body (kind and capabilities, from its `hello`), for the system prompt."""
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,8 @@ class TurnMetrics:
     """From the start of `respond` to the reply's first audio."""
     voice: str | None = None
     tts_requests: int = 0
+    persona: str | None = None
+    """The marker of the persona file in the system prompt (`Persona.marker`)."""
     truncation: dict[str, object] | None = None
     """Set by `interrupt`: what of the reply was heard (`played_ms`, `heard_text`, ...)."""
     extra: dict[str, object] = field(default_factory=dict)

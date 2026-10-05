@@ -3,7 +3,8 @@
 A record holds the input (for a voice turn, its STT transcript), the reply, every turn state
 with its time (ms since the turn started), the LLM timings (queued, time to first token,
 total), the speech timings (`speech`: STT, the TTS's first audio, the reply's first audio,
-the voice), what was heard of a reply cut by a barge-in (`truncated`: `played_ms`,
+the voice), the persona file the reply's system prompt was built from (`persona`), what
+was heard of a reply cut by a barge-in (`truncated`: `played_ms`,
 `heard_text`, ...) and the outcome: `finished`, `interrupted`, `error` or `abandoned` (the
 edge went away).
 """
@@ -35,6 +36,8 @@ class TurnRecord:
     states: list[dict[str, object]] = field(default_factory=list)
     llm: dict[str, object] = field(default_factory=dict)
     speech: dict[str, object] = field(default_factory=dict)
+    persona: str | None = None
+    """The persona file in the system prompt (`<id>.md#<sha256 prefix>`), for an LLM reply."""
     truncated: dict[str, object] | None = None
     outcome: Outcome | None = None
     error: str | None = None

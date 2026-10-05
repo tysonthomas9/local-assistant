@@ -6,9 +6,10 @@ Two modes in the skeleton:
   (16 kHz), so the whole voice path (mic window -> uplink -> reply stream -> playback clock)
   runs without any model.
 - `basic`: the reply comes from the real LLM through `LlmClient` (the priority gate, class
-  `voice` for the user's turns and `proactive` for the assistant's own), with the turn's
-  assistant's persona and the session's recent history. With speech (`[engine].speech`, an
-  `SttClient` and a `TtsClient` on the speech server):
+  `voice` for the user's turns and `proactive` for the assistant's own), with the system
+  prompt of `assistant_brain.persona` (the turn's assistant's persona file, the edge's body,
+  and what it can do: chat only, `ABILITIES` is empty) and the session's recent history.
+  With speech (`[engine].speech`, an `SttClient` and a `TtsClient` on the speech server):
   - speech input is transcribed first (`InputTranscript`; nothing heard: no reply). In a
     window a wake word opened, a transcript starting with the wake word loses it (the LLM
     never gets it; `strip_wake_word`), and a bare wake (nothing else said) is answered with
@@ -46,6 +47,7 @@ from assistant_brain.engine import (
     TurnMetrics,
     UserTurn,
 )
+from assistant_brain.persona import Ability, BodyInfo, Persona, Personas, system_prompt
 from assistant_core.config import AssistantDef
 
 LLM_DOWN_REPLY = "Sorry, I can't reach my language model right now. Please try again in a moment."
@@ -63,14 +65,13 @@ never just one or two words."""
 _SENTENCE_END = re.compile(r"[.!?…]+[\"')\]]*(?=\s)|\n+")
 
 
-def persona_prompt(assistant: AssistantDef) -> str:
-    """The system prompt (TODO(phase 4): config/personas/<persona>.md and memory blocks)."""
-    name = assistant.id.capitalize()
-    return (
-        f"You are {name}, a friendly little desk robot (a Reachy Mini) and voice assistant. "
-        "Your replies are spoken aloud: answer in one to three short sentences of plain text, "
-        "with no markdown, lists or emoji."
-    )
+ABILITIES: tuple[Ability, ...] = ()
+"""The tools and skills this engine offers the LLM: none yet (chat only)."""
+
+
+def persona_prompt(assistant: AssistantDef, persona: Persona, body: BodyInfo | None) -> str:
+    """The system prompt (`persona.system_prompt`) with this engine's abilities."""
+    return system_prompt(assistant.id.capitalize(), persona, body, ABILITIES)
 
 
 class SentenceSplitter:
@@ -196,9 +197,12 @@ class LlmSession:
         llm: LlmClient,
         stt: SttClient | None = None,
         tts: TtsClient | None = None,
+        *,
+        personas: Personas,
     ) -> None:
         self.info = info
         self.llm = llm
+        self.personas = personas
         self.stt = stt
         self.tts = tts
         self.history: list[dict[str, Any]] = []
@@ -235,8 +239,10 @@ class LlmSession:
                     yield event
             return  # nothing was said
         user = {"role": "user", "content": text}
+        persona = self.personas.get(assistant.persona)
+        metrics.persona = persona.marker
         messages = [
-            {"role": "system", "content": persona_prompt(assistant)},
+            {"role": "system", "content": persona_prompt(assistant, persona, self.info.body)},
             *self.history[-self.max_messages :],
             user,
         ]
@@ -384,11 +390,14 @@ class BasicTurnEngine:
         llm: LlmClient | None = None,
         stt: SttClient | None = None,
         tts: TtsClient | None = None,
+        *,
+        personas: Personas | None = None,
     ) -> None:
-        if mode == "basic" and llm is None:
-            raise ValueError("the basic engine's text mode needs an LLM client")
+        if mode == "basic" and (llm is None or personas is None):
+            raise ValueError("the basic engine's text mode needs an LLM client and personas")
         self.name: Literal["echo", "basic"] = mode
         self.llm = llm
+        self.personas = personas
         self.stt = stt
         self.tts = tts
 
@@ -396,7 +405,8 @@ class BasicTurnEngine:
         if self.name == "echo":
             return EchoSession()
         assert self.llm is not None
-        return LlmSession(info, self.llm, self.stt, self.tts)
+        assert self.personas is not None
+        return LlmSession(info, self.llm, self.stt, self.tts, personas=self.personas)
 
     async def aclose(self) -> None:
         for client in (self.stt, self.tts):

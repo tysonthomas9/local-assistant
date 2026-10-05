@@ -28,6 +28,7 @@ from assistant_brain.admin import AdminServer
 from assistant_brain.bus import EventBus
 from assistant_brain.console import emit
 from assistant_brain.engine.basic import BasicTurnEngine
+from assistant_brain.persona import Personas
 from assistant_brain.router import Router
 from assistant_brain.sessions import SessionManager
 from assistant_brain.turnlog import TurnLog
@@ -55,7 +56,14 @@ async def serve(config: AssistantConfig, config_dir: Path, engine_mode: str, tok
         llm = LlmClient(config.llm, gate)
         if config.engine.speech:
             stt, tts = SttClient(config.stt), TtsClient(config.tts)
-    engine = BasicTurnEngine("echo" if engine_mode == "echo" else "basic", llm, stt, tts)
+    personas: Personas | None = None
+    if engine_mode == "basic":
+        personas = Personas(
+            config_dir / "personas", sorted({a.persona for a in router.assistants.values()})
+        )
+    engine = BasicTurnEngine(
+        "echo" if engine_mode == "echo" else "basic", llm, stt, tts, personas=personas
+    )
     sessions = SessionManager(
         bus=bus, router=router, engine=engine, turns=turns, follow_up_s=config.brain.follow_up_s
     )

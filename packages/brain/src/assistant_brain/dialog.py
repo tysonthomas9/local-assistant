@@ -335,6 +335,7 @@ class DialogManager:
                     emit("BRAIN-ERROR", {"detail": error}, device=self.session.device_id, turn=tid)
                     await self._speak_text(record, exc.spoken)
         finally:
+            record.persona = metrics.persona
             record.llm = {
                 k: (round(v, 1) if isinstance(v, float) else v)
                 for k, v in {

@@ -14,6 +14,7 @@ from assistant_brain.bus import EventBus
 from assistant_brain.console import emit
 from assistant_brain.dialog import DialogManager
 from assistant_brain.engine import EngineSession, SessionInfo, TurnEngine
+from assistant_brain.persona import BodyInfo
 from assistant_brain.router import Router
 from assistant_brain.turnlog import TurnLog
 from assistant_contracts.capabilities import Capabilities
@@ -119,7 +120,12 @@ class SessionManager:
             assistant=self.router.default,
         )
         session.engine = await self.engine.open_session(
-            SessionInfo(conn.session_id, hello.device_id, session.assistant)
+            SessionInfo(
+                conn.session_id,
+                hello.device_id,
+                session.assistant,
+                BodyInfo(kind=hello.body.kind, capabilities=caps),
+            )
         )
 
         async def send(message: Envelope, device: str = hello.device_id) -> bool:
