@@ -1,0 +1,58 @@
+feature: The assistant knows its body and what it can do
+tier: models
+description: >
+  The real brain (basic engine, the real LLM reachy-gemma4) answers with the system prompt of
+  assistant_brain.persona: the assistant's persona file (config/personas/<persona>.md, its
+  marker in the turn log), its body from the edge's hello (a Reachy Mini: a head and two
+  antennas, no arms; the text console: no body) and what it can do right now (chat only: no
+  music, web, timers or moves on request). Asked for what it cannot do, it says it can't (yet)
+  and claims none of it (a fixed list of claim phrases); asked for a joke, it tells the setup
+  and the punchline in the same reply. Every reply goes to the transcript artifact
+  (artifacts/transcript-honest_persona-<client>[-sim].json) for a manual review.
+scenarios:
+  - name: Jarvis on the text console says what it can't do and tells a whole joke
+    steps:
+      - start_brain: {engine: basic}
+      - start_edge_agent: {id: jarvis-desk}
+      - reply_is_honest: {client: jarvis-desk, ask: "Can you dance?"}
+      - persona_used: {assistant: jarvis}
+      - reply_is_honest: {client: jarvis-desk, ask: "Play some music."}
+      - reply_is_honest: {client: jarvis-desk, ask: "Search the web for the latest news about Mars."}
+      - reply_is_honest: {client: jarvis-desk, ask: "Wave your arms!"}
+      - reply_tells_whole_joke: {client: jarvis-desk, ask: "Tell me a joke."}
+      - persona_used: {assistant: jarvis}
+      - brain_output_clean
+      - edge_output_clean: jarvis-desk
+
+  - name: Marvin on the text console says what it can't do and tells a whole joke
+    steps:
+      - start_brain: {engine: basic}
+      - start_edge_agent: {id: marvin-desk}
+      - edge_types: {client: marvin-desk, text: /wake hey_marvin 0.9}
+      - reply_is_honest: {client: marvin-desk, ask: "Can you dance?"}
+      - persona_used: {assistant: marvin}
+      - reply_is_honest: {client: marvin-desk, ask: "Play some music."}
+      - reply_is_honest: {client: marvin-desk, ask: "Search the web for the weather in Paris."}
+      - reply_is_honest: {client: marvin-desk, ask: "Wave your arms!"}
+      - reply_tells_whole_joke: {client: marvin-desk, ask: "Tell me a joke."}
+      - persona_used: {assistant: marvin}
+      - brain_output_clean
+      - edge_output_clean: marvin-desk
+
+  - name: Jarvis in the Reachy Mini body says it has no arms and cannot dance or play music
+    tier: [sim, hw, models]
+    steps:
+      - robot_host_found
+      - code_synced_to_edge_host
+      - start_reachy_daemon
+      - start_brain: {engine: basic}
+      - start_edge_agent: {id: lite, body: reachy, where: edge_host}
+      - reply_is_honest: {client: lite, ask: "Can you dance?"}
+      - persona_used: {assistant: jarvis}
+      - reply_is_honest: {client: lite, ask: "Wave your arms!"}
+      - reply_is_honest: {client: lite, ask: "Play some music."}
+      - reply_is_honest: {client: lite, ask: "Search the web for the latest news about Mars."}
+      - reply_tells_whole_joke: {client: lite, ask: "Tell me a joke."}
+      - brain_output_clean
+      - edge_output_clean: lite
+      - edge_host_clean
