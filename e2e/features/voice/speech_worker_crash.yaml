@@ -24,6 +24,8 @@ scenarios:
       - edge_types: {client: desk, text: "Tell me about Rome in five long sentences."}
       - crash_speech_worker: {during: tts}
       - edge_shows_reply: {client: desk, containing: Rome}
+      - playback_reported: {client: desk, stream: 2, state: started, within_s: 30}
+      - playback_reported: {client: desk, stream: 2, state: done, within_s: 30}
       - edge_shows_reply: {client: desk, containing: "can't reach my speech server", within_s: 60}
       - turn_logged: {kind: text, outcome: error, error_contains: "127.0.0.1"}
       - speech_server_restarted: {within_s: 180}
