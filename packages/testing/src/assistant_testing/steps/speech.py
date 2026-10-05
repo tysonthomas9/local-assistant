@@ -633,6 +633,22 @@ async def playback_progress_at_least(
             return
 
 
+@step("robot_reply_cut_short")
+async def robot_reply_cut_short(ctx: ScenarioContext, client: str, within_s: float = 30.0) -> None:
+    """The next reply that starts playing on the edge's speaker also ends (`done`, whatever it
+    had played): a reply whose speech stopped mid-way (e.g. the speech server died)."""
+    agent = _client_name(client)
+    started = await _expect(
+        ctx, agent, {"PLAYBACK"}, within_s, fields={"state": "started"}, what="playback started"
+    )
+    stream = started.fields["stream"]
+    done = await _expect(
+        ctx, agent, {"PLAYBACK"}, within_s, fields={"stream": stream, "state": "done"},
+        what=f"playback done (stream {stream})",
+    )  # fmt: skip
+    print(f"stream {stream} cut short: {done.text}")
+
+
 @step("robot_speaks_reply")
 async def robot_speaks_reply(
     ctx: ScenarioContext,

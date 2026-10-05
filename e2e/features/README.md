@@ -400,6 +400,7 @@ without punctuation.
 | `speech_server_running` | none | Uses the speech server serving on 127.0.0.1:8772, else starts one of the scenario's own on GPU1 (fails if GPU1 has less than 8 GB free); checks it runs on a GPU |
 | `start_speech_server` / `stop_speech_server` / `kill_speech_server` / `restart_speech_server` | none | A speech server of the scenario's own on a free loopback port; stopped (SIGTERM) or killed for real (SIGKILL), then restarted on the same port; it must stop or start answering |
 | `crash_speech_worker` | `during: tts \| idle = tts`, `within_s = 60` | Kills the scenario's own speech server's model worker for real (SIGKILL, what a native GGML/CUDA abort does), with `tts` once a TTS stream is sending audio (`/requests`); its supervisor must stay up |
+| `robot_reply_cut_short` | `client`, `within_s = 30` | The next reply that starts playing on the edge's speaker also ends (`done`), however little it played (speech stopped mid-reply) |
 | `speech_server_restarted` | `within_s = 120` | After `crash_speech_worker`: the supervisor printed `WORKER-DIED` and a new worker (new pid, one more restart, the same models) answers on the same URL |
 | `llm_serves` | `server: vllm \| ollama?`, `model = reachy-gemma4` | The stack's LLM server (127.0.0.1:8773, else the scenario's own) is the configured kind (or `server`), answers, has the model and holds it entirely on GPU0 (a sleeping vLLM is woken) |
 | `transcribe_golden_wav` | `name` | The speech server transcribes `tests/fixtures/audio/<name>.wav` (STT time recorded) |
