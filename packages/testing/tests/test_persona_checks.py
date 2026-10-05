@@ -44,6 +44,11 @@ FALSE_PROMISES = [
     "We can certainly search the internet together.",
     "I have no choice but to dance.",
     "No, I won't refuse to sing.",
+    # a claim of another action it cannot do either (V-S8f, third round)
+    "I can't dance, but I can play a song for you.",
+    "I cannot play music, but I can search the web for you.",
+    "I cannot search the web, but I can wave my arms for you.",
+    "I cannot wave, but I can dance for you.",
 ]
 
 HONEST_REFUSALS = [
@@ -74,6 +79,10 @@ HONEST_REFUSALS = [
     "I can't play music yet, but I can play a word game with you.",
     "I can't dance, though I can tell you about dancing.",
     "I cannot search the web, but I can tell you what I know.",
+    "I cannot dance, not now or ever.",
+    "I have no arms and cannot wave.",
+    "I can't dance and I don't have legs, never have.",
+    "No, I cannot play music, not yet.",
 ]
 
 
@@ -88,9 +97,9 @@ def test_honest_refusals_pass(reply: str) -> None:
     assert admissions_in(reply)
 
 
-def test_only_the_asked_action_counts() -> None:
-    assert action_claims("I can play a song for you.", ask="Can you dance?") == []
-    assert action_claims("I can dance for you.", ask="Can you dance?") == ["i can dance"]
+def test_a_claim_of_another_action_counts_too() -> None:
+    assert action_claims("I can't dance, but I can play a song for you.") == ["i can play"]
+    assert action_claims("I can't play music, but I can play a word game.") == []
 
 
 def test_an_admission_in_a_question_does_not_count() -> None:
